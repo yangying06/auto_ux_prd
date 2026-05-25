@@ -1,0 +1,361 @@
+<!DOCTYPE html><html class="dark" lang="en"><head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<title>GameUX PromptForge</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&amp;family=Inter:wght@400;600;700&amp;display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "on-tertiary-container": "#008a5f",
+                    "tertiary-container": "#000c05",
+                    "surface-container-lowest": "#0e0e0e",
+                    "on-secondary-container": "#e6ecff",
+                    "secondary-fixed-dim": "#adc6ff",
+                    "surface-bright": "#3a3939",
+                    "on-error-container": "#ffdad6",
+                    "on-tertiary": "#003824",
+                    "surface-container-low": "#1c1b1b",
+                    "on-surface": "#e5e2e1",
+                    "secondary-fixed": "#d8e2ff",
+                    "on-tertiary-fixed": "#002113",
+                    "inverse-primary": "#5f5e60",
+                    "tertiary-fixed-dim": "#4edea3",
+                    "surface-container-highest": "#353434",
+                    "outline": "#919095",
+                    "on-secondary-fixed": "#001a42",
+                    "surface-dim": "#141313",
+                    "surface-container": "#201f1f",
+                    "background": "#141313",
+                    "error-container": "#93000a",
+                    "primary-fixed-dim": "#c8c6c8",
+                    "outline-variant": "#47464a",
+                    "on-primary-fixed": "#1c1b1d",
+                    "inverse-on-surface": "#313030",
+                    "secondary": "#adc6ff",
+                    "secondary-container": "#0566d9",
+                    "on-secondary": "#002e6a",
+                    "primary-fixed": "#e5e1e4",
+                    "on-error": "#690005",
+                    "on-tertiary-fixed-variant": "#005236",
+                    "on-secondary-fixed-variant": "#004395",
+                    "surface-variant": "#353434",
+                    "surface-tint": "#c8c6c8",
+                    "surface": "#141313",
+                    "error": "#ffb4ab",
+                    "primary-container": "#09090b",
+                    "on-primary": "#313032",
+                    "on-surface-variant": "#c8c5ca",
+                    "inverse-surface": "#e5e2e1",
+                    "tertiary": "#4edea3",
+                    "on-primary-fixed-variant": "#474649",
+                    "tertiary-fixed": "#6ffbbe",
+                    "on-background": "#e5e2e1",
+                    "on-primary-container": "#7a787b",
+                    "surface-container-high": "#2b2a2a",
+                    "primary": "#c8c6c8"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0.25rem",
+                    "lg": "0.5rem",
+                    "xl": "0.75rem",
+                    "full": "9999px"
+            },
+            "spacing": {
+                    "xs": "4px",
+                    "base": "4px",
+                    "lg": "24px",
+                    "md": "16px",
+                    "margin-desktop": "32px",
+                    "sm": "8px",
+                    "margin-mobile": "16px",
+                    "xl": "48px",
+                    "gutter": "16px"
+            },
+            "fontFamily": {
+                    "code-sm": ["JetBrains Mono"],
+                    "headline-md": ["Inter"],
+                    "headline-sm": ["Inter"],
+                    "display-lg": ["Inter"],
+                    "body-md": ["Inter"],
+                    "label-md": ["JetBrains Mono"],
+                    "body-lg": ["Inter"]
+            },
+            "fontSize": {
+                    "code-sm": ["12px", {"lineHeight": "18px", "fontWeight": "400"}],
+                    "headline-md": ["24px", {"lineHeight": "32px", "letterSpacing": "-0.01em", "fontWeight": "600"}],
+                    "headline-sm": ["18px", {"lineHeight": "24px", "fontWeight": "600"}],
+                    "display-lg": ["48px", {"lineHeight": "56px", "letterSpacing": "-0.02em", "fontWeight": "700"}],
+                    "body-md": ["14px", {"lineHeight": "20px", "fontWeight": "400"}],
+                    "label-md": ["12px", {"lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "500"}],
+                    "body-lg": ["16px", {"lineHeight": "24px", "fontWeight": "400"}]
+            }
+          }
+        }
+      }
+    </script>
+<style>
+        .blueprint-grid {
+            background-image: linear-gradient(to right, rgba(145, 144, 149, 0.05) 1px, transparent 1px),
+                              linear-gradient(to bottom, rgba(145, 144, 149, 0.05) 1px, transparent 1px);
+            background-size: 32px 32px;
+        }
+        .glow-active {
+            box-shadow: 0 0 16px rgba(78, 222, 163, 0.2);
+        }
+        .glow-error {
+            box-shadow: 0 0 16px rgba(255, 180, 171, 0.15);
+        }
+        .pulse-dot {
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(78, 222, 163, 0.7); }
+            70% { box-shadow: 0 0 0 6px rgba(78, 222, 163, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(78, 222, 163, 0); }
+        }
+        @keyframes pulse-error {
+            0%, 100% { opacity: 1; border-color: rgba(255, 180, 171, 1); box-shadow: 0 0 16px rgba(255, 180, 171, 0.3); }
+            50% { opacity: .7; border-color: rgba(255, 180, 171, 0.5); box-shadow: 0 0 8px rgba(255, 180, 171, 0.1); }
+        }
+        .animate-pulse-error {
+            animation: pulse-error 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        
+        /* Custom scrollbar for webkit */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #353434; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #47464a; }
+    </style>
+</head>
+<body class="bg-background text-on-background h-screen w-full overflow-hidden flex font-body-md text-body-md antialiased">
+<!-- Left Panel (35%) -->
+<aside class="w-[35%] h-full bg-surface-container flex flex-col border-r border-outline-variant/30 relative z-10">
+<!-- Header -->
+<header class="flex items-center justify-between px-lg py-md border-b border-outline-variant/20 bg-surface-container-high/50 backdrop-blur-sm">
+<div>
+<h1 class="font-headline-sm text-headline-sm text-on-surface">GameUX PromptForge</h1>
+<div class="flex items-center gap-sm mt-xs">
+<div class="w-2 h-2 rounded-full bg-tertiary pulse-dot"></div>
+<span class="font-label-md text-label-md text-tertiary">Cocos RAG Connected</span>
+</div>
+</div>
+<span class="material-symbols-outlined text-on-surface-variant hover:text-on-surface cursor-pointer transition-colors" data-icon="settings">settings</span>
+</header>
+<!-- Message List -->
+<div class="flex-1 overflow-y-auto p-lg flex flex-col gap-lg">
+<!-- AI Message -->
+<div class="flex gap-md max-w-[90%]">
+<div class="w-8 h-8 rounded-full bg-surface-container-highest flex items-center justify-center shrink-0 border border-outline-variant/30">
+<span class="material-symbols-outlined text-[18px] text-tertiary" data-icon="smart_toy">smart_toy</span>
+</div>
+<div class="bg-surface-container-high rounded-xl rounded-tl-sm p-md border border-outline-variant/20">
+<p class="font-body-md text-body-md text-on-surface">你好！我是你的需求打磨助手。检测到你正在设计『金字塔升起抽奖表现』，我们需要细化一下具体的实现路径。</p>
+</div>
+</div>
+<!-- User Message -->
+<div class="flex gap-md max-w-[90%] self-end flex-row-reverse">
+<div class="w-8 h-8 rounded-full bg-secondary-container flex items-center justify-center shrink-0 border border-secondary-container/50">
+<span class="material-symbols-outlined text-[18px] text-on-secondary-container" data-icon="person">person</span>
+</div>
+<div class="bg-secondary-container/20 rounded-xl rounded-tr-sm p-md border border-secondary-container/30">
+<p class="font-body-md text-body-md text-on-surface">我需要当玩家点击火圈绿宝石时，金字塔缓慢升起，同时伴随震动特效。</p>
+</div>
+</div>
+<!-- AI Typing Indicator (Atmospheric effect) -->
+<div class="flex gap-md max-w-[90%] opacity-50">
+<div class="w-8 h-8 rounded-full bg-surface-container-highest flex items-center justify-center shrink-0 border border-outline-variant/30">
+<span class="material-symbols-outlined text-[18px] text-tertiary" data-icon="smart_toy">smart_toy</span>
+</div>
+<div class="bg-surface-container-high rounded-xl rounded-tl-sm p-sm px-md flex items-center gap-xs border border-outline-variant/20">
+<div class="w-1.5 h-1.5 rounded-full bg-on-surface-variant animate-bounce" style="animation-delay: 0ms"></div>
+<div class="w-1.5 h-1.5 rounded-full bg-on-surface-variant animate-bounce" style="animation-delay: 150ms"></div>
+<div class="w-1.5 h-1.5 rounded-full bg-on-surface-variant animate-bounce" style="animation-delay: 300ms"></div>
+</div>
+</div>
+</div>
+<!-- Input Area -->
+<div class="p-md border-t border-outline-variant/20 bg-surface-container-low">
+<div class="bg-surface rounded-xl border border-outline-variant/50 focus-within:border-secondary focus-within:ring-1 focus-within:ring-secondary/20 transition-all flex flex-col p-sm">
+<textarea class="w-full bg-transparent border-none resize-none focus:ring-0 font-body-md text-body-md text-on-surface placeholder:text-on-surface-variant/50 min-h-[80px]" placeholder="Describe your intent or logic here..."></textarea>
+<div class="flex justify-between items-center mt-sm pt-sm border-t border-outline-variant/20">
+<div class="flex gap-xs">
+<button class="p-sm rounded hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface transition-colors flex items-center justify-center" title="Attach Figma/Local path">
+<span class="material-symbols-outlined text-[20px]" data-icon="attach_file">attach_file</span>
+</button>
+</div>
+<button class="px-md py-sm bg-secondary-container hover:bg-secondary-container/80 text-on-secondary-container rounded-lg font-label-md text-label-md flex items-center gap-xs transition-colors shadow-[0_0_12px_rgba(5,102,217,0.3)]">
+                        Send
+                        <span class="material-symbols-outlined text-[18px]" data-icon="send">send</span>
+</button>
+</div>
+</div>
+</div>
+</aside>
+<!-- Right Panel (65%) -->
+<main class="w-[65%] h-full bg-surface-container-lowest relative flex flex-col">
+<!-- Blueprint Grid Background -->
+<div class="absolute inset-0 blueprint-grid pointer-events-none z-0"></div>
+<!-- Top Bar -->
+<header class="flex items-center justify-between px-xl py-md border-b border-outline-variant/20 bg-surface-container-lowest/80 backdrop-blur-md relative z-10 shrink-0">
+<div class="flex items-center gap-md">
+<div class="w-10 h-10 rounded-lg bg-surface-container flex items-center justify-center border border-outline-variant/30">
+<span class="material-symbols-outlined text-primary" data-icon="account_tree">account_tree</span>
+</div>
+<div>
+<h2 class="font-headline-sm text-headline-sm text-on-surface">金字塔升起抽奖表现</h2>
+<span class="font-label-md text-label-md text-on-surface-variant flex items-center gap-xs mt-xs">
+<span class="material-symbols-outlined text-[14px]" data-icon="folder_open">folder_open</span>
+                        Project: Cocos Main Event
+                    </span>
+</div>
+</div>
+<!-- Progress Bar -->
+<div class="flex-1 max-w-[300px] mx-lg flex flex-col gap-xs">
+<div class="flex justify-between font-code-sm text-code-sm">
+<span class="text-on-surface-variant">Generation Progress</span>
+<span class="text-tertiary">60%</span>
+</div>
+<div class="w-full h-1.5 bg-surface-container-high rounded-full overflow-hidden">
+<div class="h-full bg-tertiary w-[60%] rounded-full relative">
+<div class="absolute inset-0 bg-gradient-to-r from-transparent to-white/20"></div>
+</div>
+</div>
+</div>
+<button class="px-lg py-sm bg-primary/10 border border-primary/20 text-primary rounded-lg font-label-md text-label-md flex items-center gap-xs opacity-50 cursor-not-allowed group relative" disabled="">
+<span class="material-symbols-outlined text-[18px]" data-icon="download">download</span>
+                Export Final Prompt
+                
+                <!-- Tooltip -->
+<div class="absolute -bottom-8 left-1/2 -translate-x-1/2 bg-inverse-surface text-inverse-on-surface px-sm py-xs rounded text-[10px] whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+                    Complete red nodes first
+                </div>
+</button>
+</header>
+<!-- Main Content Area -->
+<div class="flex-1 flex flex-col p-lg gap-lg relative z-10 overflow-hidden">
+<!-- Upper Section (Visual Prototype Board) - ~45% height -->
+<section class="h-[45%] bg-zinc-900 rounded-xl border border-outline-variant/30 shadow-inner overflow-hidden relative flex flex-col">
+<div class="absolute inset-0 blueprint-grid opacity-50 pointer-events-none"></div>
+<div class="p-sm border-b border-outline-variant/20 bg-zinc-900/80 backdrop-blur-sm z-10 flex justify-between items-center">
+<span class="font-code-sm text-code-sm text-on-surface-variant flex items-center gap-xs">
+<span class="material-symbols-outlined text-[16px]">visibility</span> Whitebox Prototype
+        </span>
+</div>
+<div class="flex-1 relative flex items-center justify-center gap-xl p-lg z-0">
+<!-- Pyramid SVG -->
+<div class="relative flex flex-col items-center">
+<svg class="stroke-outline-variant fill-none stroke-2 opacity-80" height="150" viewBox="0 0 200 150" width="200">
+<path d="M100 10 L10 140 L190 140 Z" stroke-linejoin="round" stroke-width="4"></path>
+<path d="M100 10 L100 140" stroke-dasharray="4 4"></path>
+<path d="M40 90 L160 90" stroke-dasharray="4 4"></path>
+<path d="M70 50 L130 50" stroke-dasharray="4 4"></path>
+</svg>
+<!-- Red Pulse Placeholder -->
+<div class="absolute bottom-[-10px] w-full max-w-[220px] bg-error/10 border-2 border-error border-dashed rounded-lg p-sm flex items-center justify-center gap-sm animate-pulse-error z-20" id="pulse-placeholder">
+<span class="material-symbols-outlined text-error text-[20px]">warning</span>
+<span class="font-code-sm text-code-sm text-error font-medium">[缺失] fx_Pyramid_appear 特效占位</span>
+</div>
+</div>
+<!-- Wireframe List -->
+<div class="w-[180px] h-[160px] border border-outline-variant/50 rounded-lg bg-surface-container-low/50 flex flex-col p-sm gap-sm relative">
+<div class="text-tertiary font-code-sm text-[10px] absolute -top-6 left-0 flex items-center gap-1 whitespace-nowrap">
+<span class="material-symbols-outlined text-[12px]">check_circle</span>
+                [已确认] 列表包含 20 个元素，从上到下排布
+            </div>
+<div class="font-code-sm text-[10px] text-outline-variant border-b border-outline-variant/30 pb-1 mb-1">UIPyramidList</div>
+<div class="h-6 w-full bg-outline-variant/20 rounded flex items-center px-2"><span class="text-[10px] font-code-sm text-on-surface-variant">GRAND</span></div>
+<div class="h-6 w-full bg-outline-variant/20 rounded flex items-center px-2"><span class="text-[10px] font-code-sm text-on-surface-variant">MAJOR</span></div>
+<div class="h-6 w-full bg-outline-variant/20 rounded flex items-center px-2"><span class="text-[10px] font-code-sm text-on-surface-variant">MINOR</span></div>
+<div class="h-6 w-full bg-outline-variant/20 rounded flex items-center px-2"><span class="text-[10px] font-code-sm text-on-surface-variant">MINI</span></div>
+<div class="flex-1 flex justify-center items-start pt-1">
+<span class="material-symbols-outlined text-outline-variant text-[16px]">more_vert</span>
+</div>
+</div>
+<!-- Visual Linkage Element (SVG Line) -->
+<svg class="absolute top-0 left-0 w-full h-full pointer-events-none hidden lg:block z-10" style="min-height: 100%;">
+<!-- This line connects the bottom box to the top placeholder visually, represented abstractly -->
+<path d="M 50% 100% C 50% 150%, 50% 200%, 50% 250%" fill="none" stroke="rgba(255, 180, 171, 0.2)" stroke-dasharray="4 4" stroke-width="2"></path>
+</svg>
+</div>
+</section>
+<!-- Lower Section (Logic State Nodes) - ~55% height -->
+<section class="h-[55%] flex flex-col">
+<div class="flex items-center gap-xs mb-sm">
+<span class="material-symbols-outlined text-[16px] text-on-surface-variant">account_tree</span>
+<span class="font-label-md text-label-md text-on-surface-variant">Logic State Nodes</span>
+</div>
+<div class="flex-1 overflow-x-auto overflow-y-hidden pb-4 scrollbar-thin scrollbar-thumb-zinc-700 scrollbar-track-transparent">
+<div class="flex flex-row gap-lg h-full min-w-max px-xs items-start pt-md relative">
+<!-- Connection Line Background (Horizontal) -->
+<div class="absolute top-[32px] left-lg right-lg h-px bg-outline-variant/30 z-0"></div>
+<!-- Node 1: Completed -->
+<div class="w-[320px] shrink-0 bg-surface-container rounded-xl p-md border border-tertiary glow-active hover:-translate-y-1 transition-transform duration-300 relative z-10 mt-md">
+<div class="absolute -top-md left-1/2 w-px h-md bg-tertiary/50"></div>
+<div class="absolute -top-[19px] left-1/2 -translate-x-1/2 w-2 h-2 rounded-full bg-tertiary"></div>
+<div class="flex items-start gap-md">
+<div class="mt-xs w-6 h-6 rounded-full bg-tertiary/20 flex items-center justify-center shrink-0 border border-tertiary/30">
+<span class="material-symbols-outlined text-[14px] text-tertiary" data-icon="check">check</span>
+</div>
+<div>
+<div class="font-label-md text-label-md text-tertiary mb-xs">[事件] 盘面出现火圈绿宝石</div>
+<p class="font-code-sm text-code-sm text-on-surface-variant">Listener connected to target node successfully.</p>
+</div>
+</div>
+</div>
+<!-- Node 2: Warning/Input Needed -->
+<div class="w-[380px] shrink-0 bg-surface-container rounded-xl p-md border border-error border-dashed bg-error/5 glow-error hover:-translate-y-1 transition-transform duration-300 relative z-10 mt-md" id="missing-path-card">
+<!-- Visual linkage hint to upper section -->
+<div class="absolute -top-[100px] left-1/2 w-px h-[100px] border-l-2 border-dashed border-error/30 z-0 hidden xl:block"></div>
+<div class="absolute -top-md left-1/2 w-px h-md bg-error/50"></div>
+<div class="absolute -top-[19px] left-1/2 -translate-x-1/2 w-2 h-2 rounded-full bg-error"></div>
+<div class="flex items-start gap-md relative z-10">
+<div class="mt-xs w-6 h-6 rounded-full bg-error/20 flex items-center justify-center shrink-0 border border-error/30 animate-pulse">
+<span class="material-symbols-outlined text-[14px] text-error" data-icon="warning">warning</span>
+</div>
+<div class="flex-1">
+<div class="font-label-md text-label-md text-error mb-xs">Missing Path Reference</div>
+<p class="font-body-md text-body-md text-on-surface mb-md">待确认预制体 <span class="font-code-sm bg-surface-container-highest px-xs py-[2px] rounded text-primary">UIPyramidList</span> 与特效 <span class="font-code-sm bg-surface-container-highest px-xs py-[2px] rounded text-primary">fx_Pyramid_appear</span> 的精确路径</p>
+<div class="flex items-center bg-surface-dim rounded-lg border border-outline-variant/50 focus-within:border-error focus-within:ring-1 focus-within:ring-error/20 overflow-hidden">
+<span class="material-symbols-outlined pl-sm text-outline" data-icon="link">link</span>
+<input class="w-full bg-transparent border-none focus:ring-0 font-code-sm text-code-sm text-on-surface py-sm px-sm placeholder:text-outline" placeholder="在左侧回复或在此粘贴路径..." type="text">
+</div>
+</div>
+</div>
+</div>
+<!-- Node 3: AI RAG Suggestion -->
+<div class="w-[360px] shrink-0 bg-surface-container rounded-xl p-md border border-secondary hover:-translate-y-1 transition-transform duration-300 relative z-10 mt-md">
+<div class="absolute -top-md left-1/2 w-px h-md bg-secondary/50"></div>
+<div class="absolute -top-[19px] left-1/2 -translate-x-1/2 w-2 h-2 rounded-full bg-secondary"></div>
+<div class="flex items-start gap-md">
+<div class="mt-xs w-6 h-6 rounded-full bg-secondary-container flex items-center justify-center shrink-0 border border-secondary-container/50">
+<span class="material-symbols-outlined text-[14px] text-on-secondary-container" data-icon="psychology">psychology</span>
+</div>
+<div>
+<div class="font-label-md text-label-md text-secondary mb-xs flex items-center gap-xs">
+                            RAG System Insight
+                            <span class="px-xs py-[2px] bg-secondary/10 rounded text-[10px] text-secondary">Auto-Applied</span>
+</div>
+<p class="font-body-md text-body-md text-on-surface leading-relaxed">检测到多元素排队执行逻辑。Cocos 3.8.8 建议：使用 Promise 链或 Tween System 进行队列动画管理。已自动记录至生成规则。</p>
+<div class="mt-sm pt-sm border-t border-outline-variant/20 flex gap-sm">
+<span class="text-[10px] font-code-sm text-on-surface-variant flex items-center gap-[2px]">
+<span class="material-symbols-outlined text-[12px]" data-icon="library_books">library_books</span>
+                                Ref: Cocos_Docs_v3.8.8
+                            </span>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</section>
+</div>
+</main>
+
+
+</body></html>

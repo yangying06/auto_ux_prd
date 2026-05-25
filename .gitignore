@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+src-tauri/target/
+
+# Environment files
+.env
+.env.local
+
+# Editor/IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# TypeScript graph cache
+.ts-graph/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+server/__pycache__/
