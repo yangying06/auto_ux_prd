@@ -5,7 +5,7 @@ import { UploadCard } from '../components/upload/UploadCard'
 import { DecompProgress } from '../components/upload/DecompProgress'
 import { TreeSummary } from '../components/upload/TreeSummary'
 
-type Stage = 'upload' | 'decomposing' | 'done' | 'error'
+type Stage = 'upload' | 'decomposing' | 'done' | 'error' | 'map'
 
 const INITIAL_STEP = '正在识别顶层模块...'
 
@@ -33,6 +33,7 @@ export function MapPage() {
   const updateDecompositionStep = useAppStore((s) => s.updateDecompositionStep)
   const resetDecomposition = useAppStore((s) => s.resetDecomposition)
   const setPrdTree = useAppStore((s) => s.setPrdTree)
+  const setSelectedNodeId = useAppStore((s) => s.setSelectedNodeId)
 
   const clearPolling = () => {
     if (pollIntervalRef.current) {
@@ -130,9 +131,19 @@ export function MapPage() {
     setNodeCount(0)
   }
 
+  const handleViewMap = () => {
+    setSelectedNodeId(null)
+    setStage('map')
+  }
+
   useEffect(() => {
     return () => { clearPolling() }
   }, [])
+
+  if (stage === 'map') {
+    // Full map layout rendered in Plan 04 — placeholder prevents unreachable-code TS error
+    return <div className="w-full h-screen bg-background blueprint-grid animate-fade-in" />
+  }
 
   return (
     <div className="w-full h-screen flex items-center justify-center bg-background blueprint-grid overflow-hidden">
@@ -143,7 +154,7 @@ export function MapPage() {
           ) : stage === 'decomposing' ? (
             <DecompProgress steps={decompositionSteps} nodeCount={nodeCount} />
           ) : stage === 'done' && prdTree ? (
-            <TreeSummary tree={prdTree} nodeCount={nodeCount} onReset={handleReset} />
+            <TreeSummary tree={prdTree} nodeCount={nodeCount} onReset={handleReset} onViewMap={handleViewMap} />
           ) : (
             <DecompProgress steps={decompositionSteps} nodeCount={nodeCount} error={decompError} />
           )}
