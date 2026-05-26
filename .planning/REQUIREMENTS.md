@@ -16,9 +16,9 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Upload
 
-- [ ] **UPLD-01**: User can upload a Markdown file via drag-and-drop or file picker
-- [ ] **UPLD-02**: Upload displays progress indicator and status feedback
-- [ ] **UPLD-03**: AI拆解过程中显示拆解进度（streaming或阶段反馈）
+- [x] **UPLD-01**: User can upload a Markdown file via drag-and-drop or file picker
+- [x] **UPLD-02**: Upload displays progress indicator and status feedback
+- [x] **UPLD-03**: AI拆解过程中显示拆解进度（streaming或阶段反馈）
 
 ### Decomposition
 
@@ -100,9 +100,9 @@ Deferred to future release. Tracked but not in current roadmap.
 | INFRA-02 | Phase 1 | Complete |
 | INFRA-03 | Phase 1 | Complete |
 | INFRA-04 | Phase 1 | Complete |
-| UPLD-01 | Phase 1 | Pending |
-| UPLD-02 | Phase 1 | Pending |
-| UPLD-03 | Phase 1 | Pending |
+| UPLD-01 | Phase 1 | Complete |
+| UPLD-02 | Phase 1 | Complete |
+| UPLD-03 | Phase 1 | Complete |
 | DCMP-01 | Phase 1 | Complete |
 | DCMP-02 | Phase 1 | Complete |
 | DCMP-03 | Phase 1 | Complete |
