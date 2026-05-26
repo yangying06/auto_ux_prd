@@ -551,6 +551,185 @@ async function queryCocosKnowledge(query: string) {
   }
 }
 
+// ── Decomposition Tool ──────────────────────────────────────────────────────
+
+const decomposePrdTool: Anthropic.Tool = {
+  name: 'decompose_prd',
+  description: 'Decompose a PRD document into a structured tree of functional nodes. Each node represents a distinct function, module, or UI interaction.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      nodes: {
+        type: 'array',
+        description: 'Flat array of all PrdNodes. Root nodes have parentId: null.',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'Unique stable ID, e.g. "CE-01". Use functional abbreviation + index.' },
+            parentId: { type: ['string', 'null'], description: 'ID of parent node, or null for root-level nodes.' },
+            label: { type: 'string', description: 'Short display name (3-8 words).' },
+            summary: { type: 'string', description: 'One sentence summary of what this node covers.' },
+            content: { type: 'string', description: 'Full extracted text from the PRD for this node.' },
+            type: { type: 'string', enum: ['module', 'feature', 'ui'], description: 'module = top-level functional area; feature = sub-function; ui = UI interaction node' },
+            level: { type: 'integer', description: 'Depth in tree. Root children = 1, their children = 2, etc.' },
+            order: { type: 'integer', description: 'Sort position among siblings (0-indexed).' },
+            needsPolish: { type: 'boolean', description: 'True if this node describes a UI interaction that needs Deep Forge polishing.' },
+            techNotes: { type: ['string', 'null'], description: 'Optional implementation notes relevant to engineers.' },
+          },
+          required: ['id', 'parentId', 'label', 'summary', 'content', 'type', 'level', 'order', 'needsPolish'],
+        },
+      },
+    },
+    required: ['nodes'],
+  },
+}
+
+function normalizeDecompositionNodes(raw: unknown): PrdNode[] {
+  if (!Array.isArray(raw)) return []
+
+  const nodes = raw
+    .map((item: unknown, index: number) => {
+      if (!item || typeof item !== 'object') return null
+      const n = item as Record<string, unknown>
+
+      const id = typeof n.id === 'string' && n.id.trim() ? n.id.trim() : `node-${index}`
+      const parentId = typeof n.parentId === 'string' ? n.parentId : null
+      const label = typeof n.label === 'string' ? n.label : `Node ${id}`
+      const summary = typeof n.summary === 'string' ? n.summary : ''
+      const content = typeof n.content === 'string' ? n.content : ''
+      const type = ['module', 'feature', 'ui'].includes(n.type as string)
+        ? (n.type as PrdNode['type'])
+        : 'feature'
+      const level = typeof n.level === 'number' ? n.level : 0
+      const order = typeof n.order === 'number' ? n.order : index
+      const needsPolish = typeof n.needsPolish === 'boolean' ? n.needsPolish : false
+      const techNotes = typeof n.techNotes === 'string' ? n.techNotes : null
+
+      return {
+        id, parentId, label, summary, content, type,
+        status: 'pending' as const,
+        level, order, needsPolish, techNotes,
+        extractedFrom: null,
+        children: [],
+      } satisfies PrdNode
+    })
+    .filter((n): n is PrdNode => n !== null)
+
+  // Build children arrays from parentId references
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]))
+  for (const node of nodes) {
+    if (node.parentId && nodeMap.has(node.parentId)) {
+      nodeMap.get(node.parentId)!.children.push(node.id)
+    }
+  }
+
+  // Sort children by order
+  for (const node of nodes) {
+    node.children.sort((a, b) => (nodeMap.get(a)?.order ?? 0) - (nodeMap.get(b)?.order ?? 0))
+  }
+
+  // Warn if any node exceeds level 3
+  for (const node of nodes) {
+    if (node.level > 3) console.warn(`[decompose] node ${node.id} at level ${node.level} — unexpectedly deep`)
+  }
+
+  return nodes
+}
+
+function normalizeDecompositionTree(raw: unknown): Record<string, PrdNode> {
+  const nodes = normalizeDecompositionNodes(raw)
+  if (nodes.length === 0) throw new Error('normalizeDecompositionTree: empty result — AI returned no nodes')
+  return Object.fromEntries(nodes.map((n) => [n.id, n]))
+}
+
+const decompositionL1SystemPrompt = `You are a UX architect analyzing a Product Requirements Document (PRD).
+Your task: identify the top-level FUNCTIONAL MODULES in the document.
+A module is a distinct user-facing feature area or functional discipline (e.g., "Combat System", "Inventory UI", "Progression Loop").
+DO NOT use the document's heading hierarchy — analyze functional scope.
+Return ONLY level-1 nodes (parentId: null). Maximum 8 modules. Minimum 2.
+Each node must have a clear, distinct functional scope with no overlap.`
+
+function decompositionBranchSystemPrompt(parentLabel: string, parentId: string): string {
+  return `You are expanding one module of a PRD tree.
+Module to expand: "${parentLabel}"
+Extract the specific FEATURES and UI INTERACTIONS within this module.
+Level 2 nodes = major features (parentId: "${parentId}"). Level 3 nodes = specific UI interactions (parentId = their level-2 parent's ID).
+Do NOT exceed level 3. Maximum 6 children per parent.
+Mark needsPolish: true for any node that describes a UI interaction screen or dialog.`
+}
+
+async function decomposeL1(mdText: string): Promise<PrdNode[]> {
+  if (!anthropic) throw new Error('Anthropic client not initialized — check ANTHROPIC_API_KEY')
+
+  const response = await anthropic.messages.create({
+    model,
+    max_tokens: 8000,
+    system: decompositionL1SystemPrompt,
+    tools: [decomposePrdTool],
+    tool_choice: { type: 'tool', name: 'decompose_prd' },
+    messages: [
+      {
+        role: 'user',
+        content: `Decompose this PRD into top-level functional modules only (level 1 nodes, parentId: null). Do not go deeper than level 1 in this call.\n\n${mdText}`,
+      },
+    ],
+  })
+
+  const toolUse = response.content.find(
+    (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === 'decompose_prd'
+  )
+  if (!toolUse) throw new Error('Claude did not use decompose_prd tool for L1 decomposition')
+
+  const raw = (toolUse.input as { nodes?: unknown }).nodes
+  return normalizeDecompositionNodes(raw)
+}
+
+async function decomposeBranch(mdText: string, parentNode: PrdNode): Promise<PrdNode[]> {
+  if (!anthropic) throw new Error('Anthropic client not initialized — check ANTHROPIC_API_KEY')
+
+  const response = await anthropic.messages.create({
+    model,
+    max_tokens: 8000,
+    system: decompositionBranchSystemPrompt(parentNode.label, parentNode.id),
+    tools: [decomposePrdTool],
+    tool_choice: { type: 'tool', name: 'decompose_prd' },
+    messages: [
+      {
+        role: 'user',
+        content: `Expand the "${parentNode.label}" module into its features and UI interactions.\n\nFull PRD context:\n${mdText}`,
+      },
+    ],
+  })
+
+  const toolUse = response.content.find(
+    (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === 'decompose_prd'
+  )
+  if (!toolUse) throw new Error(`Claude did not use decompose_prd tool for branch: ${parentNode.id}`)
+
+  const raw = (toolUse.input as { nodes?: unknown }).nodes
+  return normalizeDecompositionNodes(raw)
+}
+
+async function runDecompositionJob(sessionId: string, mdText: string): Promise<void> {
+  const session = decompositionSessions.get(sessionId)
+  if (!session) return
+
+  // Step 1: L1 nodes
+  session.currentStep = 'Decomposing top-level modules'
+  const l1Nodes = await decomposeL1(mdText)
+  session.nodes.push(...l1Nodes)
+
+  // Step 2: Expand each L1 branch sequentially
+  for (const l1 of l1Nodes) {
+    session.currentStep = `Expanding: ${l1.label}`
+    const branchNodes = await decomposeBranch(mdText, l1)
+    session.nodes.push(...branchNodes)
+  }
+
+  session.status = 'done'
+  session.currentStep = 'Complete'
+}
+
 app.use(cors({ origin: ['http://127.0.0.1:5173', 'http://localhost:5173'] }))
 app.use(express.json({ limit: '10mb' }))
 
