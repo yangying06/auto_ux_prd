@@ -30,18 +30,18 @@ Requirements for initial release. Each maps to roadmap phases.
 ### Mindmap
 
 - [ ] **MAP-01**: markmap SVG渲染文档树结构
-- [ ] **MAP-02**: React overlay层显示节点状态badge（未处理/已完成）
+- [x] **MAP-02**: React overlay层显示节点状态badge（未处理/已完成）
 - [ ] **MAP-03**: 缩放/平移/适配控件
-- [ ] **MAP-04**: 节点展开/收起动画效果
+- [x] **MAP-04**: 节点展开/收起动画效果
 - [x] **MAP-05**: 暗色主题适配（Forge Blueprint设计系统）
 - [ ] **MAP-06**: setData()调用时保持当前缩放位置不重置
 
 ### Preview
 
-- [ ] **PRVW-01**: 单击节点打开右侧预览drawer面板
-- [ ] **PRVW-02**: 预览面板显示节点摘要内容和技术实现备注
-- [ ] **PRVW-03**: 预览面板含"Enter Deep Forge"按钮导航到forge view
-- [ ] **PRVW-04**: 节点卡片显示ID标识（如PL-01, CE-04）
+- [x] **PRVW-01**: 单击节点打开右侧预览drawer面板
+- [x] **PRVW-02**: 预览面板显示节点摘要内容和技术实现备注
+- [x] **PRVW-03**: 预览面板含"Enter Deep Forge"按钮导航到forge view
+- [x] **PRVW-04**: 节点卡片显示ID标识（如PL-01, CE-04）
 
 ### Forge
 
@@ -108,15 +108,15 @@ Deferred to future release. Tracked but not in current roadmap.
 | DCMP-03 | Phase 1 | Complete |
 | DCMP-04 | Phase 1 | Complete |
 | MAP-01 | Phase 2 | Pending |
-| MAP-02 | Phase 2 | Pending |
+| MAP-02 | Phase 2 | Complete |
 | MAP-03 | Phase 2 | Pending |
-| MAP-04 | Phase 2 | Pending |
+| MAP-04 | Phase 2 | Complete |
 | MAP-05 | Phase 2 | Complete |
 | MAP-06 | Phase 2 | Pending |
-| PRVW-01 | Phase 2 | Pending |
-| PRVW-02 | Phase 2 | Pending |
-| PRVW-03 | Phase 2 | Pending |
-| PRVW-04 | Phase 2 | Pending |
+| PRVW-01 | Phase 2 | Complete |
+| PRVW-02 | Phase 2 | Complete |
+| PRVW-03 | Phase 2 | Complete |
+| PRVW-04 | Phase 2 | Complete |
 | FORG-01 | Phase 3 | Pending |
 | FORG-02 | Phase 3 | Pending |
 | FORG-03 | Phase 3 | Pending |
