@@ -124,8 +124,6 @@ export const useAppStore = create<AppStoreState>()(
             settings: v3.settings ?? defaultSettings,
             prdTree: null,
             selectedNodeId: null,
-            decompositionStatus: 'idle' as const,
-            decompositionSteps: [],
           }
         }
         // Unknown version — safe reset
@@ -136,8 +134,6 @@ export const useAppStore = create<AppStoreState>()(
           settings: defaultSettings,
           prdTree: null,
           selectedNodeId: null,
-          decompositionStatus: 'idle' as const,
-          decompositionSteps: [],
         }
       },
       partialize: (state) => ({
