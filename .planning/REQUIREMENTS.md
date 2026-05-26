@@ -33,7 +33,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [ ] **MAP-02**: React overlay层显示节点状态badge（未处理/已完成）
 - [ ] **MAP-03**: 缩放/平移/适配控件
 - [ ] **MAP-04**: 节点展开/收起动画效果
-- [ ] **MAP-05**: 暗色主题适配（Forge Blueprint设计系统）
+- [x] **MAP-05**: 暗色主题适配（Forge Blueprint设计系统）
 - [ ] **MAP-06**: setData()调用时保持当前缩放位置不重置
 
 ### Preview
@@ -111,7 +111,7 @@ Deferred to future release. Tracked but not in current roadmap.
 | MAP-02 | Phase 2 | Pending |
 | MAP-03 | Phase 2 | Pending |
 | MAP-04 | Phase 2 | Pending |
-| MAP-05 | Phase 2 | Pending |
+| MAP-05 | Phase 2 | Complete |
 | MAP-06 | Phase 2 | Pending |
 | PRVW-01 | Phase 2 | Pending |
 | PRVW-02 | Phase 2 | Pending |

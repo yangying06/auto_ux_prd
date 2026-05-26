@@ -52,7 +52,7 @@ Plans:
 **UI hint**: yes
 
 Plans:
-- [ ] 02-01-PLAN.md — CSS utilities, TreeSummary "查看导图" button, MapPage stage extension
+- [x] 02-01-PLAN.md — CSS utilities, TreeSummary "查看导图" button, MapPage stage extension
 - [ ] 02-02-PLAN.md — TopAppBar, NodeCard, PreviewDrawer components
 - [ ] 02-03-PLAN.md — TreeCanvas with column layout, SVG connections, zoom/pan
 - [ ] 02-04-PLAN.md — MapPage full-screen wiring + human verify checkpoint
