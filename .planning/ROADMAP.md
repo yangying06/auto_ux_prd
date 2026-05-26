@@ -54,7 +54,7 @@ Plans:
 Plans:
 - [x] 02-01-PLAN.md — CSS utilities, TreeSummary "查看导图" button, MapPage stage extension
 - [x] 02-02-PLAN.md — TopAppBar, NodeCard, PreviewDrawer components
-- [ ] 02-03-PLAN.md — TreeCanvas with column layout, SVG connections, zoom/pan
+- [x] 02-03-PLAN.md — TreeCanvas with column layout, SVG connections, zoom/pan
 - [ ] 02-04-PLAN.md — MapPage full-screen wiring + human verify checkpoint
 
 ### Phase 3: Deep Forge
@@ -89,6 +89,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation & Pipeline | 4/4 | Complete   | 2026-05-26 |
-| 2. Mindmap & Preview | 0/4 | Not started | - |
+| 2. Mindmap & Preview | 3/4 | In Progress|  |
 | 3. Deep Forge | 0/TBD | Not started | - |
 | 4. Export | 0/TBD | Not started | - |

@@ -29,12 +29,12 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Mindmap
 
-- [ ] **MAP-01**: markmap SVG渲染文档树结构
+- [x] **MAP-01**: markmap SVG渲染文档树结构
 - [x] **MAP-02**: React overlay层显示节点状态badge（未处理/已完成）
-- [ ] **MAP-03**: 缩放/平移/适配控件
+- [x] **MAP-03**: 缩放/平移/适配控件
 - [x] **MAP-04**: 节点展开/收起动画效果
 - [x] **MAP-05**: 暗色主题适配（Forge Blueprint设计系统）
-- [ ] **MAP-06**: setData()调用时保持当前缩放位置不重置
+- [x] **MAP-06**: setData()调用时保持当前缩放位置不重置
 
 ### Preview
 
@@ -107,12 +107,12 @@ Deferred to future release. Tracked but not in current roadmap.
 | DCMP-02 | Phase 1 | Complete |
 | DCMP-03 | Phase 1 | Complete |
 | DCMP-04 | Phase 1 | Complete |
-| MAP-01 | Phase 2 | Pending |
+| MAP-01 | Phase 2 | Complete |
 | MAP-02 | Phase 2 | Complete |
-| MAP-03 | Phase 2 | Pending |
+| MAP-03 | Phase 2 | Complete |
 | MAP-04 | Phase 2 | Complete |
 | MAP-05 | Phase 2 | Complete |
-| MAP-06 | Phase 2 | Pending |
+| MAP-06 | Phase 2 | Complete |
 | PRVW-01 | Phase 2 | Complete |
 | PRVW-02 | Phase 2 | Complete |
 | PRVW-03 | Phase 2 | Complete |

@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 02-mindmap-preview-02-PLAN.md
-last_updated: "2026-05-26T13:49:14.589Z"
+stopped_at: Completed 02-03-PLAN.md
+last_updated: "2026-05-26T13:52:09.276Z"
 last_activity: 2026-05-26
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 8
-  completed_plans: 6
+  completed_plans: 7
   percent: 0
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-05-26)
 ## Current Position
 
 Phase: 02 (mindmap-preview) — EXECUTING
-Plan: 3 of 4
+Plan: 4 of 4
 Status: Ready to execute
 Last activity: 2026-05-26
 
@@ -58,6 +58,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P04 | 5 | 3 tasks | 2 files |
 | Phase 02-mindmap-preview P01 | 15 | 3 tasks | 3 files |
 | Phase 02-mindmap-preview P02 | 8 | 3 tasks | 3 files |
+| Phase 02-mindmap-preview P03 | 12 | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -83,6 +84,8 @@ Recent decisions affecting current work:
 - [Phase 02-mindmap-preview]: setSelectedNodeId(null) on handleViewMap clears any stale node selection before entering map view
 - [Phase 02-mindmap-preview]: PreviewDrawer uses always-mounted aside with CSS width transition (D-11), not opacity fade
 - [Phase 02-mindmap-preview]: NodeCard click disambiguation via single clickTimerRef: 300ms timer, second click cancels and fires double-click handler
+- [Phase 02-mindmap-preview]: Zoom stored in useRef not useState for MAP-06 compliance; applyTransform() is sole imperative DOM writer
+- [Phase 02-mindmap-preview]: buildColumns skips empty column arrays so a tree with only root+level-1 nodes renders exactly 2 columns (MAP-04 adaptive)
 
 ### Pending Todos
 
@@ -101,6 +104,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-26T13:49:14.586Z
-Stopped at: Completed 02-mindmap-preview-02-PLAN.md
+Last session: 2026-05-26T13:52:09.273Z
+Stopped at: Completed 02-03-PLAN.md
 Resume file: None
