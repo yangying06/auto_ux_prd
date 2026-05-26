@@ -1,5 +1,6 @@
 import type { ChatMessage, ChatResponse, ProxyHealth, RagSearchResult } from '../types/chat'
 import type { UXRequirementState } from '../types/uxRequirement'
+import type { PrdNode } from '../types/prdNode'
 
 async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${baseUrl}${path}`, {
@@ -58,4 +59,25 @@ export function exportFinalPrompt(baseUrl: string, requirementState: UXRequireme
     method: 'POST',
     body: JSON.stringify({ requirementState, conversationSummary }),
   })
+}
+
+// ── Decomposition API ────────────────────────────────────────────────────────
+
+export function startDecomposition(baseUrl: string, mdText: string) {
+  return requestJson<{ sessionId: string }>(baseUrl, '/api/decompose/start', {
+    method: 'POST',
+    body: JSON.stringify({ mdText }),
+  })
+}
+
+export interface DecompositionPollResult {
+  status: 'running' | 'done' | 'error'
+  currentStep: string
+  nodeCount: number
+  nodes: PrdNode[]
+  error: string | null
+}
+
+export function pollDecomposition(baseUrl: string, sessionId: string) {
+  return requestJson<DecompositionPollResult>(baseUrl, `/api/decompose/${sessionId}`)
 }
