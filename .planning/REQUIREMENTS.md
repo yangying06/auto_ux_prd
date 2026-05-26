@@ -96,44 +96,44 @@ Deferred to future release. Tracked but not in current roadmap.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| INFRA-01 | — | Pending |
-| INFRA-02 | — | Pending |
-| INFRA-03 | — | Pending |
-| INFRA-04 | — | Pending |
-| UPLD-01 | — | Pending |
-| UPLD-02 | — | Pending |
-| UPLD-03 | — | Pending |
-| DCMP-01 | — | Pending |
-| DCMP-02 | — | Pending |
-| DCMP-03 | — | Pending |
-| DCMP-04 | — | Pending |
-| MAP-01 | — | Pending |
-| MAP-02 | — | Pending |
-| MAP-03 | — | Pending |
-| MAP-04 | — | Pending |
-| MAP-05 | — | Pending |
-| MAP-06 | — | Pending |
-| PRVW-01 | — | Pending |
-| PRVW-02 | — | Pending |
-| PRVW-03 | — | Pending |
-| PRVW-04 | — | Pending |
-| FORG-01 | — | Pending |
-| FORG-02 | — | Pending |
-| FORG-03 | — | Pending |
-| FORG-04 | — | Pending |
-| FORG-05 | — | Pending |
-| FORG-06 | — | Pending |
-| FORG-07 | — | Pending |
-| EXPT-01 | — | Pending |
-| EXPT-02 | — | Pending |
-| EXPT-03 | — | Pending |
-| EXPT-04 | — | Pending |
+| INFRA-01 | Phase 1 | Pending |
+| INFRA-02 | Phase 1 | Pending |
+| INFRA-03 | Phase 1 | Pending |
+| INFRA-04 | Phase 1 | Pending |
+| UPLD-01 | Phase 1 | Pending |
+| UPLD-02 | Phase 1 | Pending |
+| UPLD-03 | Phase 1 | Pending |
+| DCMP-01 | Phase 1 | Pending |
+| DCMP-02 | Phase 1 | Pending |
+| DCMP-03 | Phase 1 | Pending |
+| DCMP-04 | Phase 1 | Pending |
+| MAP-01 | Phase 2 | Pending |
+| MAP-02 | Phase 2 | Pending |
+| MAP-03 | Phase 2 | Pending |
+| MAP-04 | Phase 2 | Pending |
+| MAP-05 | Phase 2 | Pending |
+| MAP-06 | Phase 2 | Pending |
+| PRVW-01 | Phase 2 | Pending |
+| PRVW-02 | Phase 2 | Pending |
+| PRVW-03 | Phase 2 | Pending |
+| PRVW-04 | Phase 2 | Pending |
+| FORG-01 | Phase 3 | Pending |
+| FORG-02 | Phase 3 | Pending |
+| FORG-03 | Phase 3 | Pending |
+| FORG-04 | Phase 3 | Pending |
+| FORG-05 | Phase 3 | Pending |
+| FORG-06 | Phase 3 | Pending |
+| FORG-07 | Phase 3 | Pending |
+| EXPT-01 | Phase 4 | Pending |
+| EXPT-02 | Phase 4 | Pending |
+| EXPT-03 | Phase 4 | Pending |
+| EXPT-04 | Phase 4 | Pending |
 
 **Coverage:**
 - v1 requirements: 32 total
-- Mapped to phases: 0
-- Unmapped: 32 ⚠️
+- Mapped to phases: 32
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-05-26*
-*Last updated: 2026-05-26 after initial definition*
+*Last updated: 2026-05-26 after roadmap creation*
