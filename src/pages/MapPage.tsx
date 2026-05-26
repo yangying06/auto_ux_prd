@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
+import { useLocation } from 'wouter'
 import { startDecomposition, pollDecomposition } from '../lib/api'
 import { useAppStore } from '../store/appStore'
 import { UploadCard } from '../components/upload/UploadCard'
 import { DecompProgress } from '../components/upload/DecompProgress'
 import { TreeSummary } from '../components/upload/TreeSummary'
+import { TopAppBar } from '../components/map/TopAppBar'
+import { TreeCanvas } from '../components/map/TreeCanvas'
+import { PreviewDrawer } from '../components/map/PreviewDrawer'
 
 type Stage = 'upload' | 'decomposing' | 'done' | 'error' | 'map'
 
@@ -24,6 +28,8 @@ export function MapPage() {
   const sessionIdRef = useRef<string | null>(null)
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
+  const [, navigate] = useLocation()
+
   const prdTree = useAppStore((s) => s.prdTree)
   const settings = useAppStore((s) => s.settings)
   const decompositionSteps = useAppStore((s) => s.decompositionSteps)
@@ -34,6 +40,7 @@ export function MapPage() {
   const resetDecomposition = useAppStore((s) => s.resetDecomposition)
   const setPrdTree = useAppStore((s) => s.setPrdTree)
   const setSelectedNodeId = useAppStore((s) => s.setSelectedNodeId)
+  const selectedNodeId = useAppStore((s) => s.selectedNodeId)
 
   const clearPolling = () => {
     if (pollIntervalRef.current) {
@@ -129,6 +136,7 @@ export function MapPage() {
     setStage('upload')
     setDecompError(null)
     setNodeCount(0)
+    setSelectedNodeId(null)
   }
 
   const handleViewMap = () => {
@@ -140,9 +148,29 @@ export function MapPage() {
     return () => { clearPolling() }
   }, [])
 
-  if (stage === 'map') {
-    // Full map layout rendered in Plan 04 — placeholder prevents unreachable-code TS error
-    return <div className="w-full h-screen bg-background blueprint-grid animate-fade-in" />
+  if (stage === 'map' && prdTree) {
+    const selectedNode = selectedNodeId ? (prdTree[selectedNodeId] ?? null) : null
+
+    return (
+      <div className="w-full h-screen flex flex-col bg-background animate-fade-in overflow-hidden">
+        <TopAppBar onUploadNew={handleReset} />
+        <main className="flex-1 flex overflow-hidden">
+          <TreeCanvas
+            tree={prdTree}
+            selectedNodeId={selectedNodeId}
+            onNodeClick={(id) => setSelectedNodeId(id)}
+            onNodeDoubleClick={(id) => {
+              setSelectedNodeId(null)
+              navigate('/forge/' + id)
+            }}
+          />
+          <PreviewDrawer
+            node={selectedNode}
+            onClose={() => setSelectedNodeId(null)}
+          />
+        </main>
+      </div>
+    )
   }
 
   return (
