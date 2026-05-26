@@ -1,18 +1,25 @@
 interface DecompProgressProps {
   steps: Array<{ label: string; status: 'pending' | 'active' | 'complete' | 'error' }>
   nodeCount: number
+  isDone?: boolean
   error?: string | null
 }
 
-export function DecompProgress({ steps, nodeCount, error }: DecompProgressProps) {
+export function DecompProgress({ steps, nodeCount, isDone = false, error }: DecompProgressProps) {
   return (
     <>
       {/* Header row */}
       <div className="flex items-center gap-2 w-full">
-        <span className="pulse-dot bg-secondary-container w-2 h-2 rounded-full flex-shrink-0" />
-        <span className="text-headline-sm text-on-surface">Analyzing your PRD...</span>
+        {isDone ? (
+          <span className="material-symbols-outlined text-tertiary flex-shrink-0" style={{ fontSize: '16px', fontVariationSettings: "'FILL' 1" }}>check_circle</span>
+        ) : (
+          <span className="pulse-dot bg-secondary-container w-2 h-2 rounded-full flex-shrink-0" />
+        )}
+        <span className="text-headline-sm text-on-surface">
+          {isDone ? '分析完成' : '正在分析PRD文档...'}
+        </span>
         <span className="text-label-md text-on-surface-variant ml-auto">
-          {nodeCount > 0 ? `${nodeCount} nodes found` : ''}
+          {nodeCount > 0 ? `${nodeCount} 个节点` : ''}
         </span>
       </div>
 
@@ -53,7 +60,7 @@ export function DecompProgress({ steps, nodeCount, error }: DecompProgressProps)
         <div className="w-full bg-error-container/10 border border-error-container rounded-lg px-4 py-2 flex items-start gap-2 mt-4">
           <span className="material-symbols-outlined text-error flex-shrink-0" style={{ fontSize: '18px' }}>error_outline</span>
           <div>
-            <p className="text-body-lg text-error">Analysis failed</p>
+            <p className="text-body-lg text-error">分析失败</p>
             <p className="text-body-md text-on-surface-variant">{error}</p>
           </div>
         </div>
@@ -63,7 +70,7 @@ export function DecompProgress({ steps, nodeCount, error }: DecompProgressProps)
       <div className="flex items-center gap-1 border-t border-outline-variant pt-2 mt-4 w-full">
         <span className="material-symbols-outlined text-tertiary" style={{ fontSize: '14px' }}>account_tree</span>
         <span className="text-code-sm text-on-surface-variant">
-          {nodeCount} nodes found so far
+          {isDone ? `共提取 ${nodeCount} 个节点` : `已发现 ${nodeCount} 个节点`}
         </span>
       </div>
     </>

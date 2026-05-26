@@ -715,19 +715,19 @@ async function runDecompositionJob(sessionId: string, mdText: string): Promise<v
   if (!session) return
 
   // Step 1: L1 nodes
-  session.currentStep = 'Decomposing top-level modules'
+  session.currentStep = '正在识别顶层模块...'
   const l1Nodes = await decomposeL1(mdText)
   session.nodes.push(...l1Nodes)
 
   // Step 2: Expand each L1 branch sequentially
   for (const l1 of l1Nodes) {
-    session.currentStep = `Expanding: ${l1.label}`
+    session.currentStep = `正在展开：${l1.label}`
     const branchNodes = await decomposeBranch(mdText, l1)
     session.nodes.push(...branchNodes)
   }
 
   session.status = 'done'
-  session.currentStep = 'Complete'
+  session.currentStep = '分析完成'
 }
 
 app.use(cors({ origin: ['http://127.0.0.1:5173', 'http://localhost:5173'] }))
@@ -763,7 +763,7 @@ app.post('/api/decompose/start', (req, res) => {
   decompositionSessions.set(sessionId, {
     status: 'running',
     nodes: [],
-    currentStep: 'Starting',
+    currentStep: '正在识别顶层模块...',
   })
 
   // Fire-and-forget: do NOT await. Frontend polls for status.
