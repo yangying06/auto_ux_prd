@@ -24,6 +24,7 @@
     "react-dom": "latest",
     "typescript": "latest",
     "vite": "latest",
+    "wouter": "^3.10.0",
     "zustand": "^5.0.13"
   },
   "devDependencies": {
