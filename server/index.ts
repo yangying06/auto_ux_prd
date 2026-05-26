@@ -710,6 +710,44 @@ async function decomposeBranch(mdText: string, parentNode: PrdNode): Promise<Prd
   return normalizeDecompositionNodes(raw)
 }
 
+async function runMockDecompositionJob(sessionId: string): Promise<void> {
+  const session = decompositionSessions.get(sessionId)
+  if (!session) return
+
+  const mockSteps = [
+    { step: '正在识别顶层模块...', delay: 800 },
+    { step: '正在展开：核心玩法系统', delay: 1000 },
+    { step: '正在展开：用户界面层', delay: 1000 },
+    { step: '正在展开：数据与存档', delay: 800 },
+  ]
+
+  const mockNodes: PrdNode[] = [
+    { id: 'CORE-01', parentId: null, label: '核心玩法系统', summary: '游戏核心循环与机制', content: 'mock', type: 'module', status: 'pending', level: 1, order: 0, needsPolish: false, extractedFrom: null, techNotes: null, children: ['CORE-02', 'CORE-03'] },
+    { id: 'CORE-02', parentId: 'CORE-01', label: '战斗系统', summary: '实时战斗与技能触发', content: 'mock', type: 'feature', status: 'pending', level: 2, order: 0, needsPolish: true, extractedFrom: null, techNotes: null, children: [] },
+    { id: 'CORE-03', parentId: 'CORE-01', label: '关卡进程', summary: '关卡解锁与难度曲线', content: 'mock', type: 'feature', status: 'pending', level: 2, order: 1, needsPolish: false, extractedFrom: null, techNotes: null, children: [] },
+    { id: 'UI-01', parentId: null, label: '用户界面层', summary: '主界面与导航结构', content: 'mock', type: 'module', status: 'pending', level: 1, order: 1, needsPolish: false, extractedFrom: null, techNotes: null, children: ['UI-02', 'UI-03'] },
+    { id: 'UI-02', parentId: 'UI-01', label: '主菜单界面', summary: '游戏入口与模式选择', content: 'mock', type: 'ui', status: 'pending', level: 2, order: 0, needsPolish: true, extractedFrom: null, techNotes: null, children: [] },
+    { id: 'UI-03', parentId: 'UI-01', label: 'HUD 战斗界面', summary: '战斗中的信息显示层', content: 'mock', type: 'ui', status: 'pending', level: 2, order: 1, needsPolish: true, extractedFrom: null, techNotes: null, children: [] },
+    { id: 'DATA-01', parentId: null, label: '数据与存档', summary: '本地存档与进度同步', content: 'mock', type: 'module', status: 'pending', level: 1, order: 2, needsPolish: false, extractedFrom: null, techNotes: null, children: ['DATA-02'] },
+    { id: 'DATA-02', parentId: 'DATA-01', label: '存档管理', summary: '多存档槽与自动存档', content: 'mock', type: 'feature', status: 'pending', level: 2, order: 0, needsPolish: false, extractedFrom: null, techNotes: null, children: [] },
+  ]
+
+  for (const { step, delay } of mockSteps) {
+    session.currentStep = step
+    await new Promise((r) => setTimeout(r, delay))
+    // Push nodes that belong to this step
+    const pushed = mockNodes.filter((n) =>
+      n.parentId === null
+        ? step === '正在识别顶层模块...'
+        : step.includes(n.label) || (n.parentId !== null && mockNodes.find((p) => p.id === n.parentId && step.includes(p.label)))
+    )
+    session.nodes.push(...pushed.filter((n) => !session.nodes.find((e) => e.id === n.id)))
+  }
+
+  session.status = 'done'
+  session.currentStep = '分析完成'
+}
+
 async function runDecompositionJob(sessionId: string, mdText: string): Promise<void> {
   const session = decompositionSessions.get(sessionId)
   if (!session) return
@@ -767,7 +805,10 @@ app.post('/api/decompose/start', (req, res) => {
   })
 
   // Fire-and-forget: do NOT await. Frontend polls for status.
-  runDecompositionJob(sessionId, mdText).catch((err: unknown) => {
+  const jobFn = process.env.MOCK_DECOMPOSE === 'true'
+    ? runMockDecompositionJob(sessionId)
+    : runDecompositionJob(sessionId, mdText)
+  jobFn.catch((err: unknown) => {
     const session = decompositionSessions.get(sessionId)
     if (session) {
       session.status = 'error'
