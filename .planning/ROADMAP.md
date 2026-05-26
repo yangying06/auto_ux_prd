@@ -12,7 +12,7 @@ Build a desktop-web tool that takes a raw PRD Markdown file and delivers a set o
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Foundation & Pipeline** - Infrastructure, upload, and AI decomposition — the full MD-to-tree pipeline
+- [x] **Phase 1: Foundation & Pipeline** - Infrastructure, upload, and AI decomposition — the full MD-to-tree pipeline (completed 2026-05-26)
 - [ ] **Phase 2: Mindmap & Preview** - Interactive markmap rendering with node status badges and preview drawer
 - [ ] **Phase 3: Deep Forge** - Per-node chat-based requirement polish with AI completion assessment
 - [ ] **Phase 4: Export** - Zip export of completed spec documents, gated on full node completion
@@ -36,7 +36,7 @@ Plans:
 - [x] 01-01-PLAN.md — Types, store migration (v3→v4), Express body limit fix
 - [x] 01-02-PLAN.md — Server decomposition endpoint with Claude tool-use pipeline
 - [x] 01-03-PLAN.md — Upload UI components (UploadCard, DecompProgress, MapPage)
-- [ ] 01-04-PLAN.md — wouter routing setup, ForgePage stub, end-to-end wiring
+- [x] 01-04-PLAN.md — wouter routing setup, ForgePage stub, end-to-end wiring
 
 ### Phase 2: Mindmap & Preview
 **Goal**: Users can visually explore the document structure as an interactive mindmap and inspect any node
@@ -82,7 +82,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation & Pipeline | 3/4 | In Progress|  |
+| 1. Foundation & Pipeline | 4/4 | Complete   | 2026-05-26 |
 | 2. Mindmap & Preview | 0/TBD | Not started | - |
 | 3. Deep Forge | 0/TBD | Not started | - |
 | 4. Export | 0/TBD | Not started | - |
