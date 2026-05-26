@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>GameUX PromptForge - Mindmap Analysis</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "tertiary": "#4edea3",
+                        "secondary": "#adc6ff",
+                        "on-error": "#690005",
+                        "primary-fixed": "#e5e1e4",
+                        "secondary-fixed": "#d8e2ff",
+                        "background": "#141313",
+                        "on-surface-variant": "#c8c5ca",
+                        "on-surface": "#e5e2e1",
+                        "secondary-container": "#0566d9",
+                        "primary-fixed-dim": "#c8c6c8",
+                        "error": "#ffb4ab",
+                        "surface-container-high": "#2b2a2a",
+                        "inverse-on-surface": "#313030",
+                        "on-primary-fixed-variant": "#474649",
+                        "on-secondary-fixed-variant": "#004395",
+                        "on-primary-container": "#7a787b",
+                        "on-background": "#e5e2e1",
+                        "secondary-fixed-dim": "#adc6ff",
+                        "on-tertiary-fixed": "#002113",
+                        "on-primary": "#313032",
+                        "surface-container-highest": "#353434",
+                        "surface-container-low": "#1c1b1b",
+                        "on-tertiary-container": "#008a5f",
+                        "on-tertiary": "#003824",
+                        "on-secondary-fixed": "#001a42",
+                        "on-secondary": "#002e6a",
+                        "surface-tint": "#c8c6c8",
+                        "on-secondary-container": "#e6ecff",
+                        "surface-bright": "#3a3939",
+                        "on-error-container": "#ffdad6",
+                        "outline-variant": "#47464a",
+                        "on-tertiary-fixed-variant": "#005236",
+                        "surface-dim": "#141313",
+                        "surface-container": "#201f1f",
+                        "surface-variant": "#353434",
+                        "surface": "#141313",
+                        "inverse-surface": "#e5e2e1",
+                        "tertiary-fixed-dim": "#4edea3",
+                        "surface-container-lowest": "#0e0e0e",
+                        "on-primary-fixed": "#1c1b1d",
+                        "primary-container": "#09090b",
+                        "primary": "#c8c6c8",
+                        "error-container": "#93000a",
+                        "tertiary-container": "#000c05",
+                        "inverse-primary": "#5f5e60",
+                        "tertiary-fixed": "#6ffbbe",
+                        "outline": "#919095"
+                    },
+                    borderRadius: {
+                        DEFAULT: "0.25rem",
+                        lg: "0.5rem",
+                        xl: "0.75rem",
+                        full: "9999px"
+                    },
+                    spacing: {
+                        md: "16px",
+                        base: "4px",
+                        "margin-desktop": "32px",
+                        lg: "24px",
+                        xs: "4px",
+                        gutter: "16px",
+                        xl: "48px",
+                        "margin-mobile": "16px",
+                        sm: "8px"
+                    },
+                    fontFamily: {
+                        "headline-sm": ["Inter"],
+                        "headline-md": ["Inter"],
+                        "display-lg": ["Inter"],
+                        "code-sm": ["JetBrains Mono"],
+                        "body-md": ["Inter"],
+                        "body-lg": ["Inter"],
+                        "label-md": ["JetBrains Mono"]
+                    },
+                    fontSize: {
+                        "headline-sm": ["18px", { lineHeight: "24px", fontWeight: "600" }],
+                        "headline-md": ["24px", { lineHeight: "32px", letterSpacing: "-0.01em", fontWeight: "600" }],
+                        "display-lg": ["48px", { lineHeight: "56px", letterSpacing: "-0.02em", fontWeight: "700" }],
+                        "code-sm": ["12px", { lineHeight: "18px", fontWeight: "400" }],
+                        "body-md": ["14px", { lineHeight: "20px", fontWeight: "400" }],
+                        "body-lg": ["16px", { lineHeight: "24px", fontWeight: "400" }],
+                        "label-md": ["12px", { lineHeight: "16px", letterSpacing: "0.05em", fontWeight: "500" }]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        .blueprint-grid {
+            background-image: linear-gradient(to right, rgba(200, 198, 200, 0.05) 1px, transparent 1px),
+                              linear-gradient(to bottom, rgba(200, 198, 200, 0.05) 1px, transparent 1px);
+            background-size: 32px 32px;
+        }
+        
+        .node-glow {
+            box-shadow: 0 0 15px -3px rgba(173, 198, 255, 0.2);
+        }
+        
+        .active-glow {
+            box-shadow: 0 0 20px -3px rgba(78, 222, 163, 0.3);
+            border-color: #4edea3;
+        }
+        
+        .processing-glow {
+            box-shadow: 0 0 20px -3px rgba(5, 102, 217, 0.4);
+            border-color: #0566d9;
+        }
+
+        /* SVG Connection Lines */
+        .svg-line {
+            stroke: #47464a;
+            stroke-width: 2;
+            fill: none;
+            vector-effect: non-scaling-stroke;
+        }
+        
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 8px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #141313;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #353434;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body class="bg-background text-on-surface h-screen w-screen overflow-hidden flex flex-col font-body-md">
+<!-- TopAppBar Component (from JSON structure, adapted) -->
+<header class="flex justify-between items-center h-16 px-lg w-full bg-surface border-b border-outline-variant z-20 shrink-0">
+<div class="flex items-center gap-md">
+<span class="material-symbols-outlined text-primary">account_tree</span>
+<h1 class="font-headline-md text-headline-md font-bold text-primary">GameUX PromptForge</h1>
+<div class="h-6 w-[1px] bg-outline-variant mx-sm"></div>
+<div class="flex items-center gap-sm bg-surface-container-high px-sm py-xs rounded-full border border-outline-variant">
+<span class="material-symbols-outlined text-tertiary" style="font-variation-settings: 'FILL' 1; font-size: 16px;">check_circle</span>
+<span class="font-label-md text-label-md text-tertiary">Markmap Ready</span>
+</div>
+</div>
+<div class="flex items-center gap-md">
+<button class="flex items-center gap-sm bg-surface-container-high hover:bg-surface-variant transition-colors text-on-surface border border-outline-variant rounded-lg px-md py-sm font-label-md text-label-md cursor-pointer active:opacity-80">
+<span class="material-symbols-outlined" style="font-size: 18px;">upload_file</span>
+                Upload PRD
+            </button>
+<div class="flex gap-sm">
+<button class="text-on-surface-variant hover:text-primary transition-colors cursor-pointer active:opacity-80 p-xs">
+<span class="material-symbols-outlined">settings</span>
+</button>
+<button class="text-on-surface-variant hover:text-primary transition-colors cursor-pointer active:opacity-80 p-xs">
+<span class="material-symbols-outlined">notifications</span>
+</button>
+<div class="w-8 h-8 rounded-full bg-surface-container-highest border border-outline-variant flex items-center justify-center overflow-hidden">
+<span class="material-symbols-outlined text-on-surface-variant">person</span>
+</div>
+</div>
+</div>
+</header>
+<!-- Main Workspace Area -->
+<main class="flex-1 flex overflow-hidden w-full">
+<!-- Left: Mindmap Canvas (70%) -->
+<section class="flex-1 relative blueprint-grid overflow-auto custom-scrollbar flex items-center justify-center p-xl">
+<!-- Canvas Controls -->
+<div class="absolute bottom-lg right-lg flex gap-xs bg-surface-container border border-outline-variant rounded-lg p-xs shadow-lg z-10">
+<button class="p-sm text-on-surface-variant hover:text-primary transition-colors hover:bg-surface-variant rounded">
+<span class="material-symbols-outlined">zoom_out</span>
+</button>
+<button class="p-sm text-on-surface-variant hover:text-primary transition-colors hover:bg-surface-variant rounded">
+<span class="material-symbols-outlined">fit_screen</span>
+</button>
+<button class="p-sm text-on-surface-variant hover:text-primary transition-colors hover:bg-surface-variant rounded">
+<span class="material-symbols-outlined">zoom_in</span>
+</button>
+</div>
+<!-- Mindmap Structure Container -->
+<div class="relative flex items-center min-w-[800px] gap-[80px]">
+<!-- SVG Connections Background -->
+<svg class="absolute top-0 left-0 w-full h-full pointer-events-none" style="z-index: 0;">
+<!-- Root to Branches -->
+<path class="svg-line" d="M 280 200 C 330 200, 330 100, 380 100"></path>
+<path class="svg-line" d="M 280 200 C 330 200, 330 300, 380 300"></path>
+<!-- Branch 1 to Leaves -->
+<path class="svg-line" d="M 580 100 L 660 100"></path>
+<!-- Branch 2 to Leaves -->
+<path class="svg-line" d="M 580 300 L 660 300"></path>
+</svg>
+<!-- Column 1: Root -->
+<div class="z-10 shrink-0 w-[280px]">
+<div class="bg-surface-container border border-outline-variant rounded-xl p-md node-glow cursor-pointer hover:border-primary transition-colors relative">
+<div class="flex items-center gap-sm mb-sm text-primary">
+<span class="material-symbols-outlined">folder_special</span>
+<span class="font-label-md text-label-md">ROOT NODE</span>
+</div>
+<h2 class="font-headline-sm text-headline-sm text-on-surface mb-sm">GoldenLuck - Pyramid &amp; Caishen Gameplay PRD</h2>
+<div class="font-code-sm text-code-sm text-on-surface-variant border-t border-outline-variant pt-sm mt-sm">
+                            Status: <span class="text-tertiary">Parsed</span> | Nodes: 12
+                        </div>
+</div>
+</div>
+<!-- Column 2: Branches -->
+<div class="z-10 flex flex-col gap-[120px] shrink-0 w-[200px]">
+<!-- Branch 1 -->
+<div class="bg-surface-container border border-outline-variant rounded-lg p-md shadow-sm cursor-pointer hover:border-primary transition-colors">
+<div class="flex items-center gap-sm mb-xs text-secondary">
+<span class="material-symbols-outlined" style="font-size: 16px;">category</span>
+<span class="font-label-md text-label-md">MODULE</span>
+</div>
+<h3 class="font-body-lg text-body-lg text-on-surface">Pyramid Lottery</h3>
+</div>
+<!-- Branch 2 -->
+<div class="bg-surface-container border border-outline-variant rounded-lg p-md shadow-sm cursor-pointer hover:border-primary transition-colors">
+<div class="flex items-center gap-sm mb-xs text-secondary">
+<span class="material-symbols-outlined" style="font-size: 16px;">category</span>
+<span class="font-label-md text-label-md">MODULE</span>
+</div>
+<h3 class="font-body-lg text-body-lg text-on-surface">Caishen Red Envelope</h3>
+</div>
+</div>
+<!-- Column 3: Leaves (Entities/Prompts) -->
+<div class="z-10 flex flex-col gap-[100px] shrink-0 w-[320px]">
+<!-- Leaf A: Unprocessed (Selected/Active) -->
+<div class="bg-surface-container-highest border border-outline-variant rounded-xl p-md processing-glow cursor-pointer relative group">
+<div class="flex justify-between items-start mb-sm">
+<div class="flex items-center gap-sm text-on-surface">
+<span class="material-symbols-outlined" style="font-size: 18px;">bolt</span>
+<h4 class="font-headline-sm text-headline-sm">Pyramid Rise &amp; List Spin</h4>
+</div>
+<!-- Bright Orange To Process Badge -->
+<div class="flex items-center gap-xs bg-[#b22a00]/20 border border-[#ff5429] text-[#ff8b6b] px-2 py-1 rounded-full text-[10px] font-bold tracking-wider uppercase">
+<span class="material-symbols-outlined" style="font-size: 12px;">auto_awesome</span>
+                                To Process
+                            </div>
+</div>
+<p class="font-body-md text-body-md text-on-surface-variant line-clamp-2 mb-md">
+                            Jewel trigger logic mapping to `fx_Pyramid_appear`. Needs exact timeline integration.
+                        </p>
+<div class="flex items-center justify-between border-t border-outline-variant pt-sm">
+<span class="font-code-sm text-code-sm text-on-primary-container">ID: PL-01</span>
+<span class="font-label-md text-label-md text-primary opacity-0 group-hover:opacity-100 transition-opacity">Double-click to preview</span>
+</div>
+</div>
+<!-- Leaf B: Processed -->
+<div class="bg-surface border border-outline-variant rounded-xl p-md cursor-pointer hover:border-primary transition-colors relative">
+<div class="flex justify-between items-start mb-sm">
+<div class="flex items-center gap-sm text-on-surface">
+<span class="material-symbols-outlined" style="font-size: 18px;">magic_button</span>
+<h4 class="font-headline-sm text-headline-sm">Caishen Drop</h4>
+</div>
+<!-- Green Prompt Generated Badge -->
+<div class="flex items-center gap-xs bg-tertiary-container/40 border border-on-tertiary-container text-tertiary px-2 py-1 rounded-full text-[10px] font-bold tracking-wider uppercase">
+<span class="material-symbols-outlined" style="font-size: 12px; font-variation-settings: 'FILL' 1;">check_circle</span>
+                                Generated
+                            </div>
+</div>
+<p class="font-body-md text-body-md text-on-surface-variant line-clamp-2 mb-md">
+                            3 stages of envelope dropping. Context window built and locked.
+                        </p>
+<div class="flex items-center justify-between border-t border-outline-variant pt-sm">
+<span class="font-code-sm text-code-sm text-on-primary-container">ID: CE-04</span>
+</div>
+</div>
+</div>
+</div>
+</section>
+<!-- Right: Preview Drawer (30%) -->
+<aside class="w-[30%] min-w-[360px] bg-surface-container border-l border-outline-variant shadow-[-8px_0_24px_rgba(0,0,0,0.5)] flex flex-col z-20 shrink-0">
+<!-- Drawer Header -->
+<div class="flex justify-between items-center p-md border-b border-outline-variant shrink-0 bg-surface">
+<div class="flex items-center gap-sm">
+<span class="material-symbols-outlined text-primary">data_object</span>
+<h2 class="font-headline-sm text-headline-sm text-on-surface truncate">Pyramid Rise &amp; List Spin</h2>
+</div>
+<button class="text-on-surface-variant hover:text-primary transition-colors cursor-pointer p-xs rounded hover:bg-surface-variant">
+<span class="material-symbols-outlined">close</span>
+</button>
+</div>
+<!-- Drawer Content (Markdown Style) -->
+<div class="flex-1 overflow-y-auto custom-scrollbar p-lg text-on-surface-variant font-body-md space-y-md">
+<h3 class="font-headline-sm text-headline-sm text-on-surface border-b border-outline-variant pb-xs">Extracted Context</h3>
+<p>
+                    The Pyramid Rise sequence is triggered immediately after the player collects the final jewel in the base game loop. The transition must be seamless to maintain engagement.
+                </p>
+<h3 class="font-headline-sm text-headline-sm text-on-surface border-b border-outline-variant pb-xs mt-lg">Technical Implementation Notes</h3>
+<ul class="list-disc list-inside space-y-sm">
+<li>Requires mapping to specific animation timeline.</li>
+<li>Audio cue sync critical on frame 45.</li>
+<li>Block input during transition state.</li>
+</ul>
+<h3 class="font-headline-sm text-headline-sm text-on-surface border-b border-outline-variant pb-xs mt-lg">Code References</h3>
+<div class="bg-surface-container-highest border border-outline-variant rounded-md p-sm font-code-sm text-code-sm overflow-x-auto">
+<pre><code class="text-secondary">function triggerPyramidRise() {
+    state.set('transitioning', true);
+    animator.play('fx_Pyramid_appear'); // Target asset
+    audio.playCue('chime_success');
+}</code></pre>
+</div>
+<div class="mt-md p-md bg-secondary-container/10 border border-secondary/20 rounded-md">
+<div class="flex items-start gap-sm">
+<span class="material-symbols-outlined text-secondary mt-xs" style="font-size: 16px;">info</span>
+<p class="font-label-md text-label-md text-secondary">AI Analysis suggests breaking this into two sub-prompts for better generation accuracy regarding the particle effects.</p>
+</div>
+</div>
+</div>
+<!-- Drawer Footer / Floating Action -->
+<div class="p-md border-t border-outline-variant shrink-0 bg-surface-container-low">
+<button class="w-full bg-secondary-container hover:bg-secondary-container/90 text-on-secondary-container font-headline-sm text-headline-sm py-sm px-lg rounded-lg flex items-center justify-center gap-sm transition-all shadow-lg shadow-secondary-container/20 border border-[#2b88ff]/30 cursor-pointer">
+<span class="material-symbols-outlined">construction</span>
+                    Enter Deep Forge
+                </button>
+</div>
+</aside>
+</main>
+</body></html>
