@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01-01-PLAN.md (PrdNode types + store v4 + Express 10MB)
-last_updated: "2026-05-26T10:24:54.414Z"
+stopped_at: Completed 01-03-PLAN.md (upload-to-decomposition UI)
+last_updated: "2026-05-26T10:30:41.226Z"
 last_activity: 2026-05-26
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 4
-  completed_plans: 1
+  completed_plans: 3
   percent: 0
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-05-26)
 ## Current Position
 
 Phase: 01 (foundation-pipeline) — EXECUTING
-Plan: 2 of 4
+Plan: 4 of 4
 Status: Ready to execute
 Last activity: 2026-05-26
 
@@ -53,6 +53,8 @@ Progress: [░░░░░░░░░░] 0%
 
 *Updated after each plan completion*
 | Phase 01 P01 | 5 | 3 tasks | 3 files |
+| Phase 01 P02 | 2 | 3 tasks | 1 files |
+| Phase 01 P03 | 25 | 4 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -66,6 +68,12 @@ Recent decisions affecting current work:
 - Init: Single document mode, localStorage persistence for now
 - [Phase 01]: Store version bumped 3->4 with migrate function carrying forward all v3 fields
 - [Phase 01]: prdTree and selectedNodeId persisted; decompositionStatus/Steps session-only
+- [Phase 01]: In-memory Map session store sufficient for single-user desktop app (no cross-restart persistence needed)
+- [Phase 01]: Forced tool_choice on Claude decomposition calls ensures structured PrdNode output (not autonomous selection)
+- [Phase 01]: normalizeDecompositionNodes returns [] on bad input so runDecompositionJob error flows through session status cleanly
+- [Phase 01]: UploadCard renders as fragment — card shell owned by MapPage for consistent stage transitions
+- [Phase 01]: navigateRef pattern used for safe navigation inside async setInterval callbacks
+- [Phase 01]: wouter installed in plan 03 (not 04) — MapPage requires useLocation immediately
 
 ### Pending Todos
 
@@ -78,6 +86,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-26T10:24:54.408Z
-Stopped at: Completed 01-01-PLAN.md (PrdNode types + store v4 + Express 10MB)
+Last session: 2026-05-26T10:30:41.221Z
+Stopped at: Completed 01-03-PLAN.md (upload-to-decomposition UI)
 Resume file: None

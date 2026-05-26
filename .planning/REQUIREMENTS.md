@@ -22,10 +22,10 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Decomposition
 
-- [ ] **DCMP-01**: Server通过Claude tool-use API将MD文档拆解为结构化树JSON
-- [ ] **DCMP-02**: AI按职能/模块自动分层拆解（不依赖Markdown heading层级）
-- [ ] **DCMP-03**: normalizeDecompositionTree()验证器保证返回数据结构有效
-- [ ] **DCMP-04**: 拆解结果存储为flat node map (Record<id, PrdNode>)
+- [x] **DCMP-01**: Server通过Claude tool-use API将MD文档拆解为结构化树JSON
+- [x] **DCMP-02**: AI按职能/模块自动分层拆解（不依赖Markdown heading层级）
+- [x] **DCMP-03**: normalizeDecompositionTree()验证器保证返回数据结构有效
+- [x] **DCMP-04**: 拆解结果存储为flat node map (Record<id, PrdNode>)
 
 ### Mindmap
 
@@ -103,10 +103,10 @@ Deferred to future release. Tracked but not in current roadmap.
 | UPLD-01 | Phase 1 | Pending |
 | UPLD-02 | Phase 1 | Pending |
 | UPLD-03 | Phase 1 | Pending |
-| DCMP-01 | Phase 1 | Pending |
-| DCMP-02 | Phase 1 | Pending |
-| DCMP-03 | Phase 1 | Pending |
-| DCMP-04 | Phase 1 | Pending |
+| DCMP-01 | Phase 1 | Complete |
+| DCMP-02 | Phase 1 | Complete |
+| DCMP-03 | Phase 1 | Complete |
+| DCMP-04 | Phase 1 | Complete |
 | MAP-01 | Phase 2 | Pending |
 | MAP-02 | Phase 2 | Pending |
 | MAP-03 | Phase 2 | Pending |

@@ -34,8 +34,8 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 Plans:
 - [x] 01-01-PLAN.md — Types, store migration (v3→v4), Express body limit fix
-- [ ] 01-02-PLAN.md — Server decomposition endpoint with Claude tool-use pipeline
-- [ ] 01-03-PLAN.md — Upload UI components (UploadCard, DecompProgress, MapPage)
+- [x] 01-02-PLAN.md — Server decomposition endpoint with Claude tool-use pipeline
+- [x] 01-03-PLAN.md — Upload UI components (UploadCard, DecompProgress, MapPage)
 - [ ] 01-04-PLAN.md — wouter routing setup, ForgePage stub, end-to-end wiring
 
 ### Phase 2: Mindmap & Preview
@@ -82,7 +82,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation & Pipeline | 1/4 | In Progress|  |
+| 1. Foundation & Pipeline | 3/4 | In Progress|  |
 | 2. Mindmap & Preview | 0/TBD | Not started | - |
 | 3. Deep Forge | 0/TBD | Not started | - |
 | 4. Export | 0/TBD | Not started | - |
