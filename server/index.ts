@@ -607,11 +607,11 @@ function normalizeDecompositionNodes(raw: unknown): PrdNode[] {
 
       return {
         id, parentId, label, summary, content, type,
-        status: 'pending' as const,
+        status: 'pending',
         level, order, needsPolish, techNotes,
         extractedFrom: null,
-        children: [],
-      } satisfies PrdNode
+        children: [] as string[],
+      } as PrdNode
     })
     .filter((n): n is PrdNode => n !== null)
 
