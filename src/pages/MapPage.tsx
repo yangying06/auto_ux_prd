@@ -3,6 +3,7 @@ import { startDecomposition, pollDecomposition } from '../lib/api'
 import { useAppStore } from '../store/appStore'
 import { UploadCard } from '../components/upload/UploadCard'
 import { DecompProgress } from '../components/upload/DecompProgress'
+import { TreeSummary } from '../components/upload/TreeSummary'
 
 type Stage = 'upload' | 'decomposing' | 'done' | 'error'
 
@@ -23,6 +24,7 @@ export function MapPage() {
   const sessionIdRef = useRef<string | null>(null)
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
+  const prdTree = useAppStore((s) => s.prdTree)
   const settings = useAppStore((s) => s.settings)
   const decompositionSteps = useAppStore((s) => s.decompositionSteps)
   const mergePartialTree = useAppStore((s) => s.mergePartialTree)
@@ -121,6 +123,13 @@ export function MapPage() {
     }
   }
 
+  const handleReset = () => {
+    resetDecomposition()
+    setStage('upload')
+    setDecompError(null)
+    setNodeCount(0)
+  }
+
   useEffect(() => {
     return () => { clearPolling() }
   }, [])
@@ -131,8 +140,10 @@ export function MapPage() {
         <div className="w-full transition-opacity duration-300">
           {stage === 'upload' ? (
             <UploadCard onFileRead={handleFileRead} error={uploadError} />
-          ) : stage === 'decomposing' || stage === 'done' ? (
-            <DecompProgress steps={decompositionSteps} nodeCount={nodeCount} isDone={stage === 'done'} />
+          ) : stage === 'decomposing' ? (
+            <DecompProgress steps={decompositionSteps} nodeCount={nodeCount} />
+          ) : stage === 'done' && prdTree ? (
+            <TreeSummary tree={prdTree} nodeCount={nodeCount} onReset={handleReset} />
           ) : (
             <DecompProgress steps={decompositionSteps} nodeCount={nodeCount} error={decompError} />
           )}

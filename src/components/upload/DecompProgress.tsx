@@ -1,23 +1,16 @@
 interface DecompProgressProps {
   steps: Array<{ label: string; status: 'pending' | 'active' | 'complete' | 'error' }>
   nodeCount: number
-  isDone?: boolean
   error?: string | null
 }
 
-export function DecompProgress({ steps, nodeCount, isDone = false, error }: DecompProgressProps) {
+export function DecompProgress({ steps, nodeCount, error }: DecompProgressProps) {
   return (
     <>
       {/* Header row */}
       <div className="flex items-center gap-2 w-full">
-        {isDone ? (
-          <span className="material-symbols-outlined text-tertiary flex-shrink-0" style={{ fontSize: '16px', fontVariationSettings: "'FILL' 1" }}>check_circle</span>
-        ) : (
-          <span className="pulse-dot bg-secondary-container w-2 h-2 rounded-full flex-shrink-0" />
-        )}
-        <span className="text-headline-sm text-on-surface">
-          {isDone ? '分析完成' : '正在分析PRD文档...'}
-        </span>
+        <span className="pulse-dot bg-secondary-container w-2 h-2 rounded-full flex-shrink-0" />
+        <span className="text-headline-sm text-on-surface">正在分析PRD文档...</span>
         <span className="text-label-md text-on-surface-variant ml-auto">
           {nodeCount > 0 ? `${nodeCount} 个节点` : ''}
         </span>
@@ -70,7 +63,7 @@ export function DecompProgress({ steps, nodeCount, isDone = false, error }: Deco
       <div className="flex items-center gap-1 border-t border-outline-variant pt-2 mt-4 w-full">
         <span className="material-symbols-outlined text-tertiary" style={{ fontSize: '14px' }}>account_tree</span>
         <span className="text-code-sm text-on-surface-variant">
-          {isDone ? `共提取 ${nodeCount} 个节点` : `已发现 ${nodeCount} 个节点`}
+          已发现 {nodeCount} 个节点
         </span>
       </div>
     </>
