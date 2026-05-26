@@ -1,7 +1,7 @@
 import { PrototypeBoard } from './PrototypeBoard'
 import { StateCard } from './StateCard'
 import type { RagSearchResult } from '../../types/chat'
-import type { AssetDependency, UIComponent, UXRequirementState } from '../../types/uxRequirement'
+import type { AssetDependency, UXRequirementState } from '../../types/uxRequirement'
 
 interface StateCanvasProps {
   requirement: UXRequirementState
@@ -24,51 +24,71 @@ function formatAssets(assets: AssetDependency[]) {
     .join(' · ')
 }
 
-const STATE_COLORS: Record<string, string> = {
-  idle: 'bg-outline-variant/30 text-on-surface-variant',
-  hover: 'bg-secondary/20 text-secondary',
-  pressed: 'bg-tertiary/20 text-tertiary',
-  disabled: 'bg-error/10 text-error/60',
-  loading: 'bg-primary/20 text-primary',
-  active: 'bg-secondary/30 text-secondary',
-  error: 'bg-error/20 text-error',
-}
+function RequirementTree({ requirement, missingAsset }: { requirement: UXRequirementState; missingAsset: boolean }) {
+  const items = [
+    {
+      title: '触发条件',
+      value: requirement.trigger_condition,
+      fallback: requirement.missing_reasons.trigger_condition ?? '等待补充玩家行为、目标节点和触发时机',
+      done: Boolean(requirement.trigger_condition),
+      children: requirement.trigger_condition ? ['玩家/系统触发入口已识别'] : ['需要明确触发来源'],
+    },
+    {
+      title: '资源依赖',
+      value: requirement.asset_dependencies.length ? formatAssets(requirement.asset_dependencies) : null,
+      fallback: requirement.missing_reasons.asset_dependencies ?? '等待补充图片、预制体、音效或特效资源',
+      done: !missingAsset && requirement.asset_dependencies.length > 0,
+      children: requirement.asset_dependencies.length
+        ? requirement.asset_dependencies.map((asset) => `${asset.type}: ${asset.path ?? '缺少路径'}`)
+        : ['可通过左侧附件添加参考图或界面素材'],
+    },
+    {
+      title: '执行规则',
+      value: requirement.sequence_rules,
+      fallback: requirement.missing_reasons.sequence_rules ?? '等待补充动画、反馈和状态变化顺序',
+      done: Boolean(requirement.sequence_rules),
+      children: requirement.sequence_rules ? ['交互时序可用于生成原型'] : ['需要明确执行顺序'],
+    },
+    {
+      title: '引擎约束',
+      value: requirement.engine_constraints,
+      fallback: requirement.missing_reasons.engine_constraints ?? '等待 Cocos Creator 实现约束',
+      done: Boolean(requirement.engine_constraints),
+      children: requirement.engine_constraints ? ['Cocos 实现建议已纳入'] : ['可由 RAG 检索补齐'],
+    },
+  ]
 
-function ComponentNode({ component, depth = 0 }: { component: UIComponent; depth?: number }) {
   return (
-    <div style={{ paddingLeft: `${depth * 16}px` }}>
-      <div className="group flex items-start gap-sm py-xs">
-        {/* 连线 + 图标 */}
-        <div className="mt-1 flex shrink-0 items-center gap-xs">
-          {depth > 0 && <span className="font-mono text-[10px] text-outline-variant/50">└</span>}
-          <div className="flex h-5 w-5 items-center justify-center rounded border border-outline-variant/30 bg-surface-container font-mono text-[9px] text-tertiary">
-            {component.type.slice(0, 2).toUpperCase()}
-          </div>
-        </div>
-        {/* 内容 */}
-        <div className="flex min-w-0 flex-1 flex-col gap-xs">
-          <div className="flex flex-wrap items-center gap-xs">
-            <span className="font-mono text-label-sm text-on-surface">{component.name}</span>
-            <span className="rounded bg-surface-container px-xs font-mono text-[9px] uppercase text-on-surface-variant">{component.type}</span>
-            {component.states.map((s) => (
-              <span key={s} className={`rounded px-xs font-mono text-[9px] ${STATE_COLORS[s] ?? 'bg-surface-container text-on-surface-variant'}`}>{s}</span>
-            ))}
-          </div>
-          {(component.animation_in || component.animation_out) && (
-            <div className="flex gap-sm font-mono text-[10px] text-secondary/70">
-              {component.animation_in && <span>↗ {component.animation_in}</span>}
-              {component.animation_out && <span>↙ {component.animation_out}</span>}
+    <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-outline-variant/20 bg-surface-container">
+      <div className="flex items-center justify-between border-b border-outline-variant/20 bg-surface-container-high/60 px-md py-sm">
+        <span className="font-mono text-label-sm uppercase text-secondary">需求拆解树</span>
+        <span className="font-mono text-[10px] text-on-surface-variant">{requirement.completion_rate}% complete</span>
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto p-md">
+        <div className="mb-sm font-mono text-code-sm text-on-surface">UX Requirement</div>
+        <div className="ml-sm border-l border-outline-variant/30 pl-md">
+          {items.map((item) => (
+            <div key={item.title} className="relative pb-md last:pb-0">
+              <div className="absolute -left-[21px] top-1 h-3 w-3 rounded-full border border-outline-variant/50 bg-surface-container-high" />
+              <div className="flex items-start gap-sm">
+                <span className={item.done ? 'mt-0.5 font-mono text-[10px] text-tertiary' : 'mt-0.5 font-mono text-[10px] text-error'}>
+                  {item.done ? 'DONE' : 'TODO'}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="font-mono text-label-sm text-on-surface">{item.title}</div>
+                  <p className="mt-xs line-clamp-2 text-body-sm text-on-surface-variant">{item.value ?? item.fallback}</p>
+                  <div className="mt-xs ml-sm border-l border-outline-variant/20 pl-sm">
+                    {item.children.map((child, index) => (
+                      <div key={`${item.title}-${index}`} className="font-mono text-[10px] text-on-surface-variant/70">└ {child}</div>
+                    ))}
+                  </div>
+                </div>
+              </div>
             </div>
-          )}
-          {component.notes && (
-            <p className="font-body text-[11px] leading-snug text-on-surface-variant/70">{component.notes}</p>
-          )}
+          ))}
         </div>
       </div>
-      {component.children.map((child, i) => (
-        <ComponentNode key={`${child.name}-${i}`} component={child} depth={depth + 1} />
-      ))}
-    </div>
+    </section>
   )
 }
 
@@ -133,30 +153,16 @@ export function StateCanvas({ requirement, latestRag, projectName, prototypeHtml
         </div>
       </header>
 
-      <div className="relative z-10 flex flex-1 flex-col gap-lg overflow-hidden p-lg">
-        <PrototypeBoard html={prototypeHtml} isLoading={isGeneratingPrototype} />
+      <div className="relative z-10 grid min-h-0 flex-1 grid-cols-[minmax(280px,0.42fr)_minmax(360px,0.58fr)] gap-lg overflow-hidden p-lg max-xl:grid-cols-1 max-xl:overflow-auto">
+        <div className="flex min-h-0 flex-col gap-lg">
+          <RequirementTree requirement={requirement} missingAsset={missingAsset} />
 
-        {/* 组件树面板（借鉴 GDevelop OrchestratorPlan） */}
-        {requirement.ui_components.length > 0 && (
-          <section className="flex max-h-48 shrink-0 flex-col overflow-hidden rounded-xl border border-outline-variant/20 bg-surface-container">
-            <div className="flex items-center justify-between border-b border-outline-variant/20 bg-surface-container-high/60 px-md py-xs">
-              <span className="font-mono text-label-sm uppercase text-secondary">界面组件树</span>
-              <span className="font-mono text-[10px] text-on-surface-variant">{requirement.ui_components.length} 个根节点</span>
+          <section className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div className="mb-sm flex items-center gap-xs">
+              <span className="font-mono text-label-md uppercase text-on-surface-variant">Logic State Nodes</span>
             </div>
-            <div className="overflow-auto p-sm">
-              {requirement.ui_components.map((comp, i) => (
-                <ComponentNode key={`${comp.name}-${i}`} component={comp} depth={0} />
-              ))}
-            </div>
-          </section>
-        )}
-
-        <section className="flex flex-1 flex-col overflow-hidden">
-          <div className="mb-sm flex items-center gap-xs">
-            <span className="font-mono text-label-md uppercase text-on-surface-variant">Logic State Nodes</span>
-          </div>
-          <div className="flex-1 overflow-auto pb-4">
-            <div className="flex min-w-0 flex-row flex-wrap items-start gap-lg px-xs pt-md">
+            <div className="flex-1 overflow-auto pb-4">
+              <div className="flex min-w-0 flex-row flex-wrap items-start gap-lg px-xs pt-md">
 
               <StateCard
                 title="触发条件"
@@ -221,6 +227,9 @@ export function StateCanvas({ requirement, latestRag, projectName, prototypeHtml
             </div>
           </div>
         </section>
+        </div>
+
+        <PrototypeBoard html={prototypeHtml} isLoading={isGeneratingPrototype} />
       </div>
     </main>
   )

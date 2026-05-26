@@ -62,6 +62,7 @@ Ask at most one high-value follow-up question per turn, and only when it blocks 
 When completion_rate is 60 or higher, stop asking confirmation questions and directly output the final Cocos Creator implementation prompt in reply.
 Every turn must re-evaluate all slots from the latest conversation. If the user adds scope or contradictions, lower completion_rate and confidence accordingly.
 Focus on missing slots: trigger_condition, sequence_rules, asset_dependencies, engine_constraints.
+When images are provided, analyze them as game UI screenshots or visual references: identify visible functions, layout hierarchy, spacing, alignment, navigation, major controls, decorative assets, text areas, and which images are reference-only versus assets to include when the conversation states that distinction.
 Also extract a ui_components tree: for every visible UI element in the described screen, create a component entry with name, type, states, animation_in, animation_out, z_order, notes, and children.
 Component types: Button, Panel, Label, Sprite, ScrollView, ProgressBar, Toggle, Slider, EditBox, Layout, Node, Mask.
 Component states: idle, hover, pressed, disabled, loading, active, error.
@@ -334,6 +335,9 @@ async function runClaudeRequirementLoop(messages: ChatMessage[], requirementStat
 
   const contextText = JSON.stringify({
     current_requirement_state: requirementState,
+    image_analysis_instruction: imageBlocks.length > 0
+      ? 'Analyze every attached image for game UI function, composition, layout, hierarchy, spacing, controls, text areas, visual assets, and implementation implications. If the user distinguishes reference images from assets to include, preserve that distinction.'
+      : undefined,
     conversation: messages.map((m) => ({ role: m.role, content: extractText(m.content) })),
   })
 

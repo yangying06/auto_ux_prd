@@ -57,51 +57,65 @@ export function ChatPanel({ onOpenSettings }: ChatPanelProps) {
   const [draft, setDraft] = useState('')
   const [isSending, setIsSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [attachment, setAttachment] = useState<Attachment | null>(null)
+  const [attachments, setAttachments] = useState<Attachment[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
 
+  function addAttachment(nextAttachment: Attachment) {
+    setAttachments((current) => [...current, nextAttachment])
+  }
+
+  function removeAttachment(index: number) {
+    setAttachments((current) => current.filter((_, i) => i !== index))
+  }
+
   function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0]
-    if (!file) return
-    const isImage = file.type.startsWith('image/')
-    const reader = new FileReader()
-    if (isImage) {
-      reader.onload = (e) => {
-        const dataUrl = e.target?.result as string
-        const base64 = dataUrl.split(',')[1]
-        const mediaType = file.type as ImageBlock['source']['media_type']
-        setAttachment({ kind: 'image', name: file.name, mediaType, data: base64, previewUrl: dataUrl })
+    const files = Array.from(event.target.files ?? [])
+    if (!files.length) return
+
+    files.forEach((file) => {
+      const isImage = file.type.startsWith('image/')
+      const reader = new FileReader()
+      if (isImage) {
+        reader.onload = (e) => {
+          const dataUrl = e.target?.result as string
+          const base64 = dataUrl.split(',')[1]
+          const mediaType = file.type as ImageBlock['source']['media_type']
+          addAttachment({ kind: 'image', name: file.name, mediaType, data: base64, previewUrl: dataUrl })
+        }
+        reader.readAsDataURL(file)
+      } else {
+        reader.onload = (e) => {
+          addAttachment({ kind: 'text', name: file.name, content: e.target?.result as string })
+        }
+        reader.readAsText(file, 'utf-8')
       }
-      reader.readAsDataURL(file)
-    } else {
-      reader.onload = (e) => {
-        setAttachment({ kind: 'text', name: file.name, content: e.target?.result as string })
-      }
-      reader.readAsText(file, 'utf-8')
-    }
+    })
+
     event.target.value = ''
   }
 
   async function handleSend() {
     const text = draft.trim()
-    if (!text && !attachment || isSending) return
+    if ((!text && attachments.length === 0) || isSending) return
 
-    let messageContent: string | ContentBlock[]
-    if (attachment?.kind === 'image') {
-      const blocks: ContentBlock[] = []
-      if (text) blocks.push({ type: 'text', text })
-      blocks.push({ type: 'image', source: { type: 'base64', media_type: attachment.mediaType, data: attachment.data } })
-      messageContent = blocks
-    } else if (attachment?.kind === 'text') {
-      messageContent = `${text ? text + '\n\n' : ''}[附件: ${attachment.name}]\n\`\`\`\n${attachment.content}\n\`\`\``
-    } else {
-      messageContent = text
-    }
+    const imageAttachments = attachments.filter((item): item is Extract<Attachment, { kind: 'image' }> => item.kind === 'image')
+    const textAttachments = attachments.filter((item): item is Extract<Attachment, { kind: 'text' }> => item.kind === 'text')
+    const textWithAttachments = [
+      text,
+      ...textAttachments.map((item) => `[附件: ${item.name}]\n\`\`\`\n${item.content}\n\`\`\``),
+    ].filter(Boolean).join('\n\n')
+
+    const messageContent: string | ContentBlock[] = imageAttachments.length > 0
+      ? [
+          ...(textWithAttachments ? [{ type: 'text' as const, text: textWithAttachments }] : []),
+          ...imageAttachments.map((item) => ({ type: 'image' as const, source: { type: 'base64' as const, media_type: item.mediaType, data: item.data } })),
+        ]
+      : textWithAttachments
 
     const nextMessages = [...messages, { role: 'user' as const, content: messageContent }]
     setMessages(nextMessages)
     setDraft('')
-    setAttachment(null)
+    setAttachments([])
     setError(null)
     setIsSending(true)
 
@@ -120,24 +134,27 @@ export function ChatPanel({ onOpenSettings }: ChatPanelProps) {
   }
 
   function handleRecall() {
-    // Find the last user message index
     const lastUserIndex = messages.map((m) => m.role).lastIndexOf('user')
     if (lastUserIndex === -1) return
     const lastUser = messages[lastUserIndex]
-    // Restore text to draft
     const text = typeof lastUser.content === 'string'
       ? lastUser.content
       : lastUser.content.filter((b) => b.type === 'text').map((b) => (b as { type: 'text'; text: string }).text).join('\n')
     setDraft(text)
-    // Restore image attachment if present
     if (typeof lastUser.content !== 'string') {
-      const imgBlock = lastUser.content.find((b) => b.type === 'image') as { type: 'image'; source: { media_type: import('../../types/chat').ImageBlock['source']['media_type']; data: string } } | undefined
-      if (imgBlock) {
-        const previewUrl = `data:${imgBlock.source.media_type};base64,${imgBlock.source.data}`
-        setAttachment({ kind: 'image', name: 'recalled-image', mediaType: imgBlock.source.media_type, data: imgBlock.source.data, previewUrl })
-      }
+      const recalledImages = lastUser.content
+        .filter((b): b is ImageBlock => b.type === 'image')
+        .map((block, index) => ({
+          kind: 'image' as const,
+          name: `recalled-image-${index + 1}`,
+          mediaType: block.source.media_type,
+          data: block.source.data,
+          previewUrl: `data:${block.source.media_type};base64,${block.source.data}`,
+        }))
+      setAttachments(recalledImages)
+    } else {
+      setAttachments([])
     }
-    // Remove the last user message and any trailing assistant messages after it
     setMessages(messages.slice(0, lastUserIndex))
   }
 
@@ -237,22 +254,19 @@ export function ChatPanel({ onOpenSettings }: ChatPanelProps) {
           </button>
         ) : null}
         {error ? <div className="mb-sm rounded-lg border border-error/30 bg-error/10 p-sm font-mono text-code-sm text-error">{error}</div> : null}
-        {attachment ? (
-          <div className="mb-sm rounded-lg border border-secondary/30 bg-secondary/10 p-sm">
-            {attachment.kind === 'image' ? (
-              <div className="flex items-start gap-sm">
-                <img src={attachment.previewUrl} alt={attachment.name} className="h-16 w-16 rounded object-cover" />
-                <div className="flex flex-1 flex-col gap-xs">
-                  <span className="font-mono text-code-sm text-secondary">🖼 {attachment.name}</span>
-                </div>
-                <button onClick={() => setAttachment(null)} className="font-mono text-code-sm text-on-surface-variant hover:text-error">✕</button>
+        {attachments.length > 0 ? (
+          <div className="mb-sm grid max-h-40 gap-xs overflow-auto rounded-lg border border-secondary/30 bg-secondary/10 p-sm">
+            {attachments.map((item, index) => (
+              <div key={`${item.name}-${index}`} className="flex items-center gap-sm rounded-md bg-surface-container/70 p-xs">
+                {item.kind === 'image' ? (
+                  <img src={item.previewUrl} alt={item.name} className="h-12 w-12 rounded object-cover" />
+                ) : (
+                  <div className="flex h-12 w-12 items-center justify-center rounded bg-surface-container-high font-mono text-code-sm text-secondary">TXT</div>
+                )}
+                <span className="min-w-0 flex-1 truncate font-mono text-code-sm text-secondary">{item.name}</span>
+                <button onClick={() => removeAttachment(index)} className="font-mono text-code-sm text-on-surface-variant hover:text-error">✕</button>
               </div>
-            ) : (
-              <div className="flex items-center justify-between">
-                <span className="font-mono text-code-sm text-secondary">📎 {attachment.name}</span>
-                <button onClick={() => setAttachment(null)} className="ml-sm font-mono text-code-sm text-on-surface-variant hover:text-error">✕</button>
-              </div>
-            )}
+            ))}
           </div>
         ) : null}
         <div className="flex flex-col rounded-xl border border-outline-variant/50 bg-surface p-sm transition-all focus-within:border-secondary focus-within:ring-1 focus-within:ring-secondary/20">
@@ -268,18 +282,21 @@ export function ChatPanel({ onOpenSettings }: ChatPanelProps) {
               ref={fileInputRef}
               type="file"
               accept=".md,.txt,.json,image/*"
+              multiple
               className="hidden"
               onChange={handleFileChange}
             />
             <button
               onClick={() => fileInputRef.current?.click()}
-              className="rounded-md px-sm py-sm font-mono text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
+              aria-label="添加附件"
+              title="添加附件"
+              className="rounded-md px-sm py-sm text-xl leading-none text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
             >
-              Attach Asset
+              📎
             </button>
             <button
               onClick={handleSend}
-              disabled={isSending || (!draft.trim() && !attachment)}
+              disabled={isSending || (!draft.trim() && attachments.length === 0)}
               className="rounded-lg bg-secondary-container px-md py-sm font-mono text-label-md uppercase text-on-secondary-container shadow-[0_0_12px_rgba(5,102,217,0.3)] transition-colors hover:bg-secondary-container/80 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {isSending ? 'Sending' : 'Send'}
