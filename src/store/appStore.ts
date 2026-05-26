@@ -3,6 +3,7 @@ import { persist } from 'zustand/middleware'
 import { defaultSettings } from '../data/defaultSettings'
 import type { AppSettings, ChatMessage, RagSearchResult } from '../types/chat'
 import type { UXRequirementState } from '../types/uxRequirement'
+import type { DecompositionStatus, DecompositionStep, PrdNode, PrdTree } from '../types/prdNode'
 
 const emptyRequirement: UXRequirementState = {
   trigger_condition: null,
@@ -18,7 +19,7 @@ const emptyRequirement: UXRequirementState = {
 }
 
 const STORAGE_KEY = 'gameux-promptforge-state'
-const STORAGE_VERSION = 3
+const STORAGE_VERSION = 4
 
 export const initialMessages: ChatMessage[] = [
   {
@@ -33,6 +34,10 @@ interface AppStoreState {
   latestRag: RagSearchResult | null
   prototypeHtml: string | null
   settings: AppSettings
+  prdTree: PrdTree | null
+  selectedNodeId: string | null
+  decompositionStatus: DecompositionStatus
+  decompositionSteps: DecompositionStep[]
   applyRequirementPatch: (patch: Partial<UXRequirementState>) => void
   setMessages: (messages: ChatMessage[] | ((current: ChatMessage[]) => ChatMessage[])) => void
   setLatestRag: (rag: RagSearchResult | null) => void
@@ -40,6 +45,13 @@ interface AppStoreState {
   updateSettings: (settings: AppSettings) => void
   resetSession: () => void
   resetRequirement: () => void
+  setPrdTree: (tree: PrdTree) => void
+  setSelectedNodeId: (id: string | null) => void
+  setDecompositionStatus: (s: DecompositionStatus) => void
+  appendDecompositionStep: (step: DecompositionStep) => void
+  updateDecompositionStep: (index: number, update: Partial<DecompositionStep>) => void
+  mergePartialTree: (nodes: Record<string, PrdNode>) => void
+  resetDecomposition: () => void
 }
 
 export const useAppStore = create<AppStoreState>()(
@@ -50,6 +62,10 @@ export const useAppStore = create<AppStoreState>()(
       latestRag: null,
       prototypeHtml: null,
       settings: defaultSettings,
+      prdTree: null,
+      selectedNodeId: null,
+      decompositionStatus: 'idle',
+      decompositionSteps: [],
       applyRequirementPatch: (patch) => {
         set((state) => ({
           requirement: {
@@ -74,15 +90,65 @@ export const useAppStore = create<AppStoreState>()(
       updateSettings: (settings) => set({ settings }),
       resetSession: () => set({ messages: initialMessages, latestRag: null, prototypeHtml: null }),
       resetRequirement: () => set({ requirement: emptyRequirement, latestRag: null, prototypeHtml: null }),
+      setPrdTree: (prdTree) => set({ prdTree }),
+      setSelectedNodeId: (selectedNodeId) => set({ selectedNodeId }),
+      setDecompositionStatus: (decompositionStatus) => set({ decompositionStatus }),
+      appendDecompositionStep: (step) =>
+        set((state) => ({ decompositionSteps: [...state.decompositionSteps, step] })),
+      updateDecompositionStep: (index, update) =>
+        set((state) => ({
+          decompositionSteps: state.decompositionSteps.map((s, i) =>
+            i === index ? { ...s, ...update } : s
+          ),
+        })),
+      mergePartialTree: (nodes) =>
+        set((state) => ({ prdTree: { ...(state.prdTree ?? {}), ...nodes } })),
+      resetDecomposition: () =>
+        set({ prdTree: null, decompositionStatus: 'idle', decompositionSteps: [] }),
     }),
     {
       name: STORAGE_KEY,
       version: STORAGE_VERSION,
+      migrate: (persistedState: unknown, version: number) => {
+        if (version === 3) {
+          const v3 = persistedState as {
+            requirement?: unknown
+            messages?: unknown
+            latestRag?: unknown
+            settings?: unknown
+          }
+          return {
+            requirement: v3.requirement ?? emptyRequirement,
+            messages: v3.messages ?? initialMessages,
+            latestRag: v3.latestRag ?? null,
+            settings: v3.settings ?? defaultSettings,
+            prdTree: null,
+            selectedNodeId: null,
+            decompositionStatus: 'idle' as const,
+            decompositionSteps: [],
+          }
+        }
+        // Unknown version — safe reset
+        return {
+          requirement: emptyRequirement,
+          messages: initialMessages,
+          latestRag: null,
+          settings: defaultSettings,
+          prdTree: null,
+          selectedNodeId: null,
+          decompositionStatus: 'idle' as const,
+          decompositionSteps: [],
+        }
+      },
       partialize: (state) => ({
         requirement: state.requirement,
         messages: state.messages,
         latestRag: state.latestRag,
         settings: state.settings,
+        prdTree: state.prdTree,
+        selectedNodeId: state.selectedNodeId,
+        // decompositionStatus: intentionally NOT persisted (session-only)
+        // decompositionSteps: intentionally NOT persisted (session-only)
       }),
     },
   ),
