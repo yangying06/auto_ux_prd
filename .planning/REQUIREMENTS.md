@@ -10,9 +10,9 @@ Requirements for initial release. Each maps to roadmap phases.
 ### Infrastructure
 
 - [ ] **INFRA-01**: App supports two routes: map view (/) and forge view (/forge/:nodeId)
-- [ ] **INFRA-02**: Zustand store扩展支持PrdTree flat node map和per-node chat state
-- [ ] **INFRA-03**: Store version从3迁移到4，含migrate函数
-- [ ] **INFRA-04**: Express body limit提升到10MB支持大文档上传
+- [x] **INFRA-02**: Zustand store扩展支持PrdTree flat node map和per-node chat state
+- [x] **INFRA-03**: Store version从3迁移到4，含migrate函数
+- [x] **INFRA-04**: Express body limit提升到10MB支持大文档上传
 
 ### Upload
 
@@ -97,9 +97,9 @@ Deferred to future release. Tracked but not in current roadmap.
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | INFRA-01 | Phase 1 | Pending |
-| INFRA-02 | Phase 1 | Pending |
-| INFRA-03 | Phase 1 | Pending |
-| INFRA-04 | Phase 1 | Pending |
+| INFRA-02 | Phase 1 | Complete |
+| INFRA-03 | Phase 1 | Complete |
+| INFRA-04 | Phase 1 | Complete |
 | UPLD-01 | Phase 1 | Pending |
 | UPLD-02 | Phase 1 | Pending |
 | UPLD-03 | Phase 1 | Pending |
