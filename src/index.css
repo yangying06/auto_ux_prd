@@ -87,3 +87,40 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #47464a;
 }
+
+/* Phase 2: Map node glow utilities — from Image 2.html lines 111-131 */
+.node-glow {
+  box-shadow: 0 0 15px -3px rgba(173, 198, 255, 0.2);
+}
+
+.active-glow {
+  box-shadow: 0 0 20px -3px rgba(78, 222, 163, 0.3);
+  border-color: #4edea3;
+}
+
+.processing-glow {
+  box-shadow: 0 0 20px -3px rgba(5, 102, 217, 0.4);
+  border-color: #0566d9;
+}
+
+/* SVG connection lines between columns */
+.svg-line {
+  stroke: #47464a;
+  stroke-width: 2;
+  fill: none;
+  vector-effect: non-scaling-stroke;
+}
+
+/* Drawer custom scrollbar (8px, matches Image 2.html) */
+.custom-scrollbar::-webkit-scrollbar { width: 8px; }
+.custom-scrollbar::-webkit-scrollbar-track { background: #141313; }
+.custom-scrollbar::-webkit-scrollbar-thumb { background: #353434; border-radius: 4px; }
+
+/* Map fade-in animation — used on stage='map' mount */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.animate-fade-in {
+  animation: fade-in 300ms ease forwards;
+}
