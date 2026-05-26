@@ -4,6 +4,7 @@ import dotenv from 'dotenv'
 import express from 'express'
 import { spawn } from 'node:child_process'
 import type { UXRequirementState } from '../src/types/uxRequirement'
+import type { PrdNode } from '../src/types/prdNode'
 
 dotenv.config()
 dotenv.config({ path: 'server/.env' })
@@ -18,6 +19,17 @@ const ragProxyScript = rawRagProxyScript.replace('%APPDATA%', process.env.APPDAT
 const anthropic = process.env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL })
   : null
+
+// In-memory decomposition session store.
+// Single-user desktop app — no persistence needed between server restarts.
+interface DecompositionSession {
+  status: 'running' | 'done' | 'error'
+  nodes: PrdNode[]
+  currentStep: string
+  error?: string
+}
+
+const decompositionSessions = new Map<string, DecompositionSession>()
 
 interface ContentBlock {
   type: 'text' | 'image'
