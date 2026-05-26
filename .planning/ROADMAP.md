@@ -39,17 +39,23 @@ Plans:
 - [x] 01-04-PLAN.md — wouter routing setup, ForgePage stub, end-to-end wiring
 
 ### Phase 2: Mindmap & Preview
-**Goal**: Users can visually explore the document structure as an interactive mindmap and inspect any node
+**Goal**: Users can visually explore the document structure as an interactive column tree and inspect any node
 **Depends on**: Phase 1
 **Requirements**: MAP-01, MAP-02, MAP-03, MAP-04, MAP-05, MAP-06, PRVW-01, PRVW-02, PRVW-03, PRVW-04
 **Success Criteria** (what must be TRUE):
-  1. Mindmap renders the full document tree using markmap with dark Forge Blueprint theme
-  2. Each node displays a status badge (unprocessed / complete)
+  1. Custom React column tree renders the full document tree with Forge Blueprint dark theme
+  2. Each node displays a status badge (pending = orange "To Process", done = green "Generated")
   3. User can zoom, pan, and fit the map; zoom level is preserved when tree data updates
   4. Clicking a node opens a right-side preview drawer showing the node summary, tech notes, and ID badge
   5. Preview drawer contains an "Enter Deep Forge" button that navigates to /forge/:nodeId
-**Plans**: TBD
+**Plans**: 4 plans
 **UI hint**: yes
+
+Plans:
+- [ ] 02-01-PLAN.md — CSS utilities, TreeSummary "查看导图" button, MapPage stage extension
+- [ ] 02-02-PLAN.md — TopAppBar, NodeCard, PreviewDrawer components
+- [ ] 02-03-PLAN.md — TreeCanvas with column layout, SVG connections, zoom/pan
+- [ ] 02-04-PLAN.md — MapPage full-screen wiring + human verify checkpoint
 
 ### Phase 3: Deep Forge
 **Goal**: Users can polish each UI node's requirements through an AI-assisted chat session and mark it complete
@@ -83,6 +89,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation & Pipeline | 4/4 | Complete   | 2026-05-26 |
-| 2. Mindmap & Preview | 0/TBD | Not started | - |
+| 2. Mindmap & Preview | 0/4 | Not started | - |
 | 3. Deep Forge | 0/TBD | Not started | - |
 | 4. Export | 0/TBD | Not started | - |
