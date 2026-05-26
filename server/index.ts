@@ -750,6 +750,57 @@ app.get('/api/health', (_req, res) => {
   })
 })
 
+app.post('/api/decompose/start', (req, res) => {
+  const { mdText } = req.body as { mdText?: string }
+  if (!mdText?.trim()) {
+    return void res.status(400).json({ error: 'mdText is required and must not be empty' })
+  }
+  if (!anthropic) {
+    return void res.status(503).json({ error: 'ANTHROPIC_API_KEY not configured' })
+  }
+
+  const sessionId = crypto.randomUUID()
+  decompositionSessions.set(sessionId, {
+    status: 'running',
+    nodes: [],
+    currentStep: 'Starting',
+  })
+
+  // Fire-and-forget: do NOT await. Frontend polls for status.
+  runDecompositionJob(sessionId, mdText).catch((err: unknown) => {
+    const session = decompositionSessions.get(sessionId)
+    if (session) {
+      session.status = 'error'
+      session.error = err instanceof Error ? err.message : String(err)
+      session.currentStep = 'Failed'
+    }
+  })
+
+  res.json({ sessionId })
+})
+
+app.get('/api/decompose/:sessionId', (req, res) => {
+  const session = decompositionSessions.get(req.params.sessionId)
+  if (!session) {
+    return void res.status(404).json({ error: 'Session not found or expired' })
+  }
+
+  const nodeCount = session.nodes.length
+  res.json({
+    status: session.status,
+    currentStep: session.currentStep,
+    nodeCount,
+    nodes: session.nodes,
+    error: session.error ?? null,
+  })
+
+  // Clean up completed sessions after returning (prevents unbounded Map growth)
+  if (session.status === 'done' || session.status === 'error') {
+    // Delay cleanup so client can poll one final time to get full result
+    setTimeout(() => decompositionSessions.delete(req.params.sessionId), 5 * 60 * 1000)
+  }
+})
+
 app.post('/api/rag/search', async (req, res) => {
   const { query } = req.body as RagSearchRequest
   if (!query?.trim()) {
