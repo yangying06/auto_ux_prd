@@ -29,8 +29,14 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Decomposed tree (flat node map) is stored in Zustand store with valid structure (normalizer passes)
   4. App routes between / (map view) and /forge/:nodeId without page reload
   5. Large documents (up to ~10MB) upload without server error
-**Plans**: TBD
+**Plans**: 4 plans
 **UI hint**: yes
+
+Plans:
+- [ ] 01-01-PLAN.md — Types, store migration (v3→v4), Express body limit fix
+- [ ] 01-02-PLAN.md — Server decomposition endpoint with Claude tool-use pipeline
+- [ ] 01-03-PLAN.md — Upload UI components (UploadCard, DecompProgress, MapPage)
+- [ ] 01-04-PLAN.md — wouter routing setup, ForgePage stub, end-to-end wiring
 
 ### Phase 2: Mindmap & Preview
 **Goal**: Users can visually explore the document structure as an interactive mindmap and inspect any node
@@ -76,7 +82,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation & Pipeline | 0/TBD | Not started | - |
+| 1. Foundation & Pipeline | 0/4 | Planned | - |
 | 2. Mindmap & Preview | 0/TBD | Not started | - |
 | 3. Deep Forge | 0/TBD | Not started | - |
 | 4. Export | 0/TBD | Not started | - |
