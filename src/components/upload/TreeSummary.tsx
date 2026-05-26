@@ -4,9 +4,10 @@ interface TreeSummaryProps {
   tree: PrdTree
   nodeCount: number
   onReset: () => void
+  onViewMap: () => void
 }
 
-export function TreeSummary({ tree, nodeCount, onReset }: TreeSummaryProps) {
+export function TreeSummary({ tree, nodeCount, onReset, onViewMap }: TreeSummaryProps) {
   const nodes = Object.values(tree)
   const roots = nodes
     .filter((n) => n.level === 1)
@@ -50,8 +51,17 @@ export function TreeSummary({ tree, nodeCount, onReset }: TreeSummaryProps) {
         })}
       </div>
 
-      {/* Footer: reset */}
-      <div className="w-full border-t border-outline-variant pt-4 mt-2">
+      {/* Footer: view map + reset */}
+      <div className="w-full border-t border-outline-variant pt-4 mt-2 flex flex-col gap-2">
+        <button
+          className="w-full flex items-center justify-center gap-2 bg-secondary-container hover:bg-secondary-container/90
+            text-on-secondary-container border border-[#2b88ff]/30 rounded-lg px-4 py-2
+            text-label-md font-headline-sm transition-colors min-h-[44px]"
+          onClick={onViewMap}
+        >
+          <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>account_tree</span>
+          查看导图
+        </button>
         <button
           className="w-full flex items-center justify-center gap-2 bg-surface-container-high hover:bg-surface-variant
             border border-outline-variant rounded-lg px-4 py-2
