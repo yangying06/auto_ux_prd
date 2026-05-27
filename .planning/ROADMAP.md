@@ -67,8 +67,14 @@ Plans:
   3. User can manually confirm a node as complete; confirmed node auto-navigates back to the map
   4. Forge chat can reference other node content as additional context
   5. Server /api/node-chat endpoint injects node content into the Claude prompt
-**Plans**: TBD
+**Plans**: 4 plans
 **UI hint**: yes
+
+Plans:
+- [ ] 03-01-PLAN.md — Store extension (nodeChats, 3 actions) + /api/node-chat endpoint + sendNodeChatMessage
+- [ ] 03-02-PLAN.md — ForgeNodePanel and ForgeChat presentational components
+- [ ] 03-03-PLAN.md — ForgePage orchestration (wires store + components + navigation)
+- [ ] 03-04-PLAN.md — TypeScript check + human integration verify checkpoint
 
 ### Phase 4: Export
 **Goal**: Users can download a structured zip of Markdown spec documents for all completed nodes
@@ -90,5 +96,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 1. Foundation & Pipeline | 4/4 | Complete   | 2026-05-26 |
 | 2. Mindmap & Preview | 3/4 | In Progress|  |
-| 3. Deep Forge | 0/TBD | Not started | - |
+| 3. Deep Forge | 0/4 | Not started | - |
 | 4. Export | 0/TBD | Not started | - |
