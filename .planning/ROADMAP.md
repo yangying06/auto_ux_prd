@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Foundation & Pipeline** - Infrastructure, upload, and AI decomposition — the full MD-to-tree pipeline (completed 2026-05-26)
 - [x] **Phase 2: Mindmap & Preview** - Interactive markmap rendering with node status badges and preview drawer (completed 2026-05-27)
 - [x] **Phase 3: Deep Forge** - Per-node chat-based requirement polish with AI completion assessment (completed 2026-05-27)
-- [ ] **Phase 4: Export** - Zip export of completed spec documents, gated on full node completion
+- [x] **Phase 4: Export** - Zip export of completed spec documents, gated on full node completion (completed 2026-05-27)
 
 ## Phase Details
 
@@ -89,7 +89,7 @@ Plans:
 
 Plans:
 - [x] 04-01-PLAN.md — Install fflate, server /api/export-zip endpoint, exportSpec() in api.ts
-- [ ] 04-02-PLAN.md — TopAppBar export button, MapPage canExport wiring, human verify
+- [x] 04-02-PLAN.md — TopAppBar export button, MapPage canExport wiring, human verify
 
 ## Progress
 
@@ -101,4 +101,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | 1. Foundation & Pipeline | 4/4 | Complete   | 2026-05-26 |
 | 2. Mindmap & Preview | 4/4 | Complete | 2026-05-27 |
 | 3. Deep Forge | 4/4 | Complete | 2026-05-27 |
-| 4. Export | 1/2 | In Progress|  |
+| 4. Export | 2/2 | Complete   | 2026-05-27 |

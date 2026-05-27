@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: Ready to execute
-stopped_at: Completed 04-01-PLAN.md
-last_updated: "2026-05-27T06:16:33.326Z"
+status: Phase complete — ready for verification
+stopped_at: Completed 04-02-PLAN.md
+last_updated: "2026-05-27T06:20:35.024Z"
 last_activity: 2026-05-27
 progress:
   total_phases: 4
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 14
-  completed_plans: 13
+  completed_plans: 14
   percent: 0
 ---
 
@@ -65,6 +65,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03-deep-forge P03 | 1 | 1 tasks | 1 files |
 | Phase 03-deep-forge P04 | 1 | 1 tasks | 0 files |
 | Phase 04-export P01 | 5 | 2 tasks | 3 files |
+| Phase 04-export P02 | 2 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -101,6 +102,9 @@ Recent decisions affecting current work:
 - [Phase 04-export]: Use res.end() not res.send() for binary zip to prevent Express v5 Content-Type override
 - [Phase 04-export]: exportSpec uses raw fetch() not requestJson helper to avoid binary corruption from .json() call
 - [Phase 04-export]: Forward-slash join() not path.join() in buildNodePath ensures cross-platform zip directory structure
+- [Phase 04-export]: Export button renders conditionally only when onExport prop is provided — maintains backwards compatibility with any TopAppBar usage without export
+- [Phase 04-export]: isExporting/exportError useState at MapPage top-level (React hooks rules); canExport and handleExport inside stage=map branch
+- [Phase 04-export]: vacuous-truth guard: Object.values(prdTree).length > 0 prevents empty-tree from enabling export
 
 ### Pending Todos
 
@@ -119,6 +123,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-27T06:16:33.323Z
-Stopped at: Completed 04-01-PLAN.md
+Last session: 2026-05-27T06:20:35.021Z
+Stopped at: Completed 04-02-PLAN.md
 Resume file: None
