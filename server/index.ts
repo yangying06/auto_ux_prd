@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import cors from 'cors'
 import dotenv from 'dotenv'
 import express from 'express'
+import { zipSync } from 'fflate'
 import { spawn } from 'node:child_process'
 import type { UXRequirementState } from '../src/types/uxRequirement'
 import type { PrdNode } from '../src/types/prdNode'
@@ -1072,6 +1073,87 @@ ${conversationSummary}
 
   const markdown = textFromClaudeContent(response.content)
   res.json({ markdown })
+})
+
+// ── Export Zip ───────────────────────────────────────────────────────────────
+
+function sanitizeLabel(label: string): string {
+  return label
+    .replace(/[^\w一-鿿\-]/g, '-')
+    .replace(/-+/g, '-')
+    .slice(0, 40)
+    .replace(/^-|-$/g, '')
+}
+
+function buildNodePath(nodeId: string, tree: Record<string, PrdNode>): string {
+  const parts: string[] = []
+  let current: PrdNode | undefined = tree[nodeId]
+  while (current) {
+    parts.unshift(current.id)
+    current = current.parentId ? tree[current.parentId] : undefined
+  }
+  // parts = [rootId, ...ancestors, leafId]
+  // All segments except the last become folder names; last becomes the filename
+  const folders = parts.slice(0, -1)
+  const leaf = tree[nodeId]
+  const filename = `${leaf.id}-${sanitizeLabel(leaf.label)}.md`
+  return [...folders, filename].join('/')
+}
+
+function generateMarkdown(node: PrdNode): string {
+  const lines = [
+    `# ${node.label}`,
+    '',
+    `**ID:** ${node.id}`,
+    `**Type:** ${node.type}`,
+    `**Status:** 已完成`,
+    '',
+    '## 需求摘要',
+    '',
+    node.summary,
+    '',
+    '## 详细内容',
+    '',
+    node.content,
+  ]
+  if (node.techNotes) {
+    lines.push('', '## 技术备注', '', node.techNotes)
+  }
+  return lines.join('\n')
+}
+
+interface ExportZipRequest {
+  tree: Record<string, PrdNode>
+}
+
+app.post('/api/export-zip', (req, res) => {
+  const { tree } = req.body as ExportZipRequest
+
+  if (!tree || typeof tree !== 'object') {
+    res.status(400).json({ error: 'tree is required' })
+    return
+  }
+
+  const nodes = Object.values(tree)
+  const leafNodes = nodes.filter(n => n.children.length === 0 && n.status === 'done')
+
+  if (leafNodes.length === 0) {
+    res.status(400).json({ error: 'No completed leaf nodes found' })
+    return
+  }
+
+  const files: Record<string, Uint8Array> = {}
+  for (const node of leafNodes) {
+    const path = buildNodePath(node.id, tree)
+    const content = generateMarkdown(node)
+    files[path] = Buffer.from(content, 'utf-8')
+  }
+
+  const zipped = zipSync(files)
+
+  res.setHeader('Content-Type', 'application/zip')
+  res.setHeader('Content-Disposition', 'attachment; filename="spec-export.zip"')
+  res.end(Buffer.from(zipped))
 })
 
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
