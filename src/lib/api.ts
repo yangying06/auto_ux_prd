@@ -100,3 +100,25 @@ export function sendNodeChatMessage(
     body: JSON.stringify({ nodeId, messages, tree }),
   })
 }
+
+// ── Export Spec API ──────────────────────────────────────────────────────────
+
+export async function exportSpec(
+  baseUrl: string,
+  tree: Record<string, PrdNode>
+): Promise<Blob> {
+  const response = await fetch(`${baseUrl}/api/export-zip`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tree }),
+  })
+  if (!response.ok) {
+    let message = `Export failed: ${response.status}`
+    try {
+      const data = await response.json() as { error?: string }
+      if (data.error) message = data.error
+    } catch { /* ignore parse error, use status message */ }
+    throw new Error(message)
+  }
+  return response.blob()
+}
