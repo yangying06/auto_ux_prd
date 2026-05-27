@@ -1,11 +1,12 @@
 interface TopAppBarProps {
   onUploadNew: () => void
+  onDelete?: () => void
   canExport?: boolean
   onExport?: () => void
   isExporting?: boolean
 }
 
-export function TopAppBar({ onUploadNew, canExport, onExport, isExporting }: TopAppBarProps) {
+export function TopAppBar({ onUploadNew, onDelete, canExport, onExport, isExporting }: TopAppBarProps) {
   return (
     <header className="flex justify-between items-center h-16 px-lg w-full bg-surface border-b border-outline-variant z-20 shrink-0">
       <div className="flex items-center gap-md">
@@ -42,6 +43,16 @@ export function TopAppBar({ onUploadNew, canExport, onExport, isExporting }: Top
               {isExporting ? 'sync' : 'download'}
             </span>
             {isExporting ? '生成中...' : '导出 Spec'}
+          </button>
+        )}
+        {onDelete && (
+          <button
+            onClick={onDelete}
+            title="删除当前项目"
+            className="flex items-center gap-sm bg-surface-container-high hover:bg-error/10 transition-colors text-error border border-error/30 rounded-lg px-md py-sm font-label-md text-label-md cursor-pointer active:opacity-80"
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>delete</span>
+            删除项目
           </button>
         )}
         <button

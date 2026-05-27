@@ -182,6 +182,11 @@ export function MapPage() {
       <div className="w-full h-screen flex flex-col bg-background animate-fade-in overflow-hidden">
         <TopAppBar
           onUploadNew={handleReset}
+          onDelete={() => {
+            if (window.confirm('确定要删除当前项目吗？所有节点和进度将被清除。')) {
+              handleReset()
+            }
+          }}
           canExport={canExport}
           onExport={handleExport}
           isExporting={isExporting}

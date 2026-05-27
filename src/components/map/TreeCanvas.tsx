@@ -55,6 +55,7 @@ export function TreeCanvas({ tree, selectedNodeId, onNodeClick, onNodeDoubleClic
 
   function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
     if ((e.target as HTMLElement).closest('[data-node-card]')) return
+    if ((e.target as HTMLElement).closest('button')) return
     dragStartRef.current = {
       x: e.clientX - transformRef.current.tx,
       y: e.clientY - transformRef.current.ty,
