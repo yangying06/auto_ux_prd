@@ -64,7 +64,7 @@ export function AppShell({ onBack, onConfirm }: { onBack?: () => void; onConfirm
   async function handleDownloadSpec() {
     if (!specMarkdown) return
     const timestamp = new Date().toISOString().slice(0, 10)
-    await downloadMarkdown(`UX-Design-${settings.projectName}-${timestamp}.md`, specMarkdown)
+    await downloadMarkdown(`交互设计-${settings.projectName}-${timestamp}.md`, specMarkdown)
   }
 
   return (

@@ -433,7 +433,7 @@ function extractToolText(result: McpToolCallResult) {
   }
   if (typeof result.structuredContent === 'string') return result.structuredContent
   if (result.structuredContent) return JSON.stringify(result.structuredContent, null, 2)
-  return 'Cocos RAG returned no text content.'
+  return 'Cocos RAG 未返回文本内容。'
 }
 
 async function callMcpTool(method: string, params: Record<string, unknown>) {
@@ -562,26 +562,26 @@ async function queryCocosKnowledge(query: string) {
 
 const decomposePrdTool: Anthropic.Tool = {
   name: 'decompose_prd',
-  description: 'Decompose a PRD document into a structured tree of functional nodes. Each node represents a distinct function, module, or UI interaction.',
+  description: '将 PRD 文档拆解为结构化功能树。每个节点代表一个模块、功能、交互流程或具体 UI 控件状态。',
   input_schema: {
     type: 'object',
     properties: {
       nodes: {
         type: 'array',
-        description: 'Flat array of all PrdNodes. Root nodes have parentId: null.',
+        description: '扁平 PrdNode 数组。顶层模块 parentId 为 null，其他节点必须填写父节点 ID。',
         items: {
           type: 'object',
           properties: {
-            id: { type: 'string', description: 'Unique stable ID, e.g. "CE-01". Use functional abbreviation + index.' },
-            parentId: { type: ['string', 'null'], description: 'ID of parent node, or null for root-level nodes.' },
-            label: { type: 'string', description: 'Short display name (3-8 words).' },
-            summary: { type: 'string', description: 'One sentence summary of what this node covers.' },
-            content: { type: 'string', description: 'Full extracted text from the PRD for this node.' },
-            type: { type: 'string', enum: ['module', 'feature', 'ui'], description: 'module = top-level functional area; feature = sub-function; ui = UI interaction node' },
-            level: { type: 'integer', description: 'Depth in tree. Root children = 1, their children = 2, etc.' },
-            order: { type: 'integer', description: 'Sort position among siblings (0-indexed).' },
-            needsPolish: { type: 'boolean', description: 'True if this node describes a UI interaction that needs Deep Forge polishing.' },
-            techNotes: { type: ['string', 'null'], description: 'Optional implementation notes relevant to engineers.' },
+            id: { type: 'string', description: '稳定唯一 ID，例如 "CE-01"。ID 可用英文功能缩写 + 序号。' },
+            parentId: { type: ['string', 'null'], description: '父节点 ID；顶层模块为 null。' },
+            label: { type: 'string', description: '中文短标题，建议 3-10 个汉字。' },
+            summary: { type: 'string', description: '中文一句话摘要，说明该节点覆盖的需求范围。' },
+            content: { type: 'string', description: '该节点从 PRD 中提取/归纳出的中文详细内容。' },
+            type: { type: 'string', enum: ['module', 'feature', 'ui'], description: 'module=顶层功能域；feature=子功能；ui=交互流程、界面或控件状态节点。' },
+            level: { type: 'integer', description: '树深度。顶层模块为 1，子功能为 2，交互流程为 3，具体 UI 控件/状态可为 4。' },
+            order: { type: 'integer', description: '同父节点内的排序位置，从 0 开始。' },
+            needsPolish: { type: 'boolean', description: '该节点是否需要进入 Deep Forge 进行交互需求打磨。' },
+            techNotes: { type: ['string', 'null'], description: '面向开发的中文技术备注，可为空。' },
           },
           required: ['id', 'parentId', 'label', 'summary', 'content', 'type', 'level', 'order', 'needsPolish'],
         },
@@ -635,38 +635,65 @@ function normalizeDecompositionNodes(raw: unknown): PrdNode[] {
     node.children.sort((a, b) => (nodeMap.get(a)?.order ?? 0) - (nodeMap.get(b)?.order ?? 0))
   }
 
-  // Warn if any node exceeds level 3
+  // Warn if any node exceeds the supported prompt depth
   for (const node of nodes) {
-    if (node.level > 3) console.warn(`[decompose] node ${node.id} at level ${node.level} — unexpectedly deep`)
+    if (node.level > 4) console.warn(`[decompose] node ${node.id} at level ${node.level} — unexpectedly deep`)
   }
 
   return nodes
 }
 
+function rebuildNodeChildren(nodes: PrdNode[]): PrdNode[] {
+  const nodeMap = new Map<string, PrdNode>()
+  for (const node of nodes) {
+    nodeMap.set(node.id, { ...node, children: [] })
+  }
+
+  for (const node of nodeMap.values()) {
+    if (node.parentId && nodeMap.has(node.parentId)) {
+      nodeMap.get(node.parentId)!.children.push(node.id)
+    }
+  }
+
+  for (const node of nodeMap.values()) {
+    node.children.sort((a, b) => (nodeMap.get(a)?.order ?? 0) - (nodeMap.get(b)?.order ?? 0))
+  }
+
+  return [...nodeMap.values()].sort((a, b) => a.level - b.level || a.order - b.order || a.id.localeCompare(b.id))
+}
+
+function mergeSessionNodes(session: DecompositionSession, nodes: PrdNode[]) {
+  session.nodes = rebuildNodeChildren([...session.nodes, ...nodes])
+}
+
 function normalizeDecompositionTree(raw: unknown): Record<string, PrdNode> {
-  const nodes = normalizeDecompositionNodes(raw)
-  if (nodes.length === 0) throw new Error('normalizeDecompositionTree: empty result — AI returned no nodes')
+  const nodes = rebuildNodeChildren(normalizeDecompositionNodes(raw))
+  if (nodes.length === 0) throw new Error('AI 未返回有效节点')
   return Object.fromEntries(nodes.map((n) => [n.id, n]))
 }
 
-const decompositionL1SystemPrompt = `You are a UX architect analyzing a Product Requirements Document (PRD).
-Your task: identify the top-level FUNCTIONAL MODULES in the document.
-A module is a distinct user-facing feature area or functional discipline (e.g., "Combat System", "Inventory UI", "Progression Loop").
-DO NOT use the document's heading hierarchy — analyze functional scope.
-Return ONLY level-1 nodes (parentId: null). Maximum 8 modules. Minimum 2.
-Each node must have a clear, distinct functional scope with no overlap.`
+const decompositionL1SystemPrompt = `你是游戏 UX 架构师，正在分析一份产品需求文档（PRD）。
+任务：识别文档中的顶层功能模块。
+模块必须是面向用户或开发交付的独立功能域，例如「战斗系统」「背包界面」「成长循环」。
+不要直接复制文档标题层级，而要按功能范围重新归类。
+本轮只返回 level=1 的顶层模块节点，parentId 必须为 null。最多 8 个，最少 2 个。
+所有 label、summary、content、techNotes 必须使用中文；ID 可以使用英文缩写。
+每个模块范围必须清晰、互不重叠。`
 
 function decompositionBranchSystemPrompt(parentLabel: string, parentId: string): string {
-  return `You are expanding one module of a PRD tree.
-Module to expand: "${parentLabel}"
-Extract the specific FEATURES and UI INTERACTIONS within this module.
-Level 2 nodes = major features (parentId: "${parentId}"). Level 3 nodes = specific UI interactions (parentId = their level-2 parent's ID).
-Do NOT exceed level 3. Maximum 6 children per parent.
-Mark needsPolish: true for any node that describes a UI interaction screen or dialog.`
+  return `你正在展开 PRD 树中的一个模块。
+待展开模块：「${parentLabel}」
+请抽取该模块下的具体功能、交互流程和必要的 UI 控件/状态。
+level=2：主要子功能，parentId 为 "${parentId}"。
+level=3：具体交互流程、界面、弹窗、反馈链路，parentId 为对应 level=2 节点 ID。
+level=4：当 level=3 仍然过粗时，拆成具体 UI 控件、状态、动效或边界处理节点，parentId 为对应 level=3 节点 ID。
+不要超过 level=4；每个父节点最多 8 个直接子节点。
+任何描述界面、弹窗、操作反馈、动画、状态切换的节点，都应将 needsPolish 标记为 true。
+所有 label、summary、content、techNotes 必须使用中文；ID 可以使用英文缩写。`
 }
 
 async function decomposeL1(mdText: string): Promise<PrdNode[]> {
-  if (!anthropic) throw new Error('Anthropic client not initialized — check ANTHROPIC_API_KEY')
+  if (!anthropic) throw new Error('Anthropic 客户端未初始化，请检查 ANTHROPIC_API_KEY')
 
   const response = await anthropic.messages.create({
     model,
@@ -677,7 +704,7 @@ async function decomposeL1(mdText: string): Promise<PrdNode[]> {
     messages: [
       {
         role: 'user',
-        content: `Decompose this PRD into top-level functional modules only (level 1 nodes, parentId: null). Do not go deeper than level 1 in this call.\n\n${mdText}`,
+        content: `请把下面 PRD 拆解为顶层功能模块。本次只输出 level=1 节点，parentId 必须为 null，不要输出更深层级。所有展示给用户的文字必须是中文。\n\n${mdText}`,
       },
     ],
   })
@@ -685,14 +712,14 @@ async function decomposeL1(mdText: string): Promise<PrdNode[]> {
   const toolUse = response.content.find(
     (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === 'decompose_prd'
   )
-  if (!toolUse) throw new Error('Claude did not use decompose_prd tool for L1 decomposition')
+  if (!toolUse) throw new Error('Claude 未返回顶层模块拆解结果')
 
   const raw = (toolUse.input as { nodes?: unknown }).nodes
   return normalizeDecompositionNodes(raw)
 }
 
 async function decomposeBranch(mdText: string, parentNode: PrdNode): Promise<PrdNode[]> {
-  if (!anthropic) throw new Error('Anthropic client not initialized — check ANTHROPIC_API_KEY')
+  if (!anthropic) throw new Error('Anthropic 客户端未初始化，请检查 ANTHROPIC_API_KEY')
 
   const response = await anthropic.messages.create({
     model,
@@ -703,7 +730,7 @@ async function decomposeBranch(mdText: string, parentNode: PrdNode): Promise<Prd
     messages: [
       {
         role: 'user',
-        content: `Expand the "${parentNode.label}" module into its features and UI interactions.\n\nFull PRD context:\n${mdText}`,
+        content: `请把「${parentNode.label}」模块展开为多层子功能、交互流程和必要的 UI 控件/状态节点。请输出 level=2 到 level=4 的节点，并确保 parentId 指向正确父节点。所有展示给用户的文字必须是中文。\n\n完整 PRD 上下文：\n${mdText}`,
       },
     ],
   })
@@ -711,7 +738,7 @@ async function decomposeBranch(mdText: string, parentNode: PrdNode): Promise<Prd
   const toolUse = response.content.find(
     (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === 'decompose_prd'
   )
-  if (!toolUse) throw new Error(`Claude did not use decompose_prd tool for branch: ${parentNode.id}`)
+  if (!toolUse) throw new Error(`Claude 未返回分支拆解结果：${parentNode.id}`)
 
   const raw = (toolUse.input as { nodes?: unknown }).nodes
   return normalizeDecompositionNodes(raw)
@@ -748,7 +775,7 @@ async function runMockDecompositionJob(sessionId: string): Promise<void> {
         ? step === '正在识别顶层模块...'
         : step.includes(n.label) || (n.parentId !== null && mockNodes.find((p) => p.id === n.parentId && step.includes(p.label)))
     )
-    session.nodes.push(...pushed.filter((n) => !session.nodes.find((e) => e.id === n.id)))
+    mergeSessionNodes(session, pushed.filter((n) => !session.nodes.find((e) => e.id === n.id)))
   }
 
   session.status = 'done'
@@ -762,13 +789,13 @@ async function runDecompositionJob(sessionId: string, mdText: string): Promise<v
   // Step 1: L1 nodes
   session.currentStep = '正在识别顶层模块...'
   const l1Nodes = await decomposeL1(mdText)
-  session.nodes.push(...l1Nodes)
+  mergeSessionNodes(session, l1Nodes)
 
   // Step 2: Expand each L1 branch sequentially
   for (const l1 of l1Nodes) {
     session.currentStep = `正在展开：${l1.label}`
     const branchNodes = await decomposeBranch(mdText, l1)
-    session.nodes.push(...branchNodes)
+    mergeSessionNodes(session, branchNodes)
   }
 
   session.status = 'done'
@@ -798,10 +825,10 @@ app.get('/api/health', (_req, res) => {
 app.post('/api/decompose/start', (req, res) => {
   const { mdText } = req.body as { mdText?: string }
   if (!mdText?.trim()) {
-    return void res.status(400).json({ error: 'mdText is required and must not be empty' })
+    return void res.status(400).json({ error: '缺少 PRD 文档内容' })
   }
   if (!anthropic) {
-    return void res.status(503).json({ error: 'ANTHROPIC_API_KEY not configured' })
+    return void res.status(503).json({ error: '未配置 ANTHROPIC_API_KEY' })
   }
 
   const sessionId = crypto.randomUUID()
@@ -830,10 +857,11 @@ app.post('/api/decompose/start', (req, res) => {
 app.get('/api/decompose/:sessionId', (req, res) => {
   const session = decompositionSessions.get(req.params.sessionId)
   if (!session) {
-    return void res.status(404).json({ error: 'Session not found or expired' })
+    return void res.status(404).json({ error: '拆解会话不存在或已过期' })
   }
 
   const nodeCount = session.nodes.length
+  session.nodes = rebuildNodeChildren(session.nodes)
   res.json({
     status: session.status,
     currentStep: session.currentStep,
@@ -852,7 +880,7 @@ app.get('/api/decompose/:sessionId', (req, res) => {
 app.post('/api/rag/search', async (req, res) => {
   const { query } = req.body as RagSearchRequest
   if (!query?.trim()) {
-    res.status(400).json({ error: 'query is required' })
+    res.status(400).json({ error: '缺少查询内容' })
     return
   }
 
@@ -863,13 +891,13 @@ app.post('/api/chat', async (req, res) => {
   const { messages, requirementState } = req.body as ChatRequest
 
   if (!messages?.length) {
-    res.status(400).json({ error: 'messages are required' })
+    res.status(400).json({ error: '缺少对话消息' })
     return
   }
 
   if (!anthropic) {
     res.status(400).json({
-      error: 'ANTHROPIC_API_KEY is not configured. Copy .env.example to .env and set ANTHROPIC_API_KEY.',
+      error: '未配置 ANTHROPIC_API_KEY。请复制 .env.example 为 .env，并设置 ANTHROPIC_API_KEY。',
     })
     return
   }
@@ -897,26 +925,26 @@ app.post('/api/node-chat', async (req, res) => {
   const { nodeId, messages, tree } = req.body as NodeChatRequest
 
   if (!nodeId || !messages?.length || !tree) {
-    res.status(400).json({ error: 'nodeId, messages, and tree are required' })
+    res.status(400).json({ error: '缺少节点 ID、对话消息或导图树数据' })
     return
   }
 
   if (!anthropic) {
-    res.status(400).json({ error: 'ANTHROPIC_API_KEY is not configured.' })
+    res.status(400).json({ error: '未配置 ANTHROPIC_API_KEY。' })
     return
   }
 
   const targetNode = tree[nodeId]
   if (!targetNode) {
-    res.status(400).json({ error: `Node ${nodeId} not found in tree` })
+    res.status(400).json({ error: `导图中找不到节点：${nodeId}` })
     return
   }
 
   const parentNode = targetNode.parentId ? tree[targetNode.parentId] : null
 
   const nodeContext = `目标节点：
-ID: ${targetNode.id}
-类型: ${targetNode.type}
+编号: ${targetNode.id}
+类型: ${formatNodeType(targetNode.type)}
 标题: ${targetNode.label}
 摘要: ${targetNode.summary}
 内容: ${targetNode.content}${targetNode.techNotes ? `\n技术备注: ${targetNode.techNotes}` : ''}${parentNode ? `\n\n父节点上下文：\n标题: ${parentNode.label}\n摘要: ${parentNode.summary}` : ''}`
@@ -972,7 +1000,7 @@ app.post('/api/prototype', async (req, res) => {
   const { requirementState } = req.body as { requirementState: UXRequirementState }
 
   if (!anthropic) {
-    res.status(400).json({ error: 'ANTHROPIC_API_KEY is not configured.' })
+    res.status(400).json({ error: '未配置 ANTHROPIC_API_KEY。' })
     return
   }
 
@@ -1019,7 +1047,7 @@ app.post('/api/export-prompt', async (req, res) => {
   const { requirementState, conversationSummary } = req.body as { requirementState: UXRequirementState; conversationSummary: string }
 
   if (!anthropic) {
-    res.status(400).json({ error: 'ANTHROPIC_API_KEY is not configured.' })
+    res.status(400).json({ error: '未配置 ANTHROPIC_API_KEY。' })
     return
   }
 
@@ -1100,13 +1128,19 @@ function buildNodePath(nodeId: string, tree: Record<string, PrdNode>): string {
   return [...folders, filename].join('/')
 }
 
+function formatNodeType(type: PrdNode['type']) {
+  if (type === 'module') return '模块'
+  if (type === 'ui') return '界面/交互'
+  return '功能'
+}
+
 function generateMarkdown(node: PrdNode): string {
   const lines = [
     `# ${node.label}`,
     '',
-    `**ID:** ${node.id}`,
-    `**Type:** ${node.type}`,
-    `**Status:** 已完成`,
+    `**节点编号：** ${node.id}`,
+    `**节点类型：** ${formatNodeType(node.type)}`,
+    `**完成状态：** 已完成`,
     '',
     '## 需求摘要',
     '',
@@ -1130,7 +1164,7 @@ app.post('/api/export-zip', (req, res) => {
   const { tree } = req.body as ExportZipRequest
 
   if (!tree || typeof tree !== 'object') {
-    res.status(400).json({ error: 'tree is required' })
+    res.status(400).json({ error: '缺少导图树数据' })
     return
   }
 
@@ -1138,7 +1172,7 @@ app.post('/api/export-zip', (req, res) => {
   const leafNodes = nodes.filter(n => n.children.length === 0 && n.status === 'done')
 
   if (leafNodes.length === 0) {
-    res.status(400).json({ error: 'No completed leaf nodes found' })
+    res.status(400).json({ error: '没有找到已完成的叶子节点' })
     return
   }
 
@@ -1158,7 +1192,7 @@ app.post('/api/export-zip', (req, res) => {
 
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   const status = typeof error === 'object' && error && 'status' in error && typeof error.status === 'number' ? error.status : 500
-  const message = error instanceof Error ? error.message : 'Local proxy failed.'
+  const message = error instanceof Error ? error.message : '本地代理请求失败。'
   res.status(status).json({ error: message })
 })
 

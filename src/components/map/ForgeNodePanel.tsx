@@ -10,6 +10,12 @@ const TYPE_BADGE: Record<PrdNode['type'], string> = {
   ui: 'bg-tertiary-container text-on-tertiary-container',
 }
 
+const TYPE_LABEL: Record<PrdNode['type'], string> = {
+  module: '模块',
+  feature: '功能',
+  ui: '界面/交互',
+}
+
 function StatusBadge({ status }: { status: PrdNode['status'] }) {
   const cls =
     status === 'done'
@@ -26,7 +32,7 @@ export function ForgeNodePanel({ node }: ForgeNodePanelProps) {
     <aside className="w-[360px] shrink-0 h-full bg-surface-container border-r border-outline-variant flex flex-col overflow-y-auto">
       <div className="px-lg pt-lg pb-md flex items-center gap-sm flex-wrap">
         <span className={`${TYPE_BADGE[node.type]} rounded px-sm py-xs text-label-md font-medium`}>
-          {node.type}
+          {TYPE_LABEL[node.type]}
         </span>
         <span className="text-code-sm text-on-primary-container bg-primary-container rounded px-sm py-xs">
           {node.id}

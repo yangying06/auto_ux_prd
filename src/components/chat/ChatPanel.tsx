@@ -163,7 +163,7 @@ export function ChatPanel({ onOpenSettings, onBack, onConfirm }: ChatPanelProps)
   const lastUserIndex = messages.map((m) => m.role).lastIndexOf('user')
   const nextQuestion = requirement.next_question ?? getFallbackQuestion(requirement)
   const currentQuestion = nextQuestion ? compactQuestion(nextQuestion) : null
-  const inputPlaceholder = currentQuestion ?? 'Describe your intent or logic here...'
+  const inputPlaceholder = currentQuestion ?? '描述你的交互意图或逻辑...'
 
   return (
     <aside className="relative z-10 flex h-full w-[35%] min-w-[360px] flex-col border-r border-outline-variant/30 bg-surface-container">
@@ -172,7 +172,7 @@ export function ChatPanel({ onOpenSettings, onBack, onConfirm }: ChatPanelProps)
           <h1 className="text-headline-sm font-semibold text-on-surface">GameUX PromptForge</h1>
           <div className="mt-xs flex items-center gap-sm">
             <div className="pulse-dot h-2 w-2 rounded-full bg-tertiary" />
-            <span className="font-mono text-label-md uppercase text-tertiary">Cocos RAG Connected</span>
+            <span className="font-mono text-label-md uppercase text-tertiary">Cocos RAG 已连接</span>
           </div>
         </div>
         <div className="flex items-center gap-sm">
@@ -195,7 +195,7 @@ export function ChatPanel({ onOpenSettings, onBack, onConfirm }: ChatPanelProps)
             </button>
           )}
           <button onClick={onOpenSettings} className="rounded-md px-sm py-xs font-mono text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface">
-            SYS
+            设置
           </button>
         </div>
       </header>
@@ -321,7 +321,7 @@ export function ChatPanel({ onOpenSettings, onBack, onConfirm }: ChatPanelProps)
               disabled={isSending || (!draft.trim() && attachments.length === 0)}
               className="rounded-lg bg-secondary-container px-md py-sm font-mono text-label-md uppercase text-on-secondary-container shadow-[0_0_12px_rgba(5,102,217,0.3)] transition-colors hover:bg-secondary-container/80 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {isSending ? 'Sending' : 'Send'}
+              {isSending ? '发送中' : '发送'}
             </button>
           </div>
         </div>

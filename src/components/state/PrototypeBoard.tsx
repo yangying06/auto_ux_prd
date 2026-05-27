@@ -8,7 +8,7 @@ export function PrototypeBoard({ html, isLoading }: PrototypeBoardProps) {
     <section className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-outline-variant/30 bg-zinc-950 shadow-inner">
       <div className="blueprint-grid pointer-events-none absolute inset-0 opacity-40" />
       <div className="z-10 flex items-center justify-between border-b border-outline-variant/20 bg-zinc-900/80 p-sm backdrop-blur-sm">
-        <span className="font-mono text-code-sm text-on-surface-variant">PHONE PREVIEW · 750 × 1624</span>
+        <span className="font-mono text-code-sm text-on-surface-variant">手机预览 · 750 × 1624</span>
         <span className="rounded-full bg-outline-variant/10 px-sm py-xs font-mono text-[10px] uppercase text-on-surface-variant">
           {isLoading ? '生成中...' : html ? '原型已就绪' : '等待需求输入'}
         </span>
@@ -23,7 +23,7 @@ export function PrototypeBoard({ html, isLoading }: PrototypeBoardProps) {
                 srcDoc={html}
                 className="h-full w-full border-none"
                 sandbox="allow-scripts"
-                title="UX Prototype Preview"
+                title="UX 原型预览"
               />
             ) : (
               <div className="flex h-full items-center justify-center p-md">

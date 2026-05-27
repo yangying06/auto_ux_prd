@@ -20,7 +20,7 @@ export function TopAppBar({ onUploadNew, onDelete, canExport, onExport, isExport
           >
             check_circle
           </span>
-          <span className="font-label-md text-label-md text-tertiary">Document Loaded</span>
+          <span className="font-label-md text-label-md text-tertiary">文档已加载</span>
         </div>
       </div>
       <div className="flex items-center gap-md">
@@ -28,7 +28,7 @@ export function TopAppBar({ onUploadNew, onDelete, canExport, onExport, isExport
           <button
             onClick={onExport}
             disabled={!canExport || isExporting}
-            title={!canExport ? '所有节点完成后才能导出' : undefined}
+            title={!canExport ? '所有叶子节点完成后才能导出' : undefined}
             className={[
               'flex items-center gap-sm rounded-lg px-md py-sm font-label-md text-label-md border transition-colors',
               canExport && !isExporting
@@ -42,7 +42,7 @@ export function TopAppBar({ onUploadNew, onDelete, canExport, onExport, isExport
             >
               {isExporting ? 'sync' : 'download'}
             </span>
-            {isExporting ? '生成中...' : '导出 Spec'}
+            {isExporting ? '生成中...' : '导出规格'}
           </button>
         )}
         {onDelete && (
@@ -60,7 +60,7 @@ export function TopAppBar({ onUploadNew, onDelete, canExport, onExport, isExport
           className="flex items-center gap-sm bg-surface-container-high hover:bg-surface-variant transition-colors text-on-surface border border-outline-variant rounded-lg px-md py-sm font-label-md text-label-md cursor-pointer active:opacity-80"
         >
           <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>upload_file</span>
-          Upload PRD
+          上传 PRD
         </button>
       </div>
     </header>

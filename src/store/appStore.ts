@@ -21,6 +21,24 @@ const emptyRequirement: UXRequirementState = {
 const STORAGE_KEY = 'gameux-promptforge-state'
 const STORAGE_VERSION = 4
 
+function rebuildPrdTreeLinks(tree: PrdTree): PrdTree {
+  const next = Object.fromEntries(
+    Object.entries(tree).map(([id, node]) => [id, { ...node, children: [] }])
+  ) as PrdTree
+
+  for (const node of Object.values(next)) {
+    if (node.parentId && next[node.parentId]) {
+      next[node.parentId].children.push(node.id)
+    }
+  }
+
+  for (const node of Object.values(next)) {
+    node.children.sort((a, b) => (next[a]?.order ?? 0) - (next[b]?.order ?? 0))
+  }
+
+  return next
+}
+
 export const initialMessages: ChatMessage[] = [
   {
     role: 'assistant',
@@ -117,7 +135,7 @@ export const useAppStore = create<AppStoreState>()(
       updateSettings: (settings) => set({ settings }),
       resetSession: () => set({ messages: initialMessages, latestRag: null, prototypeHtml: null }),
       resetRequirement: () => set({ requirement: emptyRequirement, latestRag: null, prototypeHtml: null }),
-      setPrdTree: (prdTree) => set({ prdTree }),
+      setPrdTree: (prdTree) => set({ prdTree: rebuildPrdTreeLinks(prdTree) }),
       setSelectedNodeId: (selectedNodeId) => set({ selectedNodeId }),
       setDecompositionStatus: (decompositionStatus) => set({ decompositionStatus }),
       appendDecompositionStep: (step) =>
@@ -129,7 +147,7 @@ export const useAppStore = create<AppStoreState>()(
           ),
         })),
       mergePartialTree: (nodes) =>
-        set((state) => ({ prdTree: { ...(state.prdTree ?? {}), ...nodes } })),
+        set((state) => ({ prdTree: rebuildPrdTreeLinks({ ...(state.prdTree ?? {}), ...nodes }) })),
       resetDecomposition: () =>
         set({ prdTree: null, decompositionStatus: 'idle', decompositionSteps: [] }),
     }),

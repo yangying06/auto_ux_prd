@@ -168,7 +168,7 @@ export function MapPage() {
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
-        a.download = 'spec-export.zip'
+        a.download = '交互规格导出.zip'
         a.click()
         URL.revokeObjectURL(url)
       } catch (err) {

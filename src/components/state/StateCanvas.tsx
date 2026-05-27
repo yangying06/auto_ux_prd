@@ -62,17 +62,17 @@ function RequirementTree({ requirement, missingAsset }: { requirement: UXRequire
     <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-outline-variant/20 bg-surface-container">
       <div className="flex items-center justify-between border-b border-outline-variant/20 bg-surface-container-high/60 px-md py-sm">
         <span className="font-mono text-label-sm uppercase text-secondary">需求拆解树</span>
-        <span className="font-mono text-[10px] text-on-surface-variant">{requirement.completion_rate}% complete</span>
+        <span className="font-mono text-[10px] text-on-surface-variant">完成度 {requirement.completion_rate}%</span>
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-md">
-        <div className="mb-sm font-mono text-code-sm text-on-surface">UX Requirement</div>
+        <div className="mb-sm font-mono text-code-sm text-on-surface">UX 需求</div>
         <div className="ml-sm border-l border-outline-variant/30 pl-md">
           {items.map((item) => (
             <div key={item.title} className="relative pb-md last:pb-0">
               <div className="absolute -left-[21px] top-1 h-3 w-3 rounded-full border border-outline-variant/50 bg-surface-container-high" />
               <div className="flex items-start gap-sm">
                 <span className={item.done ? 'mt-0.5 font-mono text-[10px] text-tertiary' : 'mt-0.5 font-mono text-[10px] text-error'}>
-                  {item.done ? 'DONE' : 'TODO'}
+                  {item.done ? '已完成' : '待补充'}
                 </span>
                 <div className="min-w-0 flex-1">
                   <div className="font-mono text-label-sm text-on-surface">{item.title}</div>
@@ -110,14 +110,14 @@ export function StateCanvas({ requirement, latestRag, projectName, prototypeHtml
           <div>
             <h2 className="text-headline-sm font-semibold text-on-surface">UX 需求状态看板</h2>
             <span className="mt-xs flex items-center gap-xs font-mono text-label-md uppercase text-on-surface-variant">
-              Project: {projectName}
+              项目：{projectName}
             </span>
           </div>
         </div>
 
         <div className="mx-lg flex max-w-[300px] flex-1 flex-col gap-xs">
           <div className="flex justify-between font-mono text-code-sm">
-            <span className="text-on-surface-variant">Generation Progress</span>
+            <span className="text-on-surface-variant">生成进度</span>
             <span className="text-tertiary">{requirement.completion_rate}%</span>
           </div>
           <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-container-high">
@@ -134,7 +134,7 @@ export function StateCanvas({ requirement, latestRag, projectName, prototypeHtml
               disabled={isGeneratingPrototype}
               className="rounded-lg border border-secondary/30 bg-secondary/10 px-lg py-sm font-mono text-label-md uppercase text-secondary transition-colors hover:bg-secondary/20 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {isGeneratingPrototype ? 'Generating...' : prototypeHtml ? 'Update Prototype' : 'Generate Prototype'}
+              {isGeneratingPrototype ? '生成中...' : prototypeHtml ? '更新原型' : '生成原型'}
             </button>
           ) : null}
           {canExport ? (
@@ -143,11 +143,11 @@ export function StateCanvas({ requirement, latestRag, projectName, prototypeHtml
               disabled={isExportingPrompt}
               className="rounded-lg border border-primary/30 bg-primary/10 px-lg py-sm font-mono text-label-md uppercase text-primary transition-colors hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {isExportingPrompt ? 'Exporting...' : 'Export Final Prompt'}
+              {isExportingPrompt ? '导出中...' : '导出最终规格'}
             </button>
           ) : (
             <button disabled className="rounded-lg border border-primary/20 bg-primary/10 px-lg py-sm font-mono text-label-md uppercase text-primary opacity-50">
-              Export Final Prompt
+              导出最终规格
             </button>
           )}
         </div>
@@ -159,14 +159,14 @@ export function StateCanvas({ requirement, latestRag, projectName, prototypeHtml
 
           <section className="flex min-h-0 flex-1 flex-col overflow-hidden">
             <div className="mb-sm flex items-center gap-xs">
-              <span className="font-mono text-label-md uppercase text-on-surface-variant">Logic State Nodes</span>
+              <span className="font-mono text-label-md uppercase text-on-surface-variant">逻辑状态节点</span>
             </div>
             <div className="flex-1 overflow-auto pb-4">
               <div className="flex min-w-0 flex-row flex-wrap items-start gap-lg px-xs pt-md">
 
               <StateCard
                 title="触发条件"
-                label={requirement.trigger_condition ? '[事件] 已确认' : 'Missing Trigger'}
+                label={requirement.trigger_condition ? '[事件] 已确认' : '缺少触发条件'}
                 body={requirement.trigger_condition ?? '需要明确玩家行为、目标节点和触发时机。'}
                 tone={requirement.trigger_condition ? 'complete' : 'missing'}
                 confidence={requirement.slot_confidence.trigger_condition}
@@ -175,7 +175,7 @@ export function StateCanvas({ requirement, latestRag, projectName, prototypeHtml
 
               <StateCard
                 title="资源路径"
-                label={missingAsset ? 'Missing Path Reference' : '[资产] 已确认'}
+                label={missingAsset ? '缺少资源路径' : '[资产] 已确认'}
                 body={missingAsset ? (requirement.asset_dependencies.length === 0 ? '尚未确认任何资源依赖。' : '部分资源路径待确认。') : formatAssets(requirement.asset_dependencies)}
                 tone={missingAsset ? 'missing' : 'complete'}
                 meta={requirement.asset_dependencies.length > 0 ? formatAssets(requirement.asset_dependencies) : undefined}
@@ -186,7 +186,7 @@ export function StateCanvas({ requirement, latestRag, projectName, prototypeHtml
 
               <StateCard
                 title="执行规则"
-                label={requirement.sequence_rules ? '[时序] 已确认' : 'Missing Sequence Rule'}
+                label={requirement.sequence_rules ? '[时序] 已确认' : '缺少执行规则'}
                 body={requirement.sequence_rules ?? '需要明确多目标排序、动画队列和震动反馈的时序关系。'}
                 tone={requirement.sequence_rules ? 'complete' : 'missing'}
                 confidence={requirement.slot_confidence.sequence_rules}
@@ -195,11 +195,11 @@ export function StateCanvas({ requirement, latestRag, projectName, prototypeHtml
 
               {requirement.engine_constraints ? (
                 <StateCard
-                  title="RAG System Insight"
+                  title="RAG 实现建议"
                   label="Cocos 3.8.8"
                   body={requirement.engine_constraints}
                   tone="info"
-                  meta={latestRag?.references.map((reference) => reference.source).join(' · ') ?? 'Ref: Cocos_Docs_v3.8.8'}
+                  meta={latestRag?.references.map((reference) => reference.source).join(' · ') ?? '参考：Cocos_Docs_v3.8.8'}
                   confidence={requirement.slot_confidence.engine_constraints}
                   missingReason={requirement.missing_reasons.engine_constraints}
                 />
@@ -207,7 +207,7 @@ export function StateCanvas({ requirement, latestRag, projectName, prototypeHtml
 
               {requirement.next_question ? (
                 <StateCard
-                  title="Next Required Question"
+                  title="下一步问题"
                   label="[下一问]"
                   body={requirement.next_question}
                   tone="info"
@@ -217,7 +217,7 @@ export function StateCanvas({ requirement, latestRag, projectName, prototypeHtml
 
               {latestRag ? (
                 <StateCard
-                  title="RAG References"
+                  title="RAG 参考资料"
                   label={latestRag.status === 'connected' ? '[检索] 已连接' : latestRag.status === 'error' ? '[检索] 失败' : '[检索] Mock'}
                   body={latestRag.answer}
                   tone={latestRag.status === 'connected' ? 'info' : latestRag.status === 'error' ? 'missing' : 'info'}

@@ -42,14 +42,14 @@ export function PreviewDrawer({ node, onClose }: PreviewDrawerProps) {
           </div>
 
           <h3 className="font-headline-sm text-headline-sm text-on-surface border-b border-outline-variant pb-xs">
-            Extracted Context
+            提取上下文
           </h3>
           <p>{node.summary}</p>
 
           {node.techNotes && (
             <>
               <h3 className="font-headline-sm text-headline-sm text-on-surface border-b border-outline-variant pb-xs mt-lg">
-                Technical Implementation Notes
+                技术实现备注
               </h3>
               <p>{node.techNotes}</p>
             </>
@@ -65,7 +65,7 @@ export function PreviewDrawer({ node, onClose }: PreviewDrawerProps) {
             className="w-full bg-secondary-container hover:bg-secondary-container/90 text-on-secondary-container font-headline-sm text-headline-sm py-sm px-lg rounded-lg flex items-center justify-center gap-sm transition-all shadow-lg shadow-secondary-container/20 border border-[#2b88ff]/30 cursor-pointer"
           >
             <span className="material-symbols-outlined">construction</span>
-            Enter Deep Forge
+            进入深度打磨
           </button>
         </div>
       )}

@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-05-26)
 Phase: 04
 Plan: Not started
 Phase: 04 (export) — NEXT
-Last activity: 2026-05-27
+Last activity: 2026-05-27 - Completed quick task 260527-ley: 修复导图中文化、多层布局和缩放交互
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -120,6 +120,7 @@ None yet.
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 260526-spy | 在 docs 目录下设计一个简单的 2D 手机 Web 小游戏 PRD Markdown | 2026-05-26 | c80d459 | [260526-spy-docs-2d-web-prd-markdown](./quick/260526-spy-docs-2d-web-prd-markdown/) |
+| 260527-ley | 修复导图中文化、多层布局和缩放交互 | 2026-05-27 | 未提交（Git 索引受限） | [260527-ley-map-zh-layout-zoom](./quick/260527-ley-map-zh-layout-zoom/) |
 
 ## Session Continuity
 
