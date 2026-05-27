@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 02-04-PLAN.md (Phase 02 complete)
+stopped_at: Completed 03-04-PLAN.md (Phase 03 complete)
 last_updated: "2026-05-27T00:00:00.000Z"
 last_activity: 2026-05-27
 progress:
   total_phases: 4
-  completed_phases: 2
-  total_plans: 8
-  completed_plans: 8
-  percent: 50
+  completed_phases: 3
+  total_plans: 12
+  completed_plans: 12
+  percent: 75
 ---
 
 # Project State
@@ -21,12 +21,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-26)
 
 **Core value:** 将模糊的PRD文档转化为精确的、经过逐节点确认的交互设计规格
-**Current focus:** Phase 02 — mindmap-preview
+**Current focus:** Phase 04 — export
 
 ## Current Position
 
-Phase: 02 (mindmap-preview) — COMPLETE
-Phase: 03 (deep-forge) — NEXT
+Phase: 03 (deep-forge) — COMPLETE
+Phase: 04 (export) — NEXT
 Last activity: 2026-05-27
 
 Progress: [░░░░░░░░░░] 0%
@@ -59,6 +59,10 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02-mindmap-preview P02 | 8 | 3 tasks | 3 files |
 | Phase 02-mindmap-preview P03 | 12 | 1 tasks | 1 files |
 | Phase 02-mindmap-preview P04 | 8 | 1 tasks | 1 files |
+| Phase 03-deep-forge P01 | 3 | 2 tasks | 3 files |
+| Phase 03-deep-forge P02 | 2 | 2 tasks | 2 files |
+| Phase 03-deep-forge P03 | 1 | 1 tasks | 1 files |
+| Phase 03-deep-forge P04 | 1 | 1 tasks | 0 files |
 
 ## Accumulated Context
 
@@ -87,6 +91,11 @@ Recent decisions affecting current work:
 - [Phase 02-mindmap-preview]: Zoom stored in useRef not useState for MAP-06 compliance; applyTransform() is sole imperative DOM writer
 - [Phase 02-mindmap-preview]: buildColumns skips empty column arrays so a tree with only root+level-1 nodes renders exactly 2 columns (MAP-04 adaptive)
 - [Phase 02-mindmap-preview]: Status badges (To Process/Generated) scoped to leaf/feature nodes only; root and module cards are structural and intentionally badge-free (per Image 2.html mockup)
+- [Phase 03-deep-forge]: nodeChats NOT in partialize — session-only per PRST-02 v2 deferral
+- [Phase 03-deep-forge]: lastIndexOf('{') used for nodeComplete suffix extraction (not safeParseClaudeJson which uses indexOf for state_patch)
+- [Phase 03-deep-forge]: migrate function typed as (): unknown to fix Zustand 5 partialize type inference error in tsconfig.app.json
+- [Phase 03-deep-forge]: ForgePage is sole Zustand reader; ForgeNodePanel and ForgeChat are props-only (FORG-02)
+- [Phase 03-deep-forge]: useAppStore.getState() used in welcome effect (StrictMode double-invoke guard) and handleSend (stale-closure guard)
 
 ### Pending Todos
 
@@ -106,5 +115,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-05-27T00:00:00.000Z
-Stopped at: Phase 02 complete — all 4 plans executed, VERIFICATION.md created
+Stopped at: Phase 03 complete — all 4 plans executed, VERIFICATION.md created
 Resume file: None

@@ -13,8 +13,8 @@ Build a desktop-web tool that takes a raw PRD Markdown file and delivers a set o
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Foundation & Pipeline** - Infrastructure, upload, and AI decomposition — the full MD-to-tree pipeline (completed 2026-05-26)
-- [ ] **Phase 2: Mindmap & Preview** - Interactive markmap rendering with node status badges and preview drawer
-- [ ] **Phase 3: Deep Forge** - Per-node chat-based requirement polish with AI completion assessment
+- [x] **Phase 2: Mindmap & Preview** - Interactive markmap rendering with node status badges and preview drawer (completed 2026-05-27)
+- [x] **Phase 3: Deep Forge** - Per-node chat-based requirement polish with AI completion assessment (completed 2026-05-27)
 - [ ] **Phase 4: Export** - Zip export of completed spec documents, gated on full node completion
 
 ## Phase Details
@@ -55,7 +55,7 @@ Plans:
 - [x] 02-01-PLAN.md — CSS utilities, TreeSummary "查看导图" button, MapPage stage extension
 - [x] 02-02-PLAN.md — TopAppBar, NodeCard, PreviewDrawer components
 - [x] 02-03-PLAN.md — TreeCanvas with column layout, SVG connections, zoom/pan
-- [ ] 02-04-PLAN.md — MapPage full-screen wiring + human verify checkpoint
+- [x] 02-04-PLAN.md — MapPage full-screen wiring + human verify checkpoint
 
 ### Phase 3: Deep Forge
 **Goal**: Users can polish each UI node's requirements through an AI-assisted chat session and mark it complete
@@ -71,10 +71,10 @@ Plans:
 **UI hint**: yes
 
 Plans:
-- [ ] 03-01-PLAN.md — Store extension (nodeChats, 3 actions) + /api/node-chat endpoint + sendNodeChatMessage
-- [ ] 03-02-PLAN.md — ForgeNodePanel and ForgeChat presentational components
-- [ ] 03-03-PLAN.md — ForgePage orchestration (wires store + components + navigation)
-- [ ] 03-04-PLAN.md — TypeScript check + human integration verify checkpoint
+- [x] 03-01-PLAN.md — Store extension (nodeChats, 3 actions) + /api/node-chat endpoint + sendNodeChatMessage
+- [x] 03-02-PLAN.md — ForgeNodePanel and ForgeChat presentational components
+- [x] 03-03-PLAN.md — ForgePage orchestration (wires store + components + navigation)
+- [x] 03-04-PLAN.md — TypeScript check + human integration verify checkpoint
 
 ### Phase 4: Export
 **Goal**: Users can download a structured zip of Markdown spec documents for all completed nodes
@@ -95,6 +95,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation & Pipeline | 4/4 | Complete   | 2026-05-26 |
-| 2. Mindmap & Preview | 3/4 | In Progress|  |
-| 3. Deep Forge | 0/4 | Not started | - |
+| 2. Mindmap & Preview | 4/4 | Complete | 2026-05-27 |
+| 3. Deep Forge | 4/4 | Complete | 2026-05-27 |
 | 4. Export | 0/TBD | Not started | - |
