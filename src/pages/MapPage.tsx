@@ -21,7 +21,9 @@ function findLastActiveIdx(steps: Array<{ status: string }>) {
 }
 
 export function MapPage() {
-  const [stage, setStage] = useState<Stage>('upload')
+  const [stage, setStage] = useState<Stage>(() =>
+    Object.keys(useAppStore.getState().prdTree ?? {}).length > 0 ? 'map' : 'upload'
+  )
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [decompError, setDecompError] = useState<string | null>(null)
   const [nodeCount, setNodeCount] = useState(0)

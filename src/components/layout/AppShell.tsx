@@ -12,7 +12,7 @@ function extractText(content: string | ContentBlock[]): string {
   return content.filter((b) => b.type === 'text').map((b) => (b as { type: 'text'; text: string }).text).join('\n')
 }
 
-export function AppShell() {
+export function AppShell({ onBack, onConfirm }: { onBack?: () => void; onConfirm?: () => void } = {}) {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [isGeneratingPrototype, setIsGeneratingPrototype] = useState(false)
   const [isExportingPrompt, setIsExportingPrompt] = useState(false)
@@ -69,7 +69,7 @@ export function AppShell() {
 
   return (
     <div className="relative flex h-screen w-full overflow-hidden bg-background text-on-background font-body text-body-md antialiased">
-      <ChatPanel onOpenSettings={() => setSettingsOpen(true)} />
+      <ChatPanel onOpenSettings={() => setSettingsOpen(true)} onBack={onBack} onConfirm={onConfirm} />
       <StateCanvas
         requirement={requirement}
         latestRag={latestRag}

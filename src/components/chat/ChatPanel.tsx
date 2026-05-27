@@ -5,6 +5,8 @@ import type { ContentBlock, ImageBlock } from '../../types/chat'
 
 interface ChatPanelProps {
   onOpenSettings: () => void
+  onBack?: () => void
+  onConfirm?: () => void
 }
 
 type Attachment =
@@ -47,7 +49,7 @@ function compactQuestion(question: string) {
     .trim()
 }
 
-export function ChatPanel({ onOpenSettings }: ChatPanelProps) {
+export function ChatPanel({ onOpenSettings, onBack, onConfirm }: ChatPanelProps) {
   const requirement = useAppStore((state) => state.requirement)
   const messages = useAppStore((state) => state.messages)
   const settings = useAppStore((state) => state.settings)
@@ -173,9 +175,29 @@ export function ChatPanel({ onOpenSettings }: ChatPanelProps) {
             <span className="font-mono text-label-md uppercase text-tertiary">Cocos RAG Connected</span>
           </div>
         </div>
-        <button onClick={onOpenSettings} className="rounded-md px-sm py-xs font-mono text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface">
-          SYS
-        </button>
+        <div className="flex items-center gap-sm">
+          {onBack && (
+            <button
+              onClick={onBack}
+              className="flex items-center gap-xs rounded-md px-sm py-xs font-mono text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>arrow_back</span>
+              返回导图
+            </button>
+          )}
+          {onConfirm && (
+            <button
+              onClick={onConfirm}
+              className="flex items-center gap-xs rounded-lg border border-tertiary/50 bg-tertiary-container/20 px-sm py-xs font-mono text-code-sm text-tertiary transition-colors hover:bg-tertiary-container/40"
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>check_circle</span>
+              确认完成
+            </button>
+          )}
+          <button onClick={onOpenSettings} className="rounded-md px-sm py-xs font-mono text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface">
+            SYS
+          </button>
+        </div>
       </header>
 
       <div className="flex flex-1 flex-col gap-lg overflow-y-auto p-lg">

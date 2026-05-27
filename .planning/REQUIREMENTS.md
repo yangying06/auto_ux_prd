@@ -45,13 +45,13 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Forge
 
-- [ ] **FORG-01**: 每个节点拥有独立的聊天历史记录
-- [ ] **FORG-02**: ChatPanel和StateCanvas通过props接收node context（不直接读全局store）
-- [ ] **FORG-03**: AI评估需求完成度并建议确认
-- [ ] **FORG-04**: User可手动确认节点完成
-- [ ] **FORG-05**: 节点确认完成后自动跳回map视图
-- [ ] **FORG-06**: Forge中可引用其他节点内容作为上下文
-- [ ] **FORG-07**: Server提供/api/node-chat端点，注入节点内容到prompt
+- [x] **FORG-01**: 每个节点拥有独立的聊天历史记录
+- [x] **FORG-02**: ChatPanel和StateCanvas通过props接收node context（不直接读全局store）
+- [x] **FORG-03**: AI评估需求完成度并建议确认
+- [x] **FORG-04**: User可手动确认节点完成
+- [x] **FORG-05**: 节点确认完成后自动跳回map视图
+- [x] **FORG-06**: Forge中可引用其他节点内容作为上下文
+- [x] **FORG-07**: Server提供/api/node-chat端点，注入节点内容到prompt
 
 ### Export
 
