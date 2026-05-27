@@ -56,9 +56,9 @@ Requirements for initial release. Each maps to roadmap phases.
 ### Export
 
 - [ ] **EXPT-01**: 导出按钮在所有节点完成前保持disabled（门禁检查）
-- [ ] **EXPT-02**: 每个完成的叶子节点生成一份Markdown spec文档
-- [ ] **EXPT-03**: 打包为zip压缩包供用户下载
-- [ ] **EXPT-04**: Zip内目录结构对应树的层级结构
+- [x] **EXPT-02**: 每个完成的叶子节点生成一份Markdown spec文档
+- [x] **EXPT-03**: 打包为zip压缩包供用户下载
+- [x] **EXPT-04**: Zip内目录结构对应树的层级结构
 
 ## v2 Requirements
 
@@ -125,9 +125,9 @@ Deferred to future release. Tracked but not in current roadmap.
 | FORG-06 | Phase 3 | Pending |
 | FORG-07 | Phase 3 | Pending |
 | EXPT-01 | Phase 4 | Pending |
-| EXPT-02 | Phase 4 | Pending |
-| EXPT-03 | Phase 4 | Pending |
-| EXPT-04 | Phase 4 | Pending |
+| EXPT-02 | Phase 4 | Complete |
+| EXPT-03 | Phase 4 | Complete |
+| EXPT-04 | Phase 4 | Complete |
 
 **Coverage:**
 - v1 requirements: 32 total

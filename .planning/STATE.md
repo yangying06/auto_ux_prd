@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 03-04-PLAN.md (Phase 03 complete)
-last_updated: "2026-05-27T00:00:00.000Z"
+status: Ready to execute
+stopped_at: Completed 04-01-PLAN.md
+last_updated: "2026-05-27T06:16:33.326Z"
 last_activity: 2026-05-27
 progress:
   total_phases: 4
   completed_phases: 3
-  total_plans: 12
-  completed_plans: 12
-  percent: 75
+  total_plans: 14
+  completed_plans: 13
+  percent: 0
 ---
 
 # Project State
@@ -25,7 +25,8 @@ See: .planning/PROJECT.md (updated 2026-05-26)
 
 ## Current Position
 
-Phase: 03 (deep-forge) — COMPLETE
+Phase: 04 (export) — EXECUTING
+Plan: 2 of 2
 Phase: 04 (export) — NEXT
 Last activity: 2026-05-27
 
@@ -63,6 +64,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03-deep-forge P02 | 2 | 2 tasks | 2 files |
 | Phase 03-deep-forge P03 | 1 | 1 tasks | 1 files |
 | Phase 03-deep-forge P04 | 1 | 1 tasks | 0 files |
+| Phase 04-export P01 | 5 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -96,6 +98,9 @@ Recent decisions affecting current work:
 - [Phase 03-deep-forge]: migrate function typed as (): unknown to fix Zustand 5 partialize type inference error in tsconfig.app.json
 - [Phase 03-deep-forge]: ForgePage is sole Zustand reader; ForgeNodePanel and ForgeChat are props-only (FORG-02)
 - [Phase 03-deep-forge]: useAppStore.getState() used in welcome effect (StrictMode double-invoke guard) and handleSend (stale-closure guard)
+- [Phase 04-export]: Use res.end() not res.send() for binary zip to prevent Express v5 Content-Type override
+- [Phase 04-export]: exportSpec uses raw fetch() not requestJson helper to avoid binary corruption from .json() call
+- [Phase 04-export]: Forward-slash join() not path.join() in buildNodePath ensures cross-platform zip directory structure
 
 ### Pending Todos
 
@@ -114,6 +119,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-05-27T00:00:00.000Z
-Stopped at: Phase 03 complete — all 4 plans executed, VERIFICATION.md created
+Last session: 2026-05-27T06:16:33.323Z
+Stopped at: Completed 04-01-PLAN.md
 Resume file: None
