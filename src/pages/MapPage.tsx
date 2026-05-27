@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'wouter'
-import { startDecomposition, pollDecomposition } from '../lib/api'
+import { startDecomposition, pollDecomposition, exportSpec } from '../lib/api'
 import { useAppStore } from '../store/appStore'
 import { UploadCard } from '../components/upload/UploadCard'
 import { DecompProgress } from '../components/upload/DecompProgress'
@@ -25,6 +25,8 @@ export function MapPage() {
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [decompError, setDecompError] = useState<string | null>(null)
   const [nodeCount, setNodeCount] = useState(0)
+  const [isExporting, setIsExporting] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -151,9 +153,50 @@ export function MapPage() {
   if (stage === 'map' && prdTree) {
     const selectedNode = selectedNodeId ? (prdTree[selectedNodeId] ?? null) : null
 
+    const canExport = Object.values(prdTree).length > 0
+      && Object.values(prdTree)
+          .filter(n => n.children.length === 0)
+          .every(n => n.status === 'done')
+
+    const handleExport = async () => {
+      setIsExporting(true)
+      setExportError(null)
+      try {
+        const blob = await exportSpec(settings.proxyBaseUrl, prdTree)
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = 'spec-export.zip'
+        a.click()
+        URL.revokeObjectURL(url)
+      } catch (err) {
+        setExportError(err instanceof Error ? err.message : '导出失败，请重试')
+      } finally {
+        setIsExporting(false)
+      }
+    }
+
     return (
       <div className="w-full h-screen flex flex-col bg-background animate-fade-in overflow-hidden">
-        <TopAppBar onUploadNew={handleReset} />
+        <TopAppBar
+          onUploadNew={handleReset}
+          canExport={canExport}
+          onExport={handleExport}
+          isExporting={isExporting}
+        />
+        {exportError && (
+          <div className="bg-error/10 border-b border-error/30 px-lg py-sm text-error font-label-md text-label-md flex items-center gap-sm">
+            <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>error</span>
+            {exportError}
+            <button
+              onClick={() => setExportError(null)}
+              className="ml-auto text-error/60 hover:text-error cursor-pointer"
+              aria-label="关闭错误提示"
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>close</span>
+            </button>
+          </div>
+        )}
         <main className="flex-1 flex overflow-hidden">
           <TreeCanvas
             tree={prdTree}
