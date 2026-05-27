@@ -85,7 +85,11 @@ Plans:
   2. Each completed leaf node generates one Markdown spec document
   3. Spec documents are packed into a zip whose folder structure mirrors the tree hierarchy
   4. User can download the zip and find files named and organized by their position in the tree
-**Plans**: TBD
+**Plans**: 2 plans
+
+Plans:
+- [ ] 04-01-PLAN.md — Install fflate, server /api/export-zip endpoint, exportSpec() in api.ts
+- [ ] 04-02-PLAN.md — TopAppBar export button, MapPage canExport wiring, human verify
 
 ## Progress
 
@@ -97,4 +101,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | 1. Foundation & Pipeline | 4/4 | Complete   | 2026-05-26 |
 | 2. Mindmap & Preview | 4/4 | Complete | 2026-05-27 |
 | 3. Deep Forge | 4/4 | Complete | 2026-05-27 |
-| 4. Export | 0/TBD | Not started | - |
+| 4. Export | 0/2 | Not started | - |
