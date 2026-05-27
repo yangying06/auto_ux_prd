@@ -52,6 +52,12 @@ interface ChatRequest {
   requirementState: UXRequirementState
 }
 
+interface NodeChatRequest {
+  nodeId: string
+  messages: ChatMessage[]
+  tree: Record<string, PrdNode>
+}
+
 interface RagSearchRequest {
   query: string
 }
@@ -884,6 +890,81 @@ app.post('/api/chat', async (req, res) => {
     rag: rag ?? warmedRag,
     usage: response.usage,
   })
+})
+
+app.post('/api/node-chat', async (req, res) => {
+  const { nodeId, messages, tree } = req.body as NodeChatRequest
+
+  if (!nodeId || !messages?.length || !tree) {
+    res.status(400).json({ error: 'nodeId, messages, and tree are required' })
+    return
+  }
+
+  if (!anthropic) {
+    res.status(400).json({ error: 'ANTHROPIC_API_KEY is not configured.' })
+    return
+  }
+
+  const targetNode = tree[nodeId]
+  if (!targetNode) {
+    res.status(400).json({ error: `Node ${nodeId} not found in tree` })
+    return
+  }
+
+  const parentNode = targetNode.parentId ? tree[targetNode.parentId] : null
+
+  const nodeContext = `目标节点：
+ID: ${targetNode.id}
+类型: ${targetNode.type}
+标题: ${targetNode.label}
+摘要: ${targetNode.summary}
+内容: ${targetNode.content}${targetNode.techNotes ? `\n技术备注: ${targetNode.techNotes}` : ''}${parentNode ? `\n\n父节点上下文：\n标题: ${parentNode.label}\n摘要: ${parentNode.summary}` : ''}`
+
+  const nodeChatSystemPrompt = `你是游戏UX交互设计顾问，专注于帮助设计师打磨单个UI节点的交互需求。
+
+${nodeContext}
+
+你的任务：通过对话帮助用户明确这个节点的所有交互细节，直到需求足够精确可以交付给开发工程师。
+
+规则：
+- 用中文回复
+- 每次最多回复8行
+- 如果需求还不完整，只问一个最关键的问题
+- 当你判断该节点的交互需求已经足够详细和精确时，在回复末尾附加：{"nodeComplete": true}
+- 不要在回复正文中暴露JSON或大括号
+- 保持专业、简洁、直接的语气`
+
+  const response = await anthropic.messages.create({
+    model,
+    max_tokens: 2048,
+    system: nodeChatSystemPrompt,
+    messages: messages.map((m) => ({
+      role: m.role,
+      content: typeof m.content === 'string' ? m.content : extractText(m.content),
+    })),
+  })
+
+  const rawText = textFromClaudeContent(response.content)
+
+  // Dedicated suffix extractor — use lastIndexOf to find JSON at END of reply.
+  // Do NOT reuse safeParseClaudeJson (uses indexOf/first brace, designed for state_patch).
+  let nodeComplete = false
+  let displayReply = rawText
+  const firstBrace = rawText.lastIndexOf('{')
+  const lastBrace = rawText.lastIndexOf('}')
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    try {
+      const suffix = JSON.parse(rawText.slice(firstBrace, lastBrace + 1)) as { nodeComplete?: boolean }
+      if (suffix.nodeComplete === true) {
+        nodeComplete = true
+        displayReply = rawText.slice(0, firstBrace).trim()
+      }
+    } catch {
+      // No valid JSON suffix — nodeComplete stays false
+    }
+  }
+
+  res.json({ reply: displayReply || rawText, nodeComplete })
 })
 
 app.post('/api/prototype', async (req, res) => {

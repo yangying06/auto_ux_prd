@@ -38,6 +38,10 @@ interface AppStoreState {
   selectedNodeId: string | null
   decompositionStatus: DecompositionStatus
   decompositionSteps: DecompositionStep[]
+  nodeChats: Record<string, ChatMessage[]>
+  appendNodeMessage: (nodeId: string, msg: ChatMessage) => void
+  clearNodeChat: (nodeId: string) => void
+  updateNodeStatus: (nodeId: string, status: PrdNode['status']) => void
   applyRequirementPatch: (patch: Partial<UXRequirementState>) => void
   setMessages: (messages: ChatMessage[] | ((current: ChatMessage[]) => ChatMessage[])) => void
   setLatestRag: (rag: RagSearchResult | null) => void
@@ -66,6 +70,29 @@ export const useAppStore = create<AppStoreState>()(
       selectedNodeId: null,
       decompositionStatus: 'idle',
       decompositionSteps: [],
+      nodeChats: {},
+      appendNodeMessage: (nodeId, msg) =>
+        set((state) => ({
+          nodeChats: {
+            ...state.nodeChats,
+            [nodeId]: [...(state.nodeChats[nodeId] ?? []), msg],
+          },
+        })),
+      clearNodeChat: (nodeId) =>
+        set((state) => {
+          const { [nodeId]: _, ...rest } = state.nodeChats
+          return { nodeChats: rest }
+        }),
+      updateNodeStatus: (nodeId, status) =>
+        set((state) => {
+          if (!state.prdTree?.[nodeId]) return state
+          return {
+            prdTree: {
+              ...state.prdTree,
+              [nodeId]: { ...state.prdTree[nodeId], status },
+            },
+          }
+        }),
       applyRequirementPatch: (patch) => {
         set((state) => ({
           requirement: {
@@ -109,7 +136,7 @@ export const useAppStore = create<AppStoreState>()(
     {
       name: STORAGE_KEY,
       version: STORAGE_VERSION,
-      migrate: (persistedState: unknown, version: number) => {
+      migrate: (persistedState: unknown, version: number): unknown => {
         if (version === 3) {
           const v3 = persistedState as {
             requirement?: unknown
@@ -141,7 +168,7 @@ export const useAppStore = create<AppStoreState>()(
         messages: state.messages,
         latestRag: state.latestRag,
         settings: state.settings,
-        prdTree: state.prdTree,
+        prdTree: state.prdTree as PrdTree | null,
         selectedNodeId: state.selectedNodeId,
         // decompositionStatus: intentionally NOT persisted (session-only)
         // decompositionSteps: intentionally NOT persisted (session-only)

@@ -81,3 +81,22 @@ export interface DecompositionPollResult {
 export function pollDecomposition(baseUrl: string, sessionId: string) {
   return requestJson<DecompositionPollResult>(baseUrl, `/api/decompose/${sessionId}`)
 }
+
+// ── Node Chat API ─────────────────────────────────────────────────────────────
+
+export interface NodeChatResponse {
+  reply: string
+  nodeComplete: boolean
+}
+
+export function sendNodeChatMessage(
+  baseUrl: string,
+  nodeId: string,
+  messages: ChatMessage[],
+  tree: Record<string, PrdNode>
+) {
+  return requestJson<NodeChatResponse>(baseUrl, '/api/node-chat', {
+    method: 'POST',
+    body: JSON.stringify({ nodeId, messages, tree }),
+  })
+}
