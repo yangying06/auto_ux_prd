@@ -49,8 +49,8 @@ const MAX_ATTACHMENTS = 6
 const MAX_IMAGE_SIZE = 4 * 1024 * 1024
 
 const VISUAL_TABS: Array<{ id: VisualTab; label: string; icon: string }> = [
-  { id: 'references', label: '参考图', icon: 'image_search' },
   { id: 'prototype', label: '原型', icon: 'phone_iphone' },
+  { id: 'references', label: '参考图', icon: 'image_search' },
   { id: 'compare', label: '对比', icon: 'compare' },
 ]
 
@@ -233,7 +233,7 @@ export function ForgeChat({
   const [error, setError] = useState<string | null>(null)
   const [referenceRole, setReferenceRole] = useState<ReferenceRole>('reference')
   const [attachments, setAttachments] = useState<ImageAttachment[]>([])
-  const [visualTab, setVisualTab] = useState<VisualTab>('references')
+  const [visualTab, setVisualTab] = useState<VisualTab>('prototype')
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -488,7 +488,7 @@ export function ForgeChat({
         </div>
       </div>
 
-      <aside className="flex w-[460px] shrink-0 flex-col border-l border-outline-variant bg-surface-container">
+      <aside className="flex min-w-[520px] flex-[1.35] shrink-0 flex-col border-l border-outline-variant bg-surface-container">
         <div className="border-b border-outline-variant px-md py-sm">
           <div className="mb-sm flex items-center justify-between gap-sm">
             <div className="flex items-center gap-sm text-on-surface">
@@ -596,7 +596,7 @@ export function ForgeChat({
         ) : null}
 
         {visualTab === 'prototype' ? (
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-md">
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-sm">
             <PrototypeBoard
               html={prototypeHtml}
               history={prototypeHistory}

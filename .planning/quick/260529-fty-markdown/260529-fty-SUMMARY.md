@@ -14,8 +14,11 @@
 - `npm run build`
 - Browser opened `http://127.0.0.1:5173/` and verified the upload entry renders.
 - Local dev server ran with `MOCK_DECOMPOSE=true`; `/api/decompose/start` plus polling returned progressive node counts and final `done` status.
+- `node .planning/quick/260529-fty-markdown/e2e-verify.mjs`
+  - Upload flow: 8 node cards, 5 connector lines, no “查看导图” screen, export button visible, connector animation uses `draw-line`.
+  - Markdown preview: headings, list content, inline code, preview label, and connector animation all verified.
 
 ## Notes
 
 - 本次没有提交 commit；工作区在任务开始前已有大量未提交改动，按现状保留。
-- In-app Browser does not expose file upload construction in its isolated page evaluation, so the final visual flow was verified through build/typecheck plus mock backend polling rather than a full automated upload click-through.
+- E2E screenshots and result JSON are stored in this quick task directory for review.
