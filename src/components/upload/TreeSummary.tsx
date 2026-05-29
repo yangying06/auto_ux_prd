@@ -24,7 +24,7 @@ export function TreeSummary({ tree, nodeCount, onReset, onViewMap }: TreeSummary
           check_circle
         </span>
         <span className="text-headline-sm text-on-surface">拆解完成</span>
-        <span className="text-label-md text-on-surface-variant ml-auto">共 {nodeCount} 个节点</span>
+        <span className="text-label-md text-on-surface-variant ml-auto">共 {nodeCount} 个文档节点</span>
       </div>
 
       {/* Module list */}
@@ -40,7 +40,7 @@ export function TreeSummary({ tree, nodeCount, onReset, onViewMap }: TreeSummary
               <div className="flex-1 min-w-0">
                 <p className="text-body-md text-on-surface truncate">{root.label}</p>
                 {childCount > 0 && (
-                  <p className="text-body-md text-on-surface-variant">{childCount} 个子节点</p>
+                  <p className="text-body-md text-on-surface-variant">{childCount} 个子文档节点</p>
                 )}
               </div>
               {root.needsPolish && (

@@ -1,10 +1,16 @@
-import { useRef, useState, useMemo, useLayoutEffect } from 'react'
-import type { PrdTree, PrdNode } from '../../types/prdNode'
+import { useMemo, useRef, useState } from 'react'
+import type { PrdNode, PrdTree } from '../../types/prdNode'
 import { NodeCard } from './NodeCard'
 
 const MIN_SCALE = 0.35
 const MAX_SCALE = 2.4
 const ZOOM_STEP = 0.15
+const PADDING_X = 72
+const PADDING_TOP = 92
+const PADDING_BOTTOM = 96
+const X_STEP = 480
+const SIBLING_GAP = 28
+const ROOT_GAP = 64
 
 interface TreeCanvasProps {
   tree: PrdTree
@@ -13,16 +19,40 @@ interface TreeCanvasProps {
   onNodeDoubleClick: (id: string) => void
 }
 
+interface PositionedNode {
+  node: PrdNode
+  x: number
+  y: number
+  width: number
+  height: number
+  depth: number
+}
+
+interface LayoutResult {
+  nodes: PositionedNode[]
+  byId: Map<string, PositionedNode>
+  layers: Array<{ depth: number; x: number; width: number; label: string }>
+  contentWidth: number
+  contentHeight: number
+}
+
 function sortByOrder(a: PrdNode, b: PrdNode) {
   return a.order - b.order || a.id.localeCompare(b.id)
 }
 
-function groupByParent(nodes: PrdNode[]) {
+function getCardSize(node: PrdNode) {
+  if (node.parentId === null) return { width: 340, height: 214 }
+  if (node.type === 'module') return { width: 330, height: 196 }
+  return { width: 400, height: 270 }
+}
+
+function buildChildrenMap(tree: PrdTree) {
   const groups = new Map<string | null, PrdNode[]>()
-  for (const node of nodes) {
-    const siblings = groups.get(node.parentId) ?? []
+  for (const node of Object.values(tree)) {
+    const parentId = node.parentId && tree[node.parentId] ? node.parentId : null
+    const siblings = groups.get(parentId) ?? []
     siblings.push(node)
-    groups.set(node.parentId, siblings)
+    groups.set(parentId, siblings)
   }
 
   for (const siblings of groups.values()) {
@@ -32,47 +62,112 @@ function groupByParent(nodes: PrdNode[]) {
   return groups
 }
 
-function buildColumns(tree: PrdTree): PrdNode[][] {
-  const nodes = Object.values(tree)
-  if (nodes.length === 0) return []
+function layerLabel(depth: number) {
+  if (depth === 0) return 'PRD'
+  if (depth === 1) return '文档目录'
+  if (depth === 2) return '文档包'
+  if (depth === 3) return '细分文档'
+  return `拆分层 ${depth - 2}`
+}
 
-  const byParent = groupByParent(nodes)
-  const roots = byParent.get(null) ?? []
-  const columns: PrdNode[][] = []
-  const visited = new Set<string>()
-  let currentLevel = roots
+function buildTreeLayout(tree: PrdTree): LayoutResult {
+  const childrenMap = buildChildrenMap(tree)
+  const roots = childrenMap.get(null) ?? []
+  const heightCache = new Map<string, number>()
+  const positioned: PositionedNode[] = []
+  const byId = new Map<string, PositionedNode>()
+  const layerWidths = new Map<number, number>()
 
-  while (currentLevel.length > 0) {
-    columns.push(currentLevel)
-    const nextLevel: PrdNode[] = []
+  function childrenOf(nodeId: string) {
+    return childrenMap.get(nodeId) ?? []
+  }
 
-    for (const node of currentLevel) {
-      visited.add(node.id)
-      const linkedChildren = node.children
-        .map((childId) => tree[childId])
-        .filter((child): child is PrdNode => Boolean(child))
+  function measure(node: PrdNode, trail = new Set<string>()): number {
+    if (heightCache.has(node.id)) return heightCache.get(node.id)!
+    if (trail.has(node.id)) return getCardSize(node).height
 
-      const fallbackChildren = byParent.get(node.id) ?? []
-      const children = (linkedChildren.length > 0 ? linkedChildren : fallbackChildren)
-        .filter((child) => !visited.has(child.id))
-        .sort(sortByOrder)
+    const nextTrail = new Set(trail)
+    nextTrail.add(node.id)
+    const ownHeight = getCardSize(node).height
+    const children = childrenOf(node.id)
 
-      nextLevel.push(...children)
+    if (children.length === 0) {
+      heightCache.set(node.id, ownHeight)
+      return ownHeight
     }
 
-    currentLevel = nextLevel
+    const childrenHeight = children.reduce((sum, child, index) => (
+      sum + measure(child, nextTrail) + (index === 0 ? 0 : SIBLING_GAP)
+    ), 0)
+    const subtreeHeight = Math.max(ownHeight, childrenHeight)
+    heightCache.set(node.id, subtreeHeight)
+    return subtreeHeight
   }
 
-  const orphans = nodes.filter((node) => !visited.has(node.id))
-  if (orphans.length > 0) {
-    columns.push(orphans.sort((a, b) => a.level - b.level || sortByOrder(a, b)))
+  function place(node: PrdNode, depth: number, top: number, trail = new Set<string>()) {
+    if (trail.has(node.id)) return
+    const nextTrail = new Set(trail)
+    nextTrail.add(node.id)
+
+    const size = getCardSize(node)
+    const subtreeHeight = measure(node)
+    const x = PADDING_X + depth * X_STEP
+    const y = top + subtreeHeight / 2 - size.height / 2
+    const item = { node, x, y, width: size.width, height: size.height, depth }
+
+    positioned.push(item)
+    byId.set(node.id, item)
+    layerWidths.set(depth, Math.max(layerWidths.get(depth) ?? 0, size.width))
+
+    const children = childrenOf(node.id)
+    if (children.length === 0) return
+
+    const childrenHeight = children.reduce((sum, child, index) => (
+      sum + measure(child, nextTrail) + (index === 0 ? 0 : SIBLING_GAP)
+    ), 0)
+    let childTop = top + (subtreeHeight - childrenHeight) / 2
+
+    for (const child of children) {
+      place(child, depth + 1, childTop, nextTrail)
+      childTop += measure(child, nextTrail) + SIBLING_GAP
+    }
   }
 
-  return columns
+  let top = PADDING_TOP
+  for (const root of roots) {
+    place(root, 0, top)
+    top += measure(root) + ROOT_GAP
+  }
+
+  const maxRight = positioned.reduce((max, item) => Math.max(max, item.x + item.width), PADDING_X)
+  const maxDepth = positioned.reduce((max, item) => Math.max(max, item.depth), 0)
+  const layers = Array.from({ length: maxDepth + 1 }, (_, depth) => ({
+    depth,
+    x: PADDING_X + depth * X_STEP,
+    width: layerWidths.get(depth) ?? 240,
+    label: layerLabel(depth),
+  }))
+
+  return {
+    nodes: positioned,
+    byId,
+    layers,
+    contentWidth: maxRight + PADDING_X,
+    contentHeight: Math.max(520, top - ROOT_GAP + PADDING_BOTTOM),
+  }
 }
 
 function clampScale(scale: number) {
   return Math.max(MIN_SCALE, Math.min(MAX_SCALE, scale))
+}
+
+function connectorPath(parent: PositionedNode, child: PositionedNode) {
+  const sx = parent.x + parent.width
+  const sy = parent.y + parent.height / 2
+  const ex = child.x
+  const ey = child.y + child.height / 2
+  const midX = sx + Math.max(56, (ex - sx) / 2)
+  return `M ${sx} ${sy} C ${midX} ${sy}, ${midX} ${ey}, ${ex} ${ey}`
 }
 
 export function TreeCanvas({ tree, selectedNodeId, onNodeClick, onNodeDoubleClick }: TreeCanvasProps) {
@@ -80,11 +175,21 @@ export function TreeCanvas({ tree, selectedNodeId, onNodeClick, onNodeDoubleClic
   const viewportRef = useRef<HTMLDivElement>(null)
   const innerRef = useRef<HTMLDivElement>(null)
   const dragStartRef = useRef<{ x: number; y: number } | null>(null)
-  const nodeRefs = useRef<Map<string, HTMLDivElement>>(new Map())
-  const [paths, setPaths] = useState<string[]>([])
   const [scaleLabel, setScaleLabel] = useState(1)
 
-  const columns = useMemo(() => buildColumns(tree), [tree])
+  const layout = useMemo(() => buildTreeLayout(tree), [tree])
+  const paths = useMemo(() => (
+    layout.nodes
+      .map((item) => {
+        if (!item.node.parentId) return null
+        const parent = layout.byId.get(item.node.parentId)
+        return parent ? {
+          id: `${parent.node.id}-${item.node.id}`,
+          d: connectorPath(parent, item),
+        } : null
+      })
+      .filter((path): path is { id: string; d: string } => Boolean(path))
+  ), [layout])
 
   function applyTransform(nextTransform = transformRef.current) {
     transformRef.current = nextTransform
@@ -128,7 +233,18 @@ export function TreeCanvas({ tree, selectedNodeId, onNodeClick, onNodeDoubleClic
   }
 
   function handleFitScreen() {
-    applyTransform({ scale: 1, tx: 0, ty: 0 })
+    const viewport = viewportRef.current
+    if (!viewport) {
+      applyTransform({ scale: 1, tx: 0, ty: 0 })
+      return
+    }
+
+    const scale = clampScale(Math.min(
+      1,
+      (viewport.clientWidth - 56) / layout.contentWidth,
+      (viewport.clientHeight - 56) / layout.contentHeight,
+    ))
+    applyTransform({ scale, tx: 28, ty: 28 })
   }
 
   function handleWheel(e: React.WheelEvent<HTMLDivElement>) {
@@ -160,55 +276,29 @@ export function TreeCanvas({ tree, selectedNodeId, onNodeClick, onNodeDoubleClic
     dragStartRef.current = null
   }
 
-  useLayoutEffect(() => {
-    const innerEl = innerRef.current
-    if (!innerEl) return
-
-    const newPaths: string[] = []
-    const nodes = Object.values(tree)
-
-    nodes.forEach((node) => {
-      if (!node.parentId) return
-      const parentEl = nodeRefs.current.get(node.parentId)
-      const childEl = nodeRefs.current.get(node.id)
-      if (!parentEl || !childEl) return
-
-      const px = parentEl.offsetLeft + parentEl.offsetWidth
-      const py = parentEl.offsetTop + parentEl.offsetHeight / 2
-      const cx = childEl.offsetLeft
-      const cy = childEl.offsetTop + childEl.offsetHeight / 2
-      const midX = (px + cx) / 2
-
-      newPaths.push(`M ${px} ${py} C ${midX} ${py}, ${midX} ${cy}, ${cx} ${cy}`)
-    })
-
-    setPaths(newPaths)
-  }, [tree, columns])
-
   return (
     <div
       ref={viewportRef}
-      className="flex-1 relative blueprint-grid overflow-hidden cursor-grab active:cursor-grabbing"
+      className="relative flex-1 cursor-grab overflow-hidden blueprint-grid active:cursor-grabbing"
       onWheel={handleWheel}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerLeave={onPointerUp}
     >
-      {/* Zoom controls — absolute positioned, outside the transformed inner */}
-      <div className="absolute bottom-lg right-lg flex gap-xs bg-surface-container border border-outline-variant rounded-lg p-xs shadow-lg z-10">
+      <div className="absolute right-lg bottom-lg z-10 flex gap-xs rounded-lg border border-outline-variant bg-surface-container p-xs shadow-lg">
         <button
           onClick={handleZoomOut}
           disabled={scaleLabel <= MIN_SCALE}
           title="缩小"
-          className="p-sm text-on-surface-variant hover:text-primary transition-colors hover:bg-surface-variant rounded disabled:cursor-not-allowed disabled:opacity-40"
+          className="rounded p-sm text-on-surface-variant transition-colors hover:bg-surface-variant hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
         >
           <span className="material-symbols-outlined">zoom_out</span>
         </button>
         <button
           onClick={handleFitScreen}
-          title="重置视图"
-          className="p-sm text-on-surface-variant hover:text-primary transition-colors hover:bg-surface-variant rounded"
+          title="适配视图"
+          className="rounded p-sm text-on-surface-variant transition-colors hover:bg-surface-variant hover:text-primary"
         >
           <span className="material-symbols-outlined">fit_screen</span>
         </button>
@@ -216,55 +306,64 @@ export function TreeCanvas({ tree, selectedNodeId, onNodeClick, onNodeDoubleClic
           onClick={handleZoomIn}
           disabled={scaleLabel >= MAX_SCALE}
           title="放大"
-          className="p-sm text-on-surface-variant hover:text-primary transition-colors hover:bg-surface-variant rounded disabled:cursor-not-allowed disabled:opacity-40"
+          className="rounded p-sm text-on-surface-variant transition-colors hover:bg-surface-variant hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
         >
           <span className="material-symbols-outlined">zoom_in</span>
         </button>
       </div>
 
-      {/* Inner transformed container */}
       <div
         ref={innerRef}
-        className="relative flex items-center p-xl gap-[80px] min-w-max"
-        style={{ willChange: 'transform' }}
+        className="relative"
+        style={{
+          width: layout.contentWidth,
+          height: layout.contentHeight,
+          minWidth: layout.contentWidth,
+          transform: 'translate(0px, 0px) scale(1)',
+          transformOrigin: '0 0',
+          willChange: 'transform',
+        }}
       >
-        {/* SVG connection lines — behind columns, z-index 0 */}
+        {layout.layers.map((layer) => (
+          <div
+            key={layer.depth}
+            className="absolute top-9 flex items-center gap-xs font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface-variant/70"
+            style={{ left: layer.x, width: layer.width }}
+          >
+            <span className="h-px flex-1 bg-outline-variant/30" />
+            <span>{layer.label}</span>
+            <span className="h-px flex-1 bg-outline-variant/30" />
+          </div>
+        ))}
+
         <svg
-          className="absolute top-0 left-0 pointer-events-none"
-          style={{ width: '100%', height: '100%', zIndex: 0, overflow: 'visible' }}
+          className="pointer-events-none absolute top-0 left-0"
+          style={{ width: layout.contentWidth, height: layout.contentHeight, overflow: 'visible', zIndex: 0 }}
         >
-          {paths.map((d, i) => (
-            <path key={i} d={d} className="svg-line" />
+          {paths.map((path, i) => (
+            <path
+              key={path.id}
+              d={path.d}
+              className="svg-line"
+              pathLength={1}
+              style={{ animationDelay: `${Math.min(i * 45, 420)}ms` }}
+            />
           ))}
         </svg>
 
-        {/* Columns */}
-        {columns.map((col, colIdx) => (
+        {layout.nodes.map((item) => (
           <div
-            key={colIdx}
-            className={`z-10 flex flex-col shrink-0 ${
-              colIdx === 0 ? 'w-[280px] gap-[48px]' :
-              colIdx === 1 ? 'w-[240px] gap-[56px]' :
-              'w-[320px] gap-[40px]'
-            }`}
+            key={item.node.id}
+            data-node-card="true"
+            className="absolute z-10"
+            style={{ left: item.x, top: item.y, width: item.width, height: item.height }}
           >
-            {col.map((node) => (
-              <div
-                key={node.id}
-                ref={(el) => {
-                  if (el) nodeRefs.current.set(node.id, el)
-                  else nodeRefs.current.delete(node.id)
-                }}
-                data-node-card="true"
-              >
-                <NodeCard
-                  node={node}
-                  isSelected={node.id === selectedNodeId}
-                  onNodeClick={onNodeClick}
-                  onNodeDoubleClick={onNodeDoubleClick}
-                />
-              </div>
-            ))}
+            <NodeCard
+              node={item.node}
+              isSelected={item.node.id === selectedNodeId}
+              onNodeClick={onNodeClick}
+              onNodeDoubleClick={onNodeDoubleClick}
+            />
           </div>
         ))}
       </div>

@@ -19,7 +19,81 @@ const emptyRequirement: UXRequirementState = {
 }
 
 const STORAGE_KEY = 'gameux-promptforge-state'
-const STORAGE_VERSION = 4
+const STORAGE_VERSION = 7
+const PROTOTYPE_HISTORY_LIMIT = 8
+
+export interface PrototypeVersion {
+  id: string
+  label: string
+  html: string
+  createdAt: string
+  mode: 'create' | 'update' | 'restore'
+  note: string | null
+}
+
+interface PrototypeVersionMeta {
+  mode?: PrototypeVersion['mode']
+  note?: string | null
+}
+
+interface NodePolishPatch {
+  summary?: string | null
+  content?: string | null
+  techNotes?: string | null
+}
+
+function normalizeOptionalText(value: string | null | undefined) {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed.length ? trimmed : null
+}
+
+function persistableMessage(message: ChatMessage): ChatMessage {
+  if (typeof message.content === 'string') return message
+
+  const textParts = message.content.flatMap((block) => {
+    if (block.type === 'text') return block.text.trim() ? [block.text.trim()] : []
+    return [`[图片附件: ${block.source.media_type}]`]
+  })
+
+  return {
+    ...message,
+    content: textParts.join('\n\n'),
+  }
+}
+
+function persistableNodeChats(nodeChats: Record<string, ChatMessage[]>) {
+  return Object.fromEntries(
+    Object.entries(nodeChats).map(([nodeId, messages]) => [
+      nodeId,
+      messages.slice(-24).map(persistableMessage),
+    ]),
+  )
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+function persistedTreeHasLocalTemplates(value: unknown) {
+  if (!isRecord(value)) return false
+
+  return Object.values(value).some((node) => {
+    if (!isRecord(node)) return false
+    const text = [
+      node.id,
+      node.summary,
+      node.content,
+      node.techNotes,
+      node.handoffGoal,
+      node.qualityGate,
+      node.extractedFrom,
+    ].filter((item): item is string => typeof item === 'string').join('\n')
+
+    return /原文标题「.+?」下的内容。/.test(text)
+      || /本地标题骨架|本地兜底节点|标题骨架兜底/.test(text)
+  })
+}
 
 function rebuildPrdTreeLinks(tree: PrdTree): PrdTree {
   const next = Object.fromEntries(
@@ -39,6 +113,12 @@ function rebuildPrdTreeLinks(tree: PrdTree): PrdTree {
   return next
 }
 
+function normalizePersistedPrdTree(value: unknown): PrdTree | null {
+  if (!isRecord(value)) return null
+  if (persistedTreeHasLocalTemplates(value)) return null
+  return rebuildPrdTreeLinks(value as PrdTree)
+}
+
 export const initialMessages: ChatMessage[] = [
   {
     role: 'assistant',
@@ -46,11 +126,27 @@ export const initialMessages: ChatMessage[] = [
   },
 ]
 
+function makePrototypeVersion(
+  html: string,
+  history: PrototypeVersion[],
+  meta: PrototypeVersionMeta | undefined,
+): PrototypeVersion {
+  return {
+    id: `${Date.now()}-${history.length}`,
+    label: `V${history.length + 1}`,
+    html,
+    createdAt: new Date().toISOString(),
+    mode: meta?.mode ?? (history.length === 0 ? 'create' : 'update'),
+    note: meta?.note?.trim() || null,
+  }
+}
+
 interface AppStoreState {
   requirement: UXRequirementState
   messages: ChatMessage[]
   latestRag: RagSearchResult | null
   prototypeHtml: string | null
+  prototypeHistory: PrototypeVersion[]
   settings: AppSettings
   prdTree: PrdTree | null
   selectedNodeId: string | null
@@ -59,11 +155,14 @@ interface AppStoreState {
   nodeChats: Record<string, ChatMessage[]>
   appendNodeMessage: (nodeId: string, msg: ChatMessage) => void
   clearNodeChat: (nodeId: string) => void
+  applyNodePolish: (nodeId: string, patch: NodePolishPatch) => void
   updateNodeStatus: (nodeId: string, status: PrdNode['status']) => void
   applyRequirementPatch: (patch: Partial<UXRequirementState>) => void
   setMessages: (messages: ChatMessage[] | ((current: ChatMessage[]) => ChatMessage[])) => void
   setLatestRag: (rag: RagSearchResult | null) => void
-  setPrototypeHtml: (html: string | null) => void
+  setPrototypeHtml: (html: string | null, meta?: PrototypeVersionMeta) => void
+  restorePrototypeVersion: (id: string) => void
+  clearPrototypeHistory: () => void
   updateSettings: (settings: AppSettings) => void
   resetSession: () => void
   resetRequirement: () => void
@@ -83,6 +182,7 @@ export const useAppStore = create<AppStoreState>()(
       messages: initialMessages,
       latestRag: null,
       prototypeHtml: null,
+      prototypeHistory: [],
       settings: defaultSettings,
       prdTree: null,
       selectedNodeId: null,
@@ -100,6 +200,27 @@ export const useAppStore = create<AppStoreState>()(
         set((state) => {
           const { [nodeId]: _, ...rest } = state.nodeChats
           return { nodeChats: rest }
+        }),
+      applyNodePolish: (nodeId, patch) =>
+        set((state) => {
+          const node = state.prdTree?.[nodeId]
+          if (!node || !state.prdTree) return state
+
+          const summary = normalizeOptionalText(patch.summary)
+          const content = normalizeOptionalText(patch.content)
+          const techNotes = normalizeOptionalText(patch.techNotes)
+
+          return {
+            prdTree: {
+              ...state.prdTree,
+              [nodeId]: {
+                ...node,
+                summary: summary ?? node.summary,
+                content: content ?? node.content,
+                techNotes: techNotes ?? node.techNotes,
+              },
+            },
+          }
         }),
       updateNodeStatus: (nodeId, status) =>
         set((state) => {
@@ -131,10 +252,25 @@ export const useAppStore = create<AppStoreState>()(
         }))
       },
       setLatestRag: (latestRag) => set({ latestRag }),
-      setPrototypeHtml: (prototypeHtml) => set({ prototypeHtml }),
+      setPrototypeHtml: (prototypeHtml, meta) =>
+        set((state) => {
+          if (!prototypeHtml) return { prototypeHtml: null, prototypeHistory: [] }
+          const version = makePrototypeVersion(prototypeHtml, state.prototypeHistory, meta)
+          return {
+            prototypeHtml,
+            prototypeHistory: [version, ...state.prototypeHistory].slice(0, PROTOTYPE_HISTORY_LIMIT),
+          }
+        }),
+      restorePrototypeVersion: (id) =>
+        set((state) => {
+          const version = state.prototypeHistory.find((item) => item.id === id)
+          if (!version) return state
+          return { prototypeHtml: version.html }
+        }),
+      clearPrototypeHistory: () => set({ prototypeHtml: null, prototypeHistory: [] }),
       updateSettings: (settings) => set({ settings }),
-      resetSession: () => set({ messages: initialMessages, latestRag: null, prototypeHtml: null }),
-      resetRequirement: () => set({ requirement: emptyRequirement, latestRag: null, prototypeHtml: null }),
+      resetSession: () => set({ messages: initialMessages, latestRag: null, prototypeHtml: null, prototypeHistory: [] }),
+      resetRequirement: () => set({ requirement: emptyRequirement, latestRag: null, prototypeHtml: null, prototypeHistory: [] }),
       setPrdTree: (prdTree) => set({ prdTree: rebuildPrdTreeLinks(prdTree) }),
       setSelectedNodeId: (selectedNodeId) => set({ selectedNodeId }),
       setDecompositionStatus: (decompositionStatus) => set({ decompositionStatus }),
@@ -149,26 +285,35 @@ export const useAppStore = create<AppStoreState>()(
       mergePartialTree: (nodes) =>
         set((state) => ({ prdTree: rebuildPrdTreeLinks({ ...(state.prdTree ?? {}), ...nodes }) })),
       resetDecomposition: () =>
-        set({ prdTree: null, decompositionStatus: 'idle', decompositionSteps: [] }),
+        set({ prdTree: null, selectedNodeId: null, decompositionStatus: 'idle', decompositionSteps: [], nodeChats: {} }),
     }),
     {
       name: STORAGE_KEY,
       version: STORAGE_VERSION,
       migrate: (persistedState: unknown, version: number): unknown => {
-        if (version === 3) {
-          const v3 = persistedState as {
+        if (version === 3 || version === 4 || version === 5 || version === 6) {
+          const previous = persistedState as {
             requirement?: unknown
             messages?: unknown
             latestRag?: unknown
             settings?: unknown
+            prdTree?: unknown
+            selectedNodeId?: unknown
+            prototypeHtml?: unknown
+            prototypeHistory?: unknown
+            nodeChats?: unknown
           }
+          const prdTree = normalizePersistedPrdTree(previous.prdTree)
           return {
-            requirement: v3.requirement ?? emptyRequirement,
-            messages: v3.messages ?? initialMessages,
-            latestRag: v3.latestRag ?? null,
-            settings: v3.settings ?? defaultSettings,
-            prdTree: null,
-            selectedNodeId: null,
+            requirement: previous.requirement ?? emptyRequirement,
+            messages: previous.messages ?? initialMessages,
+            latestRag: previous.latestRag ?? null,
+            settings: previous.settings ?? defaultSettings,
+            prdTree,
+            selectedNodeId: prdTree ? previous.selectedNodeId ?? null : null,
+            prototypeHtml: typeof previous.prototypeHtml === 'string' ? previous.prototypeHtml : null,
+            prototypeHistory: Array.isArray(previous.prototypeHistory) ? previous.prototypeHistory : [],
+            nodeChats: prdTree && previous.nodeChats && typeof previous.nodeChats === 'object' ? previous.nodeChats : {},
           }
         }
         // Unknown version — safe reset
@@ -179,15 +324,21 @@ export const useAppStore = create<AppStoreState>()(
           settings: defaultSettings,
           prdTree: null,
           selectedNodeId: null,
+          prototypeHtml: null,
+          prototypeHistory: [],
+          nodeChats: {},
         }
       },
       partialize: (state) => ({
         requirement: state.requirement,
-        messages: state.messages,
+        messages: state.messages.map(persistableMessage),
         latestRag: state.latestRag,
+        prototypeHtml: state.prototypeHtml,
+        prototypeHistory: state.prototypeHistory,
         settings: state.settings,
         prdTree: state.prdTree as PrdTree | null,
         selectedNodeId: state.selectedNodeId,
+        nodeChats: persistableNodeChats(state.nodeChats),
         // decompositionStatus: intentionally NOT persisted (session-only)
         // decompositionSteps: intentionally NOT persisted (session-only)
       }),

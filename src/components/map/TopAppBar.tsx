@@ -4,9 +4,19 @@ interface TopAppBarProps {
   canExport?: boolean
   onExport?: () => void
   isExporting?: boolean
+  onValidatePrototype?: () => void
+  canValidatePrototype?: boolean
 }
 
-export function TopAppBar({ onUploadNew, onDelete, canExport, onExport, isExporting }: TopAppBarProps) {
+export function TopAppBar({
+  onUploadNew,
+  onDelete,
+  canExport,
+  onExport,
+  isExporting,
+  onValidatePrototype,
+  canValidatePrototype = true,
+}: TopAppBarProps) {
   return (
     <header className="flex justify-between items-center h-16 px-lg w-full bg-surface border-b border-outline-variant z-20 shrink-0">
       <div className="flex items-center gap-md">
@@ -28,7 +38,7 @@ export function TopAppBar({ onUploadNew, onDelete, canExport, onExport, isExport
           <button
             onClick={onExport}
             disabled={!canExport || isExporting}
-            title={!canExport ? '所有叶子节点完成后才能导出' : undefined}
+            title={!canExport ? '需要打磨的文档包确认完成后才能导出' : undefined}
             className={[
               'flex items-center gap-sm rounded-lg px-md py-sm font-label-md text-label-md border transition-colors',
               canExport && !isExporting
@@ -42,7 +52,23 @@ export function TopAppBar({ onUploadNew, onDelete, canExport, onExport, isExport
             >
               {isExporting ? 'sync' : 'download'}
             </span>
-            {isExporting ? '生成中...' : '导出规格'}
+            {isExporting ? '生成中...' : '导出文档包'}
+          </button>
+        )}
+        {onValidatePrototype && (
+          <button
+            onClick={onValidatePrototype}
+            disabled={!canValidatePrototype}
+            title={canValidatePrototype ? '在 bolt.new 中验证可运行原型' : '导图加载后可验证'}
+            className={[
+              'flex items-center gap-sm rounded-lg px-md py-sm font-label-md text-label-md border transition-colors',
+              canValidatePrototype
+                ? 'bg-tertiary-container text-on-tertiary-container border-tertiary/40 hover:bg-tertiary-container/90 cursor-pointer active:opacity-80'
+                : 'bg-surface-container-high text-on-surface border-outline-variant opacity-40 cursor-not-allowed',
+            ].join(' ')}
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>rocket_launch</span>
+            Bolt 验证
           </button>
         )}
         {onDelete && (

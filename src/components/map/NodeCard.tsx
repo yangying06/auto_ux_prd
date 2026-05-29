@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import type { PrdNode } from '../../types/prdNode'
+import { DocumentMiniPreview } from './DocumentPreview'
 
 interface NodeCardProps {
   node: PrdNode
@@ -8,8 +9,8 @@ interface NodeCardProps {
   onNodeDoubleClick: (id: string) => void
 }
 
-function StatusBadge({ status }: { status: PrdNode['status'] }) {
-  if (status === 'pending') {
+function StatusBadge({ node }: { node: PrdNode }) {
+  if (node.status === 'pending' && node.needsPolish) {
     return (
       <div className="flex items-center gap-xs bg-[#b22a00]/20 border border-[#ff5429] text-[#ff8b6b] px-2 py-1 rounded-full text-[10px] font-bold tracking-wider">
         <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>auto_awesome</span>
@@ -17,10 +18,18 @@ function StatusBadge({ status }: { status: PrdNode['status'] }) {
       </div>
     )
   }
+  if (node.status === 'pending') {
+    return (
+      <div className="flex items-center gap-xs bg-surface-container-high border border-outline-variant text-on-surface-variant px-2 py-1 rounded-full text-[10px] font-bold tracking-wider">
+        <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>checklist</span>
+        可导出
+      </div>
+    )
+  }
   return (
     <div className="flex items-center gap-xs bg-tertiary-container/40 border border-on-tertiary-container text-tertiary px-2 py-1 rounded-full text-[10px] font-bold tracking-wider">
       <span className="material-symbols-outlined" style={{ fontSize: '12px', fontVariationSettings: "'FILL' 1" }}>check_circle</span>
-      已完成
+      已确认
     </div>
   )
 }
@@ -47,57 +56,65 @@ export function NodeCard({ node, isSelected, onNodeClick, onNodeDoubleClick }: N
     }
   }
 
-  // Root node
   if (node.parentId === null) {
     return (
       <div
         onClick={handleClick}
-        className="bg-surface-container border border-outline-variant rounded-xl p-md node-glow cursor-pointer hover:border-primary transition-colors relative"
+        className={`relative flex h-full cursor-pointer flex-col rounded-lg border border-outline-variant bg-surface-container p-md transition-colors hover:border-primary ${isSelected ? 'active-glow' : 'node-glow'}`}
       >
         <div className="flex items-center gap-sm mb-sm text-primary">
           <span className="material-symbols-outlined">folder_special</span>
-          <span className="font-label-md text-label-md">顶层节点</span>
+          <span className="font-label-md text-label-md">顶层目录</span>
         </div>
-        <h2 className="font-headline-sm text-headline-sm text-on-surface mb-sm">{node.label}</h2>
-        <div className="font-code-sm text-code-sm text-on-surface-variant border-t border-outline-variant pt-sm mt-sm">
-          编号：<span className="text-tertiary">{node.id}</span>
+        <h2 className="mb-sm line-clamp-2 font-headline-sm text-headline-sm text-on-surface">{node.label}</h2>
+        <div className="min-h-0 flex-1 overflow-hidden rounded border border-outline-variant/60 bg-surface-container-low/70 p-sm">
+          <DocumentMiniPreview node={node} maxLines={5} />
+        </div>
+        <div className="mt-sm border-t border-outline-variant pt-sm font-code-sm text-code-sm text-on-surface-variant">
+          {node.docPath ?? node.id}
         </div>
       </div>
     )
   }
 
-  // Module node
   if (node.type === 'module') {
     return (
       <div
         onClick={handleClick}
-        className="bg-surface-container border border-outline-variant rounded-lg p-md shadow-sm cursor-pointer hover:border-primary transition-colors node-glow"
+        className={`flex h-full cursor-pointer flex-col rounded-lg border border-outline-variant bg-surface-container p-md shadow-sm transition-colors hover:border-primary ${isSelected ? 'active-glow' : 'node-glow'}`}
       >
         <div className="flex items-center gap-sm mb-xs text-secondary">
           <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>category</span>
-          <span className="font-label-md text-label-md">模块</span>
+          <span className="font-label-md text-label-md">文档分组</span>
         </div>
-        <h3 className="font-body-lg text-body-lg text-on-surface">{node.label}</h3>
+        <h3 className="mb-xs line-clamp-2 font-body-lg text-body-lg text-on-surface">{node.label}</h3>
+        <div className="mt-sm min-h-0 flex-1 overflow-hidden rounded border border-outline-variant/60 bg-surface-container-low/70 p-sm">
+          <DocumentMiniPreview node={node} maxLines={5} />
+        </div>
       </div>
     )
   }
 
-  // Feature / UI leaf node
   return (
     <div
       onClick={handleClick}
-      className={`bg-surface-container-highest border border-outline-variant rounded-xl p-md cursor-pointer relative group transition-colors hover:border-primary ${isSelected ? 'active-glow' : 'node-glow'}`}
+      className={`group relative flex h-full cursor-pointer flex-col rounded-lg border border-outline-variant bg-surface-container-highest p-md transition-colors hover:border-primary ${isSelected ? 'active-glow' : 'node-glow'}`}
     >
-      <div className="flex justify-between items-start mb-sm">
-        <div className="flex items-center gap-sm text-on-surface">
-          <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>bolt</span>
-          <h4 className="font-headline-sm text-headline-sm">{node.label}</h4>
+      <div className="mb-sm flex items-start justify-between gap-sm">
+        <div className="min-w-0">
+          <div className="mb-xs flex items-center gap-xs text-primary">
+            <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>article</span>
+            <span className="truncate font-code-sm text-code-sm">{node.docPath ?? node.id}</span>
+          </div>
+          <h4 className="line-clamp-2 font-headline-sm text-headline-sm text-on-surface">{node.label}</h4>
         </div>
-        <StatusBadge status={node.status} />
+        <StatusBadge node={node} />
       </div>
-      <p className="font-body-md text-body-md text-on-surface-variant line-clamp-2 mb-md">{node.summary}</p>
-      <div className="flex items-center justify-between border-t border-outline-variant pt-sm">
-        <span className="font-code-sm text-code-sm text-on-primary-container">编号：{node.id}</span>
+      <div className="min-h-0 flex-1 overflow-hidden rounded border border-outline-variant/60 bg-surface-container/70 p-sm">
+        <DocumentMiniPreview node={node} maxLines={8} />
+      </div>
+      <div className="mt-sm flex items-center justify-between border-t border-outline-variant pt-sm">
+        <span className="font-label-md text-label-md text-on-surface-variant">文档预览</span>
         <span className="font-label-md text-label-md text-primary opacity-0 group-hover:opacity-100 transition-opacity">
           双击打磨
         </span>

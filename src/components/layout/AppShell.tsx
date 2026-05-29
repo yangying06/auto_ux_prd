@@ -5,6 +5,7 @@ import { SettingsPanel } from './SettingsPanel'
 import { useAppStore } from '../../store/appStore'
 import { exportFinalPrompt, generatePrototype } from '../../lib/api'
 import { downloadMarkdown } from '../../lib/download'
+import { openBoltWithPrompt, requirementToBoltPrompt } from '../../lib/specPrompt'
 import type { ContentBlock } from '../../types/chat'
 
 function extractText(content: string | ContentBlock[]): string {
@@ -22,7 +23,9 @@ export function AppShell({ onBack, onConfirm }: { onBack?: () => void; onConfirm
   const latestRag = useAppStore((state) => state.latestRag)
   const settings = useAppStore((state) => state.settings)
   const prototypeHtml = useAppStore((state) => state.prototypeHtml)
+  const prototypeHistory = useAppStore((state) => state.prototypeHistory)
   const setPrototypeHtml = useAppStore((state) => state.setPrototypeHtml)
+  const restorePrototypeVersion = useAppStore((state) => state.restorePrototypeVersion)
   const resetSession = useAppStore((state) => state.resetSession)
   const resetRequirement = useAppStore((state) => state.resetRequirement)
 
@@ -37,14 +40,25 @@ export function AppShell({ onBack, onConfirm }: { onBack?: () => void; onConfirm
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requirement.completion_rate])
 
-  async function handleGeneratePrototype() {
+  async function handleGeneratePrototype(instruction?: string) {
+    const trimmedInstruction = instruction?.trim() ?? ''
     setIsGeneratingPrototype(true)
     try {
-      const result = await generatePrototype(settings.proxyBaseUrl, requirement)
-      setPrototypeHtml(result.html)
+      const result = await generatePrototype(settings.proxyBaseUrl, requirement, {
+        currentHtml: trimmedInstruction ? prototypeHtml : null,
+        instruction: trimmedInstruction,
+      })
+      setPrototypeHtml(result.html, {
+        mode: result.mode === 'create' ? 'create' : 'update',
+        note: trimmedInstruction || null,
+      })
     } finally {
       setIsGeneratingPrototype(false)
     }
+  }
+
+  function handleOpenBolt() {
+    openBoltWithPrompt(requirementToBoltPrompt(requirement))
   }
 
   async function handleExportPrompt() {
@@ -75,10 +89,13 @@ export function AppShell({ onBack, onConfirm }: { onBack?: () => void; onConfirm
         latestRag={latestRag}
         projectName={settings.projectName}
         prototypeHtml={prototypeHtml}
+        prototypeHistory={prototypeHistory}
         isGeneratingPrototype={isGeneratingPrototype}
         isExportingPrompt={isExportingPrompt}
         onGeneratePrototype={handleGeneratePrototype}
+        onRestorePrototype={restorePrototypeVersion}
         onExportPrompt={handleExportPrompt}
+        onOpenBolt={handleOpenBolt}
       />
       <SettingsPanel
         open={settingsOpen}

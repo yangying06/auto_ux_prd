@@ -30,7 +30,7 @@ export function SettingsPanel({ open, onResetSession, onResetRequirement, onClos
         setHealth(null)
         setError(healthError instanceof Error ? healthError.message : '无法连接本地代理')
       })
-  }, [open])
+  }, [open, settings.proxyBaseUrl])
 
   async function handleTestRag() {
     setIsTesting(true)
@@ -73,7 +73,7 @@ export function SettingsPanel({ open, onResetSession, onResetRequirement, onClos
         <div className="grid gap-md md:grid-cols-2">
           <ConfigBlock label="Claude 服务" value={health?.claude.provider ?? 'Anthropic Claude'} status={health?.claude.apiKeyPresent ? 'API Key 已配置' : '缺少 API Key'} tone={health?.claude.apiKeyPresent ? 'complete' : 'missing'} />
           <ConfigBlock label="模型" value={health?.claude.model ?? 'claude-sonnet-4-6'} status="自适应思考 + Prompt 缓存" tone="info" />
-          <ConfigBlock label="本地代理" value="http://127.0.0.1:8787" status={health?.ok ? '已连接' : '未连接'} tone={health?.ok ? 'complete' : 'missing'} />
+          <ConfigBlock label="本地代理" value={settings.proxyBaseUrl} status={health?.ok ? '已连接' : '未连接'} tone={health?.ok ? 'complete' : 'missing'} />
           <ConfigBlock label="Cocos RAG SSE" value={health?.cocosRag.sseUrl ?? 'http://43.134.44.85:18000/sse'} status={cocosRagStatus} tone="info" />
         </div>
 

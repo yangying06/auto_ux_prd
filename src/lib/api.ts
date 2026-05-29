@@ -47,10 +47,24 @@ export function searchCocosRag(baseUrl: string, query: string) {
   })
 }
 
-export function generatePrototype(baseUrl: string, requirementState: UXRequirementState) {
-  return requestJson<{ html: string }>(baseUrl, '/api/prototype', {
+export interface PrototypeResponse {
+  html: string
+  mode: 'create' | 'update' | 'rewrite'
+  appliedEdits: number
+}
+
+export function generatePrototype(
+  baseUrl: string,
+  requirementState: UXRequirementState,
+  options: { currentHtml?: string | null; instruction?: string } = {},
+) {
+  return requestJson<PrototypeResponse>(baseUrl, '/api/prototype', {
     method: 'POST',
-    body: JSON.stringify({ requirementState }),
+    body: JSON.stringify({
+      requirementState,
+      currentHtml: options.currentHtml ?? null,
+      instruction: options.instruction ?? null,
+    }),
   })
 }
 
@@ -87,6 +101,11 @@ export function pollDecomposition(baseUrl: string, sessionId: string) {
 export interface NodeChatResponse {
   reply: string
   nodeComplete: boolean
+  nodePatch?: {
+    summary?: string | null
+    content?: string | null
+    techNotes?: string | null
+  } | null
 }
 
 export function sendNodeChatMessage(

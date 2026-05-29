@@ -109,6 +109,50 @@ body {
   stroke-width: 2;
   fill: none;
   vector-effect: non-scaling-stroke;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: draw-line 700ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.svg-line-live {
+  stroke: #0566d9;
+  stroke-width: 2.5;
+}
+
+@keyframes draw-line {
+  to { stroke-dashoffset: 0; }
+}
+
+.scan-line {
+  transform-origin: left center;
+  animation: scan-line 1.4s ease-in-out infinite;
+  box-shadow: 0 0 18px rgba(5, 102, 217, 0.55);
+}
+
+@keyframes scan-line {
+  0% {
+    opacity: 0.25;
+    transform: scaleX(0.18);
+  }
+  50% {
+    opacity: 1;
+    transform: scaleX(1);
+  }
+  100% {
+    opacity: 0.25;
+    transform: scaleX(0.18) translateX(420%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .svg-line,
+  .scan-line {
+    animation: none;
+  }
+
+  .svg-line {
+    stroke-dashoffset: 0;
+  }
 }
 
 /* Drawer custom scrollbar (8px, matches Image 2.html) */

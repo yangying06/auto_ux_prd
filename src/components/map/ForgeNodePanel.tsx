@@ -1,65 +1,53 @@
 import type { PrdNode } from '../../types/prdNode'
+import { DocumentPreview } from './DocumentPreview'
 
 interface ForgeNodePanelProps {
   node: PrdNode
 }
 
-const TYPE_BADGE: Record<PrdNode['type'], string> = {
-  module: 'bg-surface-variant text-on-surface-variant',
-  feature: 'bg-secondary-container text-on-secondary-container',
-  ui: 'bg-tertiary-container text-on-tertiary-container',
+function statusLabel(node: PrdNode) {
+  if (node.status === 'done') return '已确认'
+  return node.needsPolish ? '待补齐' : '可直接导出'
 }
 
-const TYPE_LABEL: Record<PrdNode['type'], string> = {
-  module: '模块',
-  feature: '功能',
-  ui: '界面/交互',
-}
-
-function StatusBadge({ status }: { status: PrdNode['status'] }) {
-  const cls =
-    status === 'done'
-      ? 'bg-tertiary-container text-on-tertiary-container'
-      : 'bg-surface-variant text-on-surface-variant'
-  const label = status === 'done' ? '已完成' : '待处理'
-  return (
-    <span className={`${cls} rounded px-sm py-xs text-label-md font-medium`}>{label}</span>
-  )
+function audienceLabel(audience: PrdNode['audience']) {
+  if (audience === 'client') return '客户端'
+  if (audience === 'server') return '服务端'
+  if (audience === 'config') return '配置'
+  if (audience === 'api') return '接口'
+  if (audience === 'acceptance') return '验收'
+  if (audience === 'appendix') return '附录'
+  if (audience === 'overview') return '概览'
+  if (audience === 'mixed') return '跨职责'
+  return '文档包'
 }
 
 export function ForgeNodePanel({ node }: ForgeNodePanelProps) {
   return (
-    <aside className="w-[360px] shrink-0 h-full bg-surface-container border-r border-outline-variant flex flex-col overflow-y-auto">
-      <div className="px-lg pt-lg pb-md flex items-center gap-sm flex-wrap">
-        <span className={`${TYPE_BADGE[node.type]} rounded px-sm py-xs text-label-md font-medium`}>
-          {TYPE_LABEL[node.type]}
-        </span>
-        <span className="text-code-sm text-on-primary-container bg-primary-container rounded px-sm py-xs">
-          {node.id}
-        </span>
+    <aside className="flex h-full w-[460px] shrink-0 flex-col overflow-hidden border-r border-outline-variant bg-surface-container">
+      <div className="shrink-0 border-b border-outline-variant bg-surface px-lg py-md">
+        <div className="flex flex-wrap items-center gap-sm">
+          <span className="rounded bg-primary-container px-sm py-xs text-label-md font-medium text-on-primary-container">
+            {audienceLabel(node.audience)}
+          </span>
+          <span className="rounded bg-surface-container-high px-sm py-xs font-code-sm text-code-sm text-on-surface-variant">
+            {node.docPath ?? node.id}
+          </span>
+          <span className={[
+            'rounded px-sm py-xs text-label-md font-medium',
+            node.status === 'done'
+              ? 'bg-tertiary-container text-on-tertiary-container'
+              : node.needsPolish
+                ? 'bg-secondary-container text-on-secondary-container'
+                : 'bg-surface-variant text-on-surface-variant',
+          ].join(' ')}>
+            {statusLabel(node)}
+          </span>
+        </div>
       </div>
 
-      <h2 className="px-lg pb-md text-headline-sm text-on-surface font-semibold leading-snug">
-        {node.label}
-      </h2>
-
-      <div className="px-lg flex flex-col gap-md flex-1 pb-lg">
-        <section>
-          <p className="text-label-md text-on-surface-variant uppercase tracking-wider mb-1">摘要</p>
-          <p className="text-body-md text-on-surface leading-relaxed">{node.summary}</p>
-        </section>
-
-        {node.techNotes && (
-          <section>
-            <p className="text-label-md text-on-surface-variant uppercase tracking-wider mb-1">技术备注</p>
-            <p className="text-body-md text-on-surface-variant leading-relaxed">{node.techNotes}</p>
-          </section>
-        )}
-
-        <section className="mt-auto">
-          <p className="text-label-md text-on-surface-variant uppercase tracking-wider mb-1">状态</p>
-          <StatusBadge status={node.status} />
-        </section>
+      <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar px-lg py-md">
+        <DocumentPreview node={node} variant="full" />
       </div>
     </aside>
   )

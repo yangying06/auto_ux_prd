@@ -1,5 +1,14 @@
 // PrdNode — a single node in the decomposed PRD tree.
-// Field spec locked by D-04 (CONTEXT.md). Do not add or remove fields.
+export type PrdNodeAudience =
+  | 'overview'
+  | 'client'
+  | 'server'
+  | 'config'
+  | 'api'
+  | 'acceptance'
+  | 'appendix'
+  | 'mixed'
+
 export interface PrdNode {
   id: string                              // e.g. "CE-01". Stable unique ID.
   parentId: string | null                 // null for root-level nodes
@@ -14,6 +23,10 @@ export interface PrdNode {
   extractedFrom: string | null            // source text range (null in Phase 1, used in Phase 2+)
   techNotes: string | null               // optional implementation notes
   children: string[]                      // child node IDs (populated by normalizer, not Claude)
+  docPath?: string | null                 // export path for a Markdown document packet
+  audience?: PrdNodeAudience | null       // primary downstream consumer / responsibility axis
+  handoffGoal?: string | null             // how an AI agent should use this document
+  qualityGate?: string | null             // checks that prove the document is ready for handoff
 }
 
 // PrdTree — the flat node map stored in Zustand.

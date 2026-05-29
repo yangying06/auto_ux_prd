@@ -1,28 +1,78 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { formatPrototypeVersionTime, normalizePrototypeHtml } from '../../lib/prototypeUtils'
+import type { PrototypeVersion } from '../../store/appStore'
+
 interface PrototypeBoardProps {
   html: string | null
+  history: PrototypeVersion[]
   isLoading: boolean
+  onIterate: (instruction: string) => void
+  onRestore: (id: string) => void
 }
 
-export function PrototypeBoard({ html, isLoading }: PrototypeBoardProps) {
+export function PrototypeBoard({ html, history, isLoading, onIterate, onRestore }: PrototypeBoardProps) {
+  const [draft, setDraft] = useState('')
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+  const normalizedHtml = useMemo(() => (html ? normalizePrototypeHtml(html) : null), [html])
+
+  function hydrateSandbox() {
+    if (!normalizedHtml) return
+    iframeRef.current?.contentWindow?.postMessage({ action: 'hydrate', html: normalizedHtml }, '*')
+  }
+
+  useEffect(() => {
+    hydrateSandbox()
+  }, [normalizedHtml])
+
+  function handleIterate() {
+    const instruction = draft.trim()
+    if (!instruction || isLoading || !html) return
+    setDraft('')
+    onIterate(instruction)
+  }
+
+  function handleRestore(id: string) {
+    if (!id) return
+    onRestore(id)
+  }
+
   return (
     <section className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-outline-variant/30 bg-zinc-950 shadow-inner">
       <div className="blueprint-grid pointer-events-none absolute inset-0 opacity-40" />
       <div className="z-10 flex items-center justify-between border-b border-outline-variant/20 bg-zinc-900/80 p-sm backdrop-blur-sm">
-        <span className="font-mono text-code-sm text-on-surface-variant">手机预览 · 750 × 1624</span>
-        <span className="rounded-full bg-outline-variant/10 px-sm py-xs font-mono text-[10px] uppercase text-on-surface-variant">
-          {isLoading ? '生成中...' : html ? '原型已就绪' : '等待需求输入'}
-        </span>
+        <div className="flex min-w-0 items-center gap-sm">
+          <span className="font-mono text-code-sm text-on-surface-variant">Sandbox 预览 · 750 × 1624</span>
+          <span className="rounded-full bg-outline-variant/10 px-sm py-xs font-mono text-[10px] uppercase text-on-surface-variant">
+            {isLoading ? '生成中...' : html ? '原型已就绪' : '等待需求输入'}
+          </span>
+        </div>
+        <select
+          value=""
+          onChange={(event) => handleRestore(event.target.value)}
+          disabled={history.length === 0 || isLoading}
+          title="恢复历史版本"
+          className="h-8 max-w-[180px] rounded-md border border-outline-variant/40 bg-surface-container-high px-sm font-mono text-[11px] text-on-surface-variant outline-none disabled:opacity-40"
+        >
+          <option value="">历史版本</option>
+          {history.map((version) => (
+            <option key={version.id} value={version.id}>
+              {version.label} · {formatPrototypeVersionTime(version.createdAt)}
+            </option>
+          ))}
+        </select>
       </div>
 
       <div className="relative z-0 flex min-h-0 flex-1 items-center justify-center overflow-hidden p-md">
         <div className="flex h-full max-h-full aspect-[750/1624] flex-col overflow-hidden rounded-[2rem] border-[10px] border-zinc-800 bg-black shadow-2xl ring-1 ring-white/10">
           <div className="mx-auto mt-2 h-1.5 w-16 shrink-0 rounded-full bg-zinc-700" />
           <div className="m-2 min-h-0 flex-1 overflow-hidden rounded-[1.25rem] bg-zinc-950">
-            {html ? (
+            {normalizedHtml ? (
               <iframe
-                srcDoc={html}
+                ref={iframeRef}
+                src="/sandbox.html"
                 className="h-full w-full border-none"
-                sandbox="allow-scripts"
+                sandbox={import.meta.env.DEV ? 'allow-scripts allow-same-origin' : 'allow-scripts'}
+                onLoad={hydrateSandbox}
                 title="UX 原型预览"
               />
             ) : (
@@ -48,6 +98,45 @@ export function PrototypeBoard({ html, isLoading }: PrototypeBoardProps) {
             )}
           </div>
         </div>
+      </div>
+
+      <div className="relative z-10 border-t border-outline-variant/20 bg-zinc-900/90 p-sm">
+        <div className="flex gap-sm">
+          <textarea
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            disabled={!html || isLoading}
+            rows={2}
+            placeholder="输入原型修改说明..."
+            className="min-h-[52px] flex-1 resize-none rounded-md border border-outline-variant/30 bg-surface-container px-sm py-xs text-body-sm text-on-surface outline-none placeholder:text-on-surface-variant/60 focus:border-secondary disabled:opacity-40"
+          />
+          <button
+            onClick={handleIterate}
+            disabled={!draft.trim() || !html || isLoading}
+            title="应用原型修改"
+            className="flex w-[92px] shrink-0 items-center justify-center gap-xs rounded-md border border-secondary/30 bg-secondary/10 px-sm py-xs font-mono text-[11px] uppercase text-secondary transition-colors hover:bg-secondary/20 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>
+              edit
+            </span>
+            修改
+          </button>
+        </div>
+        {history.length > 0 ? (
+          <div className="mt-xs flex gap-xs overflow-hidden">
+            {history.slice(0, 3).map((version) => (
+              <button
+                key={version.id}
+                onClick={() => onRestore(version.id)}
+                disabled={isLoading}
+                title={version.note ?? '恢复此版本'}
+                className="min-w-0 rounded border border-outline-variant/30 bg-surface-container-high px-sm py-xs font-mono text-[10px] text-on-surface-variant transition-colors hover:text-on-surface disabled:opacity-40"
+              >
+                <span className="block truncate">{version.label} · {version.mode}</span>
+              </button>
+            ))}
+          </div>
+        ) : null}
       </div>
     </section>
   )

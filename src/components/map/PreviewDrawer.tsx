@@ -1,5 +1,6 @@
 import { useLocation } from 'wouter'
 import type { PrdNode } from '../../types/prdNode'
+import { DocumentPreview } from './DocumentPreview'
 
 interface PreviewDrawerProps {
   node: PrdNode | null
@@ -14,8 +15,8 @@ export function PreviewDrawer({ node, onClose }: PreviewDrawerProps) {
     <aside
       className="bg-surface-container border-l border-outline-variant shadow-[-8px_0_24px_rgba(0,0,0,0.5)] flex flex-col z-20 shrink-0 overflow-hidden"
       style={{
-        width: isOpen ? '30%' : '0',
-        minWidth: isOpen ? '360px' : '0',
+        width: isOpen ? '38%' : '0',
+        minWidth: isOpen ? '440px' : '0',
         transition: 'width 300ms ease, min-width 300ms ease',
       }}
     >
@@ -35,25 +36,8 @@ export function PreviewDrawer({ node, onClose }: PreviewDrawerProps) {
 
       {/* Content — only render internals when node is available to avoid layout artifacts */}
       {node && (
-        <div className="flex-1 overflow-y-auto custom-scrollbar p-lg text-on-surface-variant font-body-md space-y-md">
-          {/* ID badge — per PRVW-04 */}
-          <div className="inline-flex items-center gap-xs bg-surface-container-high border border-outline-variant rounded-full px-sm py-xs">
-            <span className="font-code-sm text-code-sm text-on-primary-container">{node.id}</span>
-          </div>
-
-          <h3 className="font-headline-sm text-headline-sm text-on-surface border-b border-outline-variant pb-xs">
-            提取上下文
-          </h3>
-          <p>{node.summary}</p>
-
-          {node.techNotes && (
-            <>
-              <h3 className="font-headline-sm text-headline-sm text-on-surface border-b border-outline-variant pb-xs mt-lg">
-                技术实现备注
-              </h3>
-              <p>{node.techNotes}</p>
-            </>
-          )}
+        <div className="flex-1 overflow-y-auto custom-scrollbar px-lg py-md">
+          <DocumentPreview node={node} />
         </div>
       )}
 
@@ -65,7 +49,7 @@ export function PreviewDrawer({ node, onClose }: PreviewDrawerProps) {
             className="w-full bg-secondary-container hover:bg-secondary-container/90 text-on-secondary-container font-headline-sm text-headline-sm py-sm px-lg rounded-lg flex items-center justify-center gap-sm transition-all shadow-lg shadow-secondary-container/20 border border-[#2b88ff]/30 cursor-pointer"
           >
             <span className="material-symbols-outlined">construction</span>
-            进入深度打磨
+            打磨文档包
           </button>
         </div>
       )}

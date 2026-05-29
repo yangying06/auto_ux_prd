@@ -1,23 +1,33 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'wouter'
 import { startDecomposition, pollDecomposition, exportSpec } from '../lib/api'
+import { openBoltWithPrompt, prdTreeToBoltPrompt } from '../lib/specPrompt'
 import { useAppStore } from '../store/appStore'
 import { UploadCard } from '../components/upload/UploadCard'
 import { DecompProgress } from '../components/upload/DecompProgress'
-import { TreeSummary } from '../components/upload/TreeSummary'
+import { DecompLiveCanvas } from '../components/upload/DecompLiveCanvas'
 import { TopAppBar } from '../components/map/TopAppBar'
 import { TreeCanvas } from '../components/map/TreeCanvas'
 import { PreviewDrawer } from '../components/map/PreviewDrawer'
 
-type Stage = 'upload' | 'decomposing' | 'done' | 'error' | 'map'
+type Stage = 'upload' | 'decomposing' | 'error' | 'map'
 
-const INITIAL_STEP = '正在识别顶层模块...'
+const INITIAL_STEP = '正在识别顶层文档包目录'
+const POLL_INTERVAL_MS = 700
 
 function findLastActiveIdx(steps: Array<{ status: string }>) {
   for (let i = steps.length - 1; i >= 0; i--) {
     if (steps[i].status === 'active') return i
   }
   return -1
+}
+
+function normalizeStepPhase(label: string) {
+  return label
+    .replace(/（已等待 \d+ 秒，AI 正在分析原文）$/, '')
+    .replace(/（\d+\/\d+）$/, '')
+    .replace(/[.。…]+$/, '')
+    .trim()
 }
 
 export function MapPage() {
@@ -31,13 +41,13 @@ export function MapPage() {
   const [exportError, setExportError] = useState<string | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const pollInFlightRef = useRef(false)
 
   const [, navigate] = useLocation()
 
   const prdTree = useAppStore((s) => s.prdTree)
   const settings = useAppStore((s) => s.settings)
   const decompositionSteps = useAppStore((s) => s.decompositionSteps)
-  const mergePartialTree = useAppStore((s) => s.mergePartialTree)
   const setDecompositionStatus = useAppStore((s) => s.setDecompositionStatus)
   const appendDecompositionStep = useAppStore((s) => s.appendDecompositionStep)
   const updateDecompositionStep = useAppStore((s) => s.updateDecompositionStep)
@@ -51,30 +61,44 @@ export function MapPage() {
       clearInterval(pollIntervalRef.current)
       pollIntervalRef.current = null
     }
+    pollInFlightRef.current = false
   }
 
   const startPolling = (sessionId: string) => {
+    clearPolling()
     // Initialize to the label we pre-added so first poll doesn't duplicate it
     let lastStep = INITIAL_STEP
 
     pollIntervalRef.current = setInterval(async () => {
+      if (pollInFlightRef.current || sessionIdRef.current !== sessionId) return
+      pollInFlightRef.current = true
       try {
         const data = await pollDecomposition(settings.proxyBaseUrl, sessionId)
+        if (sessionIdRef.current !== sessionId) return
 
         setNodeCount(data.nodeCount)
 
         if (data.nodes.length > 0) {
           const nodeMap = Object.fromEntries(data.nodes.map((n) => [n.id, n]))
-          mergePartialTree(nodeMap)
+          setPrdTree(nodeMap)
         }
 
         // Advance step display when server moves to a new step
         if (data.currentStep !== lastStep) {
           const currentSteps = useAppStore.getState().decompositionSteps
           const activeIdx = findLastActiveIdx(currentSteps)
-          if (activeIdx >= 0) updateDecompositionStep(activeIdx, { status: 'complete' })
+          const activeStep = activeIdx >= 0 ? currentSteps[activeIdx] : null
+          const samePhase = activeStep
+            ? normalizeStepPhase(activeStep.label) === normalizeStepPhase(data.currentStep)
+            : false
 
-          if (data.status === 'running') {
+          if (data.status === 'running' && samePhase && activeIdx >= 0) {
+            updateDecompositionStep(activeIdx, { label: data.currentStep, status: 'active' })
+          } else {
+            if (activeIdx >= 0) updateDecompositionStep(activeIdx, { status: data.status === 'error' ? 'error' : 'complete' })
+          }
+
+          if (data.status === 'running' && !samePhase) {
             appendDecompositionStep({ label: data.currentStep, status: 'active' })
           }
           lastStep = data.currentStep
@@ -87,13 +111,18 @@ export function MapPage() {
           if (activeIdx >= 0) updateDecompositionStep(activeIdx, { status: 'complete' })
           appendDecompositionStep({ label: '分析完成', status: 'complete' })
 
-          if (data.nodes.length > 0) {
-            const finalTree = Object.fromEntries(data.nodes.map((n) => [n.id, n]))
-            setPrdTree(finalTree)
+          if (data.nodes.length === 0) {
+            setDecompError('分析完成但没有生成任何文档包节点，请检查 PRD 是否包含可读取文本。')
+            setDecompositionStatus('error')
+            setStage('error')
+            return
           }
 
+          const finalTree = Object.fromEntries(data.nodes.map((n) => [n.id, n]))
+          setPrdTree(finalTree)
           setDecompositionStatus('done')
-          setStage('done')
+          setSelectedNodeId(null)
+          setStage('map')
         }
 
         if (data.status === 'error') {
@@ -107,15 +136,20 @@ export function MapPage() {
           setStage('error')
         }
       } catch (err) {
+        if (sessionIdRef.current !== sessionId) return
         clearPolling()
         setDecompError(err instanceof Error ? err.message : '轮询失败')
         setDecompositionStatus('error')
         setStage('error')
+      } finally {
+        if (sessionIdRef.current === sessionId) pollInFlightRef.current = false
       }
-    }, 1500)
+    }, POLL_INTERVAL_MS)
   }
 
   const handleFileRead = async (mdText: string) => {
+    clearPolling()
+    sessionIdRef.current = null
     resetDecomposition()
     setUploadError(null)
     setDecompError(null)
@@ -136,16 +170,13 @@ export function MapPage() {
   }
 
   const handleReset = () => {
+    clearPolling()
+    sessionIdRef.current = null
     resetDecomposition()
     setStage('upload')
     setDecompError(null)
     setNodeCount(0)
     setSelectedNodeId(null)
-  }
-
-  const handleViewMap = () => {
-    setSelectedNodeId(null)
-    setStage('map')
   }
 
   useEffect(() => {
@@ -158,7 +189,7 @@ export function MapPage() {
     const canExport = Object.values(prdTree).length > 0
       && Object.values(prdTree)
           .filter(n => n.children.length === 0)
-          .every(n => n.status === 'done')
+          .every(n => n.status === 'done' || !n.needsPolish)
 
     const handleExport = async () => {
       setIsExporting(true)
@@ -168,7 +199,7 @@ export function MapPage() {
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
-        a.download = '交互规格导出.zip'
+        a.download = 'AI接力文档包.zip'
         a.click()
         URL.revokeObjectURL(url)
       } catch (err) {
@@ -176,6 +207,10 @@ export function MapPage() {
       } finally {
         setIsExporting(false)
       }
+    }
+
+    const handleValidatePrototype = () => {
+      openBoltWithPrompt(prdTreeToBoltPrompt(prdTree))
     }
 
     return (
@@ -190,6 +225,8 @@ export function MapPage() {
           canExport={canExport}
           onExport={handleExport}
           isExporting={isExporting}
+          onValidatePrototype={handleValidatePrototype}
+          canValidatePrototype={Object.values(prdTree).length > 0}
         />
         {exportError && (
           <div className="bg-error/10 border-b border-error/30 px-lg py-sm text-error font-label-md text-label-md flex items-center gap-sm">
@@ -223,16 +260,34 @@ export function MapPage() {
     )
   }
 
+  if (stage === 'decomposing') {
+    return (
+      <div className="w-full h-screen flex bg-background animate-fade-in overflow-hidden">
+        <aside className="w-[360px] shrink-0 border-r border-outline-variant bg-surface-container-low p-lg overflow-y-auto">
+          <DecompProgress steps={decompositionSteps} nodeCount={nodeCount} />
+        </aside>
+        <main className="flex-1 overflow-hidden">
+          {prdTree ? (
+            <TreeCanvas
+              tree={prdTree}
+              selectedNodeId={selectedNodeId}
+              onNodeClick={(id) => setSelectedNodeId(id)}
+              onNodeDoubleClick={() => undefined}
+            />
+          ) : (
+            <DecompLiveCanvas steps={decompositionSteps} nodeCount={nodeCount} />
+          )}
+        </main>
+      </div>
+    )
+  }
+
   return (
     <div className="w-full h-screen flex items-center justify-center bg-background blueprint-grid overflow-hidden">
       <div className="max-w-[480px] w-full mx-auto bg-surface-container-low border border-outline-variant rounded-xl p-12 shadow-2xl flex flex-col items-center gap-6">
         <div className="w-full transition-opacity duration-300">
           {stage === 'upload' ? (
             <UploadCard onFileRead={handleFileRead} error={uploadError} />
-          ) : stage === 'decomposing' ? (
-            <DecompProgress steps={decompositionSteps} nodeCount={nodeCount} />
-          ) : stage === 'done' && prdTree ? (
-            <TreeSummary tree={prdTree} nodeCount={nodeCount} onReset={handleReset} onViewMap={handleViewMap} />
           ) : (
             <DecompProgress steps={decompositionSteps} nodeCount={nodeCount} error={decompError} />
           )}

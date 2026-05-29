@@ -1,5 +1,6 @@
 import { PrototypeBoard } from './PrototypeBoard'
 import { StateCard } from './StateCard'
+import type { PrototypeVersion } from '../../store/appStore'
 import type { RagSearchResult } from '../../types/chat'
 import type { AssetDependency, UXRequirementState } from '../../types/uxRequirement'
 
@@ -8,10 +9,13 @@ interface StateCanvasProps {
   latestRag: RagSearchResult | null
   projectName: string
   prototypeHtml: string | null
+  prototypeHistory: PrototypeVersion[]
   isGeneratingPrototype: boolean
   isExportingPrompt: boolean
-  onGeneratePrototype: () => void
+  onGeneratePrototype: (instruction?: string) => void
+  onRestorePrototype: (id: string) => void
   onExportPrompt: () => void
+  onOpenBolt: () => void
 }
 
 function hasMissingAsset(assets: AssetDependency[]) {
@@ -92,7 +96,19 @@ function RequirementTree({ requirement, missingAsset }: { requirement: UXRequire
   )
 }
 
-export function StateCanvas({ requirement, latestRag, projectName, prototypeHtml, isGeneratingPrototype, isExportingPrompt, onGeneratePrototype, onExportPrompt }: StateCanvasProps) {
+export function StateCanvas({
+  requirement,
+  latestRag,
+  projectName,
+  prototypeHtml,
+  prototypeHistory,
+  isGeneratingPrototype,
+  isExportingPrompt,
+  onGeneratePrototype,
+  onRestorePrototype,
+  onExportPrompt,
+  onOpenBolt,
+}: StateCanvasProps) {
   const missingAsset = hasMissingAsset(requirement.asset_dependencies)
   const progressWidth = `${requirement.completion_rate}%`
   const canGeneratePrototype = requirement.completion_rate >= 60
@@ -130,7 +146,7 @@ export function StateCanvas({ requirement, latestRag, projectName, prototypeHtml
         <div className="flex items-center gap-sm">
           {canGeneratePrototype ? (
             <button
-              onClick={onGeneratePrototype}
+              onClick={() => onGeneratePrototype()}
               disabled={isGeneratingPrototype}
               className="rounded-lg border border-secondary/30 bg-secondary/10 px-lg py-sm font-mono text-label-md uppercase text-secondary transition-colors hover:bg-secondary/20 disabled:cursor-not-allowed disabled:opacity-50"
             >
@@ -150,6 +166,14 @@ export function StateCanvas({ requirement, latestRag, projectName, prototypeHtml
               导出最终规格
             </button>
           )}
+          <button
+            onClick={onOpenBolt}
+            disabled={!prototypeHtml && requirement.completion_rate < 60}
+            title={!prototypeHtml && requirement.completion_rate < 60 ? '需求完成度达到 60% 后可验证' : '在 bolt.new 中验证原型'}
+            className="rounded-lg border border-tertiary/30 bg-tertiary/10 px-lg py-sm font-mono text-label-md uppercase text-tertiary transition-colors hover:bg-tertiary/20 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Bolt 验证
+          </button>
         </div>
       </header>
 
@@ -229,7 +253,13 @@ export function StateCanvas({ requirement, latestRag, projectName, prototypeHtml
         </section>
         </div>
 
-        <PrototypeBoard html={prototypeHtml} isLoading={isGeneratingPrototype} />
+        <PrototypeBoard
+          html={prototypeHtml}
+          history={prototypeHistory}
+          isLoading={isGeneratingPrototype}
+          onIterate={onGeneratePrototype}
+          onRestore={onRestorePrototype}
+        />
       </div>
     </main>
   )
