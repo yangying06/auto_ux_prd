@@ -5,7 +5,7 @@ milestone_name: milestone
 status: Milestone complete
 stopped_at: Completed 04-02-PLAN.md
 last_updated: "2026-05-29T03:33:46.731Z"
-last_activity: 2026-05-29
+last_activity: 2026-06-01 - Completed quick task 260601-ofu: Ralph 新需求更新 prd.json
 progress:
   total_phases: 4
   completed_phases: 4
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-05-26)
 Phase: 04
 Plan: Not started
 Phase: 04 (export) — NEXT
-Last activity: 2026-05-29 - Completed quick task 260529-fty: 导图流程迭代
+Last activity: 2026-06-01 - Completed quick task 260601-mf8: 打磨界面改进
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -111,6 +111,7 @@ Recent decisions affecting current work:
 - [Quick 260528-l8p]: 不得按 `OUTLINE-*` ID 前缀误删 AI 结果；顶层节点带 `docPath` 时视为独立文档包，不再二次展开
 - [Quick 260528-k8w]: 顶层拆分只做轻量目录规划，分支拆分按 `extractedFrom` 截取相关章节；AI 空结果先重试，分支进度聚合展示，避免重复步骤和整单失败
 - [Quick 260529-fty]: PRD 拆分流程进入 decomposing 后直接展示动态解析画布；轮询返回的完整节点集直接刷新导图；完成后跳转 map 而不再经过 TreeSummary 确认页；节点卡片使用内嵌 Markdown 预览。
+- [Quick 260529-o5r]: Tauri 启动窗口最大化；Deep Forge 打磨界面保持左侧上下文/中间对话/右侧视觉舱结构，但右侧默认进入原型预览并扩大为主工作区，更接近 abi-screenshot-to-code 的 preview-first 编辑布局。
 
 ### Pending Todos
 
@@ -139,6 +140,12 @@ None yet.
 | 260528-l8p | 修复 AI 顶层拆分返回空导致 PRD 分析失败 | 2026-05-28 | 未提交（由 Codex 工作区交付） | [260528-l8p-empty-l1-diagnosis](./quick/260528-l8p-empty-l1-diagnosis/) |
 | 260528-k8w | 修复导入后 PRD 分析进度重复且最终失败 | 2026-05-28 | 未提交（由 Codex 工作区交付） | [260528-k8w-prd](./quick/260528-k8w-prd/) |
 | 260529-fty | 导图流程迭代：动态解析、连线动画、Markdown 卡片预览、完成后直达导图 | 2026-05-29 | 未提交（由 Codex 工作区交付） | [260529-fty-markdown](./quick/260529-fty-markdown/) |
+| 260529-o5r | 启动最大化并对齐打磨界面 | 2026-05-29 | 未提交（主会话交付） | [260529-o5r-d-learn-abi-screenshot-to-code](./quick/260529-o5r-d-learn-abi-screenshot-to-code/) |
+| 260529-vkj | Ralph US-006 到 US-011 多变体迭代与流式渲染 | 2026-05-29 | 未提交（主会话交付） | [260529-vkj-ralph-prd-json-us-006-us-011-docs-screen](./quick/260529-vkj-ralph-prd-json-us-006-us-011-docs-screen/) |
+| 260601-gmt | 查看 Claude Code 聊天记录并生成 5.25 到 6.1 工作归类耗时表 | 2026-06-01 | 未提交（主会话交付） | [260601-gmt-claude-code-5-25-6-1](./quick/260601-gmt-claude-code-5-25-6-1/) |
+| 260601-lld | 修复原型预览 750×1624 沙盒缩放适配 | 2026-06-01 | 未提交（主会话交付） | [260601-lld-750-1624-sandbox-iframe-prompt-npm-run-t](./quick/260601-lld-750-1624-sandbox-iframe-prompt-npm-run-t/) |
+| 260601-mf8 | 打磨界面改进：清空聊天、Markdown 回复、迭代入文档、参考图持久化 | 2026-06-01 | worktree-agent-a4785e34e58e8e992 | [260601-mf8-1-2-md-3-4](./quick/260601-mf8-1-2-md-3-4/) |
+| 260601-ofu | Ralph 新需求更新 prd.json：页面级思维导图拆分与打磨 | 2026-06-01 | 未提交（主会话交付） | [260601-ofu-ralph-prd-json-branchname-prd-json-progr](./quick/260601-ofu-ralph-prd-json-branchname-prd-json-progr/) |
 
 ## Session Continuity
 

@@ -1,20 +1,20 @@
 {
-  "project": "Auto UX PRD",
-  "branchName": "ralph/game-ui-image-attachments-mobile-preview",
-  "description": "Add image-aware AI analysis, multi-image attachments, mobile-resolution preview, and requirement tree preview for game UI PRD generation.",
+  "project": "GameUX PromptForge",
+  "branchName": "ralph/page-level-mindmap-refinement",
+  "description": "Add page-level mind map node management and AI-assisted restructuring/refinement so PRDs are split by screen/page, each page starts as pending refinement, can be edited as a node, opened as a generated local document, adjusted through a left-side AI chat, refined one page at a time, and exported as page-level spec files.",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Support multiple image attachments in the input flow",
-      "description": "As a user, I want to attach one or more images so that I can provide game UI screenshots, reference images, or assets for the generated interface.",
+      "title": "Extend mind map nodes for page-level documents and refinement status",
+      "description": "As a developer, I need the PRD node model to represent page/screen nodes, pending refinement status, document paths, and cross-page references so that the map can manage page-level specs without duplicating content.",
       "acceptanceCriteria": [
-        "The attachment control accepts image files",
-        "The attachment control supports selecting multiple files in one action",
-        "Users can add more than one attachment before generating or previewing output",
-        "Each selected attachment is displayed in the input area with its filename or thumbnail",
-        "Users can remove an individual attachment without clearing the others",
-        "Typecheck passes",
-        "Verify in browser using dev-browser skill"
+        "The node data model supports page-level nodes for screens such as 主界面, 规则页, 帮助页, and 排行榜",
+        "Each initial page node can store status pending_refine with display text 待打磨",
+        "Each page node can store a generated local document path or identifier for opening its corresponding spec document",
+        "Cross-page content is represented as references between page nodes instead of duplicated content",
+        "Page internals are stored for the right-side detail/document view and are not expanded as excessive child nodes on the mind map",
+        "Existing mind map data can still load without crashing after the model extension",
+        "Typecheck passes"
       ],
       "priority": 1,
       "passes": false,
@@ -22,15 +22,17 @@
     },
     {
       "id": "US-002",
-      "title": "Replace the attachment label with a paperclip icon",
-      "description": "As a user, I want the attachment action to use a paperclip icon so that the UI looks polished and does not show the raw word attach.",
+      "title": "Add node create/delete/edit/open operations in the mind map UI",
+      "description": "As a user, I want to create, delete, edit, and open page nodes from the mind map so that I can correct the page structure and jump to the generated local document for each page.",
       "acceptanceCriteria": [
-        "The attachment trigger shows a paperclip icon",
-        "The visible attachment trigger does not display the text 'attach'",
-        "The attachment trigger remains accessible via an aria-label or equivalent accessible name",
-        "Clicking the paperclip icon opens the image file picker",
+        "The mind map UI provides affordances to create a new page node with a title and pending_refine status",
+        "The mind map UI allows deleting a page node with an explicit confirmation or safe guard against accidental removal",
+        "The mind map UI allows editing a page node title and core metadata without leaving the map context",
+        "The mind map UI allows opening the corresponding generated local document for a page node",
+        "Open-document behavior first routes through the local Express proxy rather than direct unrestricted filesystem access",
+        "Document open paths are restricted to the generated export/spec directory and reject traversal or arbitrary local paths",
         "Typecheck passes",
-        "Verify in browser using dev-browser skill"
+        "Verify create, edit, delete, and open-document flows in the browser"
       ],
       "priority": 2,
       "passes": false,
@@ -38,15 +40,18 @@
     },
     {
       "id": "US-003",
-      "title": "Send attached images to AI analysis",
-      "description": "As a user, I want attached game UI screenshots to be included in the AI request so that the AI can analyze the UI design, layout, and image content.",
+      "title": "Add left-side AI adjustment chat with confirm-before-apply operations",
+      "description": "As a user, I want a left-side AI chat on the mind map so that I can ask AI to fix unreasonable splits and review structured operation suggestions before they change the map.",
       "acceptanceCriteria": [
-        "Image attachments are preserved in the request payload sent to the AI analysis path",
-        "The AI prompt or request explicitly asks for game UI design analysis, layout analysis, and image-function analysis",
-        "Multiple attached images are included in a single analysis request",
-        "Reference images and images intended for inclusion can both be represented in the request payload",
+        "The mind map screen includes a left-side AI chat box for page split adjustment requests",
+        "User messages can describe why the current page split is unreasonable and what should change",
+        "The AI response returns structured operation suggestions such as create_node, delete_node, update_node, move_content, and add_reference",
+        "Suggested operations are shown to the user for review before they are applied",
+        "No AI-suggested operation mutates the mind map until the user explicitly confirms",
+        "Confirmed operations update the page-level node data and preserve pending_refine status where appropriate",
+        "Rejected or cancelled suggestions leave the existing map unchanged",
         "Typecheck passes",
-        "Tests pass"
+        "Verify the suggestion review and confirm/cancel behavior in the browser"
       ],
       "priority": 3,
       "passes": false,
@@ -54,15 +59,17 @@
     },
     {
       "id": "US-004",
-      "title": "Render preview in locked mobile phone ratio",
-      "description": "As a user, I want the generated UI preview to appear inside a phone-shaped frame using the real 750 by 1624 design resolution so that the preview matches the target mobile layout.",
+      "title": "Change PRD split prompt to produce page-level mind map nodes",
+      "description": "As a user, I want imported PRDs to be split by screen/page rather than over-expanded internal details so that the mind map reflects navigable product pages.",
       "acceptanceCriteria": [
-        "The preview area renders inside a phone-style frame",
-        "The preview content uses a locked 750:1624 aspect ratio",
-        "The preview scales to fit the available screen without changing the underlying aspect ratio",
-        "The preview clearly communicates the target resolution as 750 × 1624 or equivalent",
+        "The AI split prompt instructs the model to identify page/screen nodes such as 主界面, 规则页, 帮助页, and 排行榜",
+        "Content belonging to a page is attached to that page node instead of duplicated under multiple nodes",
+        "Cross-page content is emitted as references between page nodes rather than copied into each node",
+        "Every initial page node returned by AI has status pending_refine and display text 待打磨",
+        "The prompt explicitly says page internals belong in the right-side details/document content, not as over-expanded mind map children",
+        "The split parser validates the page-level structure and rejects malformed operation/content shapes with a clear error",
         "Typecheck passes",
-        "Verify in browser using dev-browser skill"
+        "Existing decomposition flow still reaches the map view with page-level nodes"
       ],
       "priority": 4,
       "passes": false,
@@ -70,16 +77,17 @@
     },
     {
       "id": "US-005",
-      "title": "Replace UI node preview with requirement breakdown tree",
-      "description": "As a user, I want to preview the requirement breakdown as a tree so that I can understand the generated structure without seeing the old UI node preview.",
+      "title": "Refine one page at a time from pending to completed spec",
+      "description": "As a user, I want to open a page node and refine that page through the detail/chat workflow so that each page becomes a confirmed interaction spec independently.",
       "acceptanceCriteria": [
-        "The old UI node preview is removed from the preview interface",
-        "A requirement breakdown tree is shown in the preview interface",
-        "The tree supports parent and child requirement levels",
-        "Each tree item displays a concise requirement title or label",
-        "The tree has a deterministic empty state when no requirements are available",
+        "Selecting a page node opens its right-side detail/document content for that page",
+        "The page refinement flow works one page at a time and does not require refining every page in a single AI call",
+        "A pending_refine page can be refined through AI-assisted questions or edits into a completed/confirmed spec state",
+        "The UI clearly distinguishes 待打磨 pages from refined/completed pages",
+        "Refining one page updates only that page's document/details and necessary references, not unrelated page specs",
+        "The page detail/document remains the source of internal page requirements while the mind map stays page-level",
         "Typecheck passes",
-        "Verify in browser using dev-browser skill"
+        "Verify in the browser that one page can be refined while other pages remain 待打磨"
       ],
       "priority": 5,
       "passes": false,
@@ -87,15 +95,17 @@
     },
     {
       "id": "US-006",
-      "title": "Redesign the overall layout for attachments, phone preview, and requirement tree",
-      "description": "As a user, I want the page layout adjusted around multi-image attachments, the phone preview, and the requirement tree so that the workflow remains clear and usable.",
+      "title": "Export page-level spec folder with safe local document access",
+      "description": "As a user, I want to export the refined page documents as a page-level spec folder so that each screen/page has its own deliverable spec file.",
       "acceptanceCriteria": [
-        "The page layout visibly separates input, attachments, phone preview, and requirement tree areas",
-        "The phone preview and requirement tree can be viewed at the same time on desktop-sized windows",
-        "The layout remains usable at narrower widths without horizontal page overflow",
-        "Attachment thumbnails or filenames do not overlap the prompt input, preview, or tree areas",
+        "Export creates a generated spec/export directory containing one spec document per page node",
+        "Exported filenames or paths are derived safely from page node titles and avoid path traversal or invalid filesystem characters",
+        "Each exported page spec includes the page's refined detail/document content and cross-page references",
+        "The export output preserves page-level separation rather than combining all pages into one monolithic file",
+        "Mind map open-document actions can open these generated page spec files through the local Express proxy",
+        "The local Express proxy restricts open/read access to the generated export/spec directory only",
         "Typecheck passes",
-        "Verify in browser using dev-browser skill"
+        "Verify exported files exist and can be opened from their corresponding page nodes"
       ],
       "priority": 6,
       "passes": false,

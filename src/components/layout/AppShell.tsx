@@ -48,10 +48,13 @@ export function AppShell({ onBack, onConfirm }: { onBack?: () => void; onConfirm
         currentHtml: trimmedInstruction ? prototypeHtml : null,
         instruction: trimmedInstruction,
       })
-      setPrototypeHtml(result.html, {
-        mode: result.mode === 'create' ? 'create' : 'update',
-        note: trimmedInstruction || null,
-      })
+      const chosen = result.variants.find((variant) => variant.status === 'complete' && variant.html)
+      if (chosen?.html) {
+        setPrototypeHtml(chosen.html, {
+          mode: chosen.mode === 'create' ? 'create' : 'update',
+          note: trimmedInstruction || null,
+        })
+      }
     } finally {
       setIsGeneratingPrototype(false)
     }

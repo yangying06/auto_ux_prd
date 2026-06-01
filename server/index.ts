@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process'
 import { applyPrototypeEdit, normalizePrototypeHtml } from '../src/lib/prototypeUtils'
 import type { UXRequirementState } from '../src/types/uxRequirement'
 import type { PrdNode } from '../src/types/prdNode'
+import { buildVariantConfigs, clampVariantCount, DEFAULT_CREATE_VARIANTS, DEFAULT_UPDATE_VARIANTS } from './prototypePrompts'
 
 dotenv.config()
 dotenv.config({ path: 'server/.env' })
@@ -104,6 +105,23 @@ interface PrototypeRequest {
   requirementState: UXRequirementState
   currentHtml?: string | null
   instruction?: string | null
+  images?: ContentBlock[] | null
+  numVariants?: number | null
+  variantIndex?: number | null
+  history?: string[] | null
+  stream?: boolean | null
+}
+
+type PrototypeVariantMode = 'create' | 'update' | 'rewrite'
+
+interface PrototypeVariantPayload {
+  index: number
+  html: string | null
+  mode: PrototypeVariantMode
+  status: 'complete' | 'error'
+  focus?: string
+  appliedEdits: number
+  history?: string[]
 }
 
 interface NodeChatRequest {
@@ -1501,16 +1519,16 @@ ${nodeContext}
 
 规则：
 - 用中文回复；所有展示给用户或写入导出文档的生成内容都必须是中文
-- 每次最多回复8行
+- 回复正文只写给用户看的简短 Markdown 总结，不要输出整篇重写文档；可用标题、列表、加粗或行内代码，最多8行
 - 如果文档还不完整，只问一个最关键的问题
 - 优先补齐：原文位置、职责边界、核心规则、依赖字段/配置、跨文档关系、边界条件、需澄清点、可测试验收标准、AI 接力说明
 - 当用户上传参考图或界面截图时，仅对 client/UI 类文档像 screenshot-to-code 一样提取布局层级、控件分组、间距、对齐、视觉权重、可交互元素、状态反馈和素材/参考图边界，并转化为文档内容
 - 本轮是否包含图片参考：${hasReferenceImages ? '是' : '否'}
-- 当你判断该文档已经足够交给后续 AI 执行时，在回复末尾附加 JSON：{"nodeComplete": true, "nodePatch": {"summary": "中文一句话总结最终文档用途", "content": "中文可导出的完整 Markdown 文档正文", "techNotes": "中文实现/接力注意事项或 null"}}
-- nodePatch.content 必须整合当前节点原始内容、用户补充和图片观察结论，写成最终文档正文，不要只写本轮摘要
+- 当用户补充或确认的内容应合并进当前文档时，即使文档尚未完成，也要在回复末尾附加 JSON：{"nodeComplete": false, "nodePatch": {"summary": "中文一句话总结当前文档用途或 null", "content": "中文 Markdown 文档正文或本轮已采纳后的当前文档段落", "techNotes": "中文实现/接力注意事项或 null"}}
+- 当你判断该文档已经足够交给后续 AI 执行时，把同一个 JSON 的 nodeComplete 设为 true，并让 nodePatch 包含最终文档内容
+- JSON 只能放在回复末尾；回复正文不能包含 JSON、大括号、schema 说明或原始回包
+- nodePatch.content 必须整合当前节点原始内容、用户补充和图片观察结论，写成可导出的当前文档正文；不要只写本轮摘要，也不要重复堆叠旧的 Deep Forge 段落
 - nodePatch.summary、nodePatch.content、nodePatch.techNotes 以及 content 内部 Markdown 标题必须使用中文；只有代码标识、文件路径、接口字段名、库/API 名称、枚举值和专有产品名可以保留英文
-- 需求未完成时不要附加 JSON
-- 不要在回复正文中暴露JSON或大括号
 - 保持专业、简洁、直接的语气`
 
   const response = await anthropic.messages.create({
@@ -1569,26 +1587,47 @@ function buildPrototypeSpec(requirementState: UXRequirementState) {
 ${componentTree}`
 }
 
-function buildCreatePrototypePrompt(requirementState: UXRequirementState) {
-  return `你是 GameUX PromptForge 的游戏 UX 原型生成专家。根据以下 UX 需求状态，生成一个可直接预览的自包含 HTML 原型。
+function buildScreenshotFidelitySection() {
+  return `## 参考图还原纪律
+1. 本次附带了参考图。请严格按照参考图还原界面：布局结构、视觉层级、配色、文案文字、控件位置与间距都要尽量贴合。
+2. 文案以参考图中的真实文字为准；参考图中能看清的文字优先照抄，不要凭空臆造或改写。
+3. 当参考图与下方需求状态文字描述冲突时，以参考图的视觉呈现为准；需求状态 JSON 仅用于补充交互逻辑、状态流转与引擎约束等图上看不到的信息。
+4. 忽略参考图中的采集/评审伪影：例如对比外壳、手机边框/刘海、浏览器窗口、标尺、批注箭头、红框、水印等，这些不属于要还原的界面本身。
+`
+}
+
+function buildCreatePrototypePrompt(requirementState: UXRequirementState, hasImages = false, focus?: string) {
+  const focusSection = focus
+    ? `\n## 本变体设计侧重\n${focus}\n（这是同一需求的多个备选方案之一，请在满足上述需求与约束的前提下，按本侧重做出有辨识度的设计。）\n`
+    : ''
+  return `你是 GameUX PromptForge 的游戏 UX 原型生成专家。根据以下 UX 需求状态${hasImages ? '和参考图' : ''}，生成一个可直接预览的自包含 HTML 原型。
 
 ${buildPrototypeSpec(requirementState)}
+${hasImages ? `\n${buildScreenshotFidelitySection()}` : ''}${focusSection}
+## 尺寸契约
+- 预览沙盒提供的设计画布固定为 750×1624 CSS px。
+- 原型根节点应适配 100vw × 100vh，不需要页面级纵向或横向滚动。
+- 不要额外绘制手机壳、浏览器壳或外层设备框，应用预览已提供外框。
 
 ## 输出约束
 1. 只输出单个完整 HTML 文件；可以用 \`\`\`html 包裹，但不要解释。
 2. 必须是静态单文件可运行：不需要 npm、构建步骤、本地资源或后端服务。
 3. 可使用 Tailwind CDN（https://cdn.tailwindcss.com）和少量内联 CSS/JS；不要引用不可访问的本地路径。
-4. 画面要像游戏交互原型，不要做营销页：包含设备画面、状态切换、关键按钮反馈、禁用/加载/错误态。
+4. 画面要像游戏交互原型，不要做营销页：包含设备内界面、状态切换、关键按钮反馈、禁用/加载/错误态。
 5. 组件标注要清楚：用小标签标出组件名称、类型、状态或动画参数。
 6. 未确认资源用占位块，不要伪造真实素材路径。
 7. 脚本必须安全自包含，不要访问父窗口、cookie、localStorage 或外部 API。
 8. 所有用户可见界面文字、按钮文案、状态提示、组件标注、注释说明必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。`
 }
 
-function buildUpdatePrototypePrompt(requirementState: UXRequirementState, currentHtml: string, instruction: string) {
+function buildUpdatePrototypePrompt(requirementState: UXRequirementState, currentHtml: string, instruction: string, history: string[] = [], focus?: string) {
+  const historySection = history.length > 0
+    ? `\n## 当前变体历史修改指令\n${history.map((item, index) => `${index + 1}. ${item}`).join('\n')}\n`
+    : ''
+  const focusSection = focus ? `\n## 本次更新侧重\n${focus}\n` : ''
   return `你是 GameUX PromptForge 的原型迭代代理。请根据用户的修改说明，对当前 HTML 原型做最小必要修改。
 
-${buildPrototypeSpec(requirementState)}
+${buildPrototypeSpec(requirementState)}${historySection}${focusSection}
 
 ## 用户修改说明
 ${instruction}
@@ -1602,7 +1641,8 @@ ${currentHtml}
 3. 如果需要多处修改，可以调用多次 edit_prototype。
 4. 如果无法安全定位精确片段，直接输出修改后的完整 HTML 文件。
 5. 保持单文件可运行、Tailwind CDN 可用、无构建步骤、无本地资源依赖。
-6. 所有用户可见界面文字、按钮文案、状态提示、组件标注、注释说明必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。`
+6. 保持 750×1624 CSS px 尺寸契约：根节点适配 100vw × 100vh，不引入 body/page 滚动，也不新增手机壳、浏览器壳或外层设备框。
+7. 所有用户可见界面文字、按钮文案、状态提示、组件标注、注释说明必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。`
 }
 
 function applyPrototypeToolUses(currentHtml: string, content: Anthropic.Messages.ContentBlock[]) {
@@ -1622,8 +1662,101 @@ function applyPrototypeToolUses(currentHtml: string, content: Anthropic.Messages
   return { html, appliedEdits }
 }
 
-app.post('/api/prototype', async (req, res) => {
-  const { requirementState, currentHtml, instruction } = req.body as PrototypeRequest
+function parsePrototypeRequest(req: express.Request): PrototypeRequest {
+  const body = req.body as PrototypeRequest
+  if (body && Object.keys(body).length > 0) return body
+  const payload = typeof req.query.payload === 'string' ? req.query.payload : ''
+  if (!payload) return body
+  try {
+    return JSON.parse(payload) as PrototypeRequest
+  } catch {
+    return body
+  }
+}
+
+function buildImageBlocks(images: ContentBlock[] | null | undefined): Anthropic.ImageBlockParam[] {
+  return Array.isArray(images)
+    ? images
+        .filter((b): b is ContentBlock & { type: 'image' } => b?.type === 'image' && !!b.source)
+        .map((b) => ({ type: 'image', source: b.source as Anthropic.Base64ImageSource }))
+    : []
+}
+
+function buildContentWithImages(prompt: string, imageBlocks: Anthropic.ImageBlockParam[]): Anthropic.ContentBlockParam[] | string {
+  return imageBlocks.length > 0 ? [...imageBlocks, { type: 'text', text: prompt }] : prompt
+}
+
+async function generateUpdateVariant(
+  requirementState: UXRequirementState,
+  currentHtml: string,
+  instruction: string,
+  imageBlocks: Anthropic.ImageBlockParam[],
+  cfg: { index: number; focus: string; temperature: number },
+  history: string[],
+): Promise<PrototypeVariantPayload> {
+  const prompt = buildUpdatePrototypePrompt(requirementState, currentHtml, instruction, history, cfg.focus)
+  const response = await anthropic!.messages.create({
+    model,
+    max_tokens: 8192,
+    tools: [editPrototypeTool],
+    messages: [{ role: 'user', content: buildContentWithImages(prompt, imageBlocks) }],
+  })
+
+  const toolResult = applyPrototypeToolUses(currentHtml, response.content)
+  const nextHistory = [...history, instruction]
+  if (toolResult.appliedEdits > 0) {
+    return {
+      index: cfg.index,
+      html: normalizePrototypeHtml(toolResult.html),
+      mode: 'update',
+      status: 'complete',
+      focus: cfg.focus,
+      appliedEdits: toolResult.appliedEdits,
+      history: nextHistory,
+    }
+  }
+
+  const raw = textFromClaudeContent(response.content)
+  return {
+    index: cfg.index,
+    html: raw.trim() ? normalizePrototypeHtml(raw) : currentHtml,
+    mode: raw.trim() ? 'rewrite' : 'update',
+    status: 'complete',
+    focus: cfg.focus,
+    appliedEdits: 0,
+    history: nextHistory,
+  }
+}
+
+async function generateCreateVariant(
+  requirementState: UXRequirementState,
+  imageBlocks: Anthropic.ImageBlockParam[],
+  cfg: { index: number; focus: string; temperature: number },
+): Promise<PrototypeVariantPayload> {
+  const prompt = buildCreatePrototypePrompt(requirementState, imageBlocks.length > 0, cfg.focus)
+  const response = await anthropic!.messages.create({
+    model,
+    max_tokens: 8192,
+    temperature: cfg.temperature === 1 ? undefined : cfg.temperature,
+    messages: [{ role: 'user', content: buildContentWithImages(prompt, imageBlocks) }],
+  })
+  return {
+    index: cfg.index,
+    html: normalizePrototypeHtml(textFromClaudeContent(response.content)),
+    mode: 'create',
+    status: 'complete',
+    focus: cfg.focus,
+    appliedEdits: 0,
+    history: [],
+  }
+}
+
+function writePrototypeEvent(res: express.Response, event: unknown) {
+  res.write(`data: ${JSON.stringify(event)}\n\n`)
+}
+
+async function streamPrototype(req: express.Request, res: express.Response) {
+  const { requirementState, currentHtml, instruction, images, numVariants, variantIndex, history } = parsePrototypeRequest(req)
 
   if (!anthropic) {
     res.status(400).json({ error: '未配置 ANTHROPIC_API_KEY。' })
@@ -1635,48 +1768,118 @@ app.post('/api/prototype', async (req, res) => {
     return
   }
 
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
+  res.setHeader('Cache-Control', 'no-cache, no-transform')
+  res.setHeader('Connection', 'keep-alive')
+  res.flushHeaders?.()
+
+  const imageBlocks = buildImageBlocks(images)
   const normalizedCurrentHtml = currentHtml ? normalizePrototypeHtml(currentHtml) : null
   const updateInstruction = instruction?.trim() ?? ''
   const isUpdate = Boolean(normalizedCurrentHtml && updateInstruction)
-  const prompt = isUpdate
-    ? buildUpdatePrototypePrompt(requirementState, normalizedCurrentHtml!, updateInstruction)
-    : buildCreatePrototypePrompt(requirementState)
+  const updateHistory = Array.isArray(history) ? history.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : []
+  const configs = buildVariantConfigs(
+    clampVariantCount(numVariants, isUpdate ? DEFAULT_UPDATE_VARIANTS : DEFAULT_CREATE_VARIANTS),
+    isUpdate ? Math.max(0, variantIndex ?? 0) : 0,
+  ).map((cfg) => ({ ...cfg, index: isUpdate ? (variantIndex ?? 0) + cfg.index : cfg.index }))
 
-  const response = await anthropic.messages.create({
-    model,
-    max_tokens: 8192,
-    tools: isUpdate ? [editPrototypeTool] : undefined,
-    messages: [{ role: 'user', content: prompt }],
-  })
+  await Promise.allSettled(configs.map(async (cfg) => {
+    let html = ''
+    try {
+      if (isUpdate) {
+        const variant = await generateUpdateVariant(requirementState, normalizedCurrentHtml!, updateInstruction, imageBlocks, cfg, updateHistory)
+        writePrototypeEvent(res, { type: 'setCode', variantIndex: cfg.index, html: variant.html, focus: cfg.focus, history: variant.history })
+        writePrototypeEvent(res, { type: 'variantComplete', variantIndex: cfg.index, html: variant.html, focus: cfg.focus, history: variant.history, mode: variant.mode, appliedEdits: variant.appliedEdits })
+        return
+      }
 
-  if (isUpdate) {
-    const result = applyPrototypeToolUses(normalizedCurrentHtml!, response.content)
-    if (result.appliedEdits > 0) {
-      res.json({
-        html: normalizePrototypeHtml(result.html),
-        mode: 'update',
-        appliedEdits: result.appliedEdits,
+      const prompt = buildCreatePrototypePrompt(requirementState, imageBlocks.length > 0, cfg.focus)
+      const stream = anthropic!.messages.stream({
+        model,
+        max_tokens: 8192,
+        temperature: cfg.temperature === 1 ? undefined : cfg.temperature,
+        messages: [{ role: 'user', content: buildContentWithImages(prompt, imageBlocks) }],
       })
-      return
-    }
-  }
 
-  const raw = textFromClaudeContent(response.content)
-  if (isUpdate && !raw.trim()) {
-    res.json({
-      html: normalizedCurrentHtml!,
-      mode: 'update',
-      appliedEdits: 0,
-    })
+      for await (const event of stream) {
+        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+          html += event.delta.text
+          writePrototypeEvent(res, { type: 'setCode', variantIndex: cfg.index, html: normalizePrototypeHtml(html), focus: cfg.focus })
+        }
+      }
+      const normalized = normalizePrototypeHtml(html)
+      writePrototypeEvent(res, { type: 'variantComplete', variantIndex: cfg.index, html: normalized, focus: cfg.focus, mode: 'create', appliedEdits: 0, history: [] })
+    } catch (err) {
+      console.error(`[prototype] stream variant ${cfg.index} failed:`, err)
+      writePrototypeEvent(res, { type: 'variantError', variantIndex: cfg.index, focus: cfg.focus })
+    }
+  }))
+
+  writePrototypeEvent(res, { type: 'done' })
+  res.end()
+}
+
+app.post('/api/prototype/stream', streamPrototype)
+
+app.post('/api/prototype', async (req, res) => {
+  const { requirementState, currentHtml, instruction, images } = parsePrototypeRequest(req)
+
+  if (!anthropic) {
+    res.status(400).json({ error: '未配置 ANTHROPIC_API_KEY。' })
     return
   }
-  const html = normalizePrototypeHtml(raw)
 
-  res.json({
-    html,
-    mode: isUpdate ? 'rewrite' : 'create',
-    appliedEdits: 0,
+  if (!requirementState) {
+    res.status(400).json({ error: '缺少需求状态' })
+    return
+  }
+
+  const imageBlocks = buildImageBlocks(images)
+
+  const normalizedCurrentHtml = currentHtml ? normalizePrototypeHtml(currentHtml) : null
+  const updateInstruction = instruction?.trim() ?? ''
+  const isUpdate = Boolean(normalizedCurrentHtml && updateInstruction)
+
+  if (isUpdate) {
+    const updateHistory = Array.isArray((req.body as PrototypeRequest).history)
+      ? ((req.body as PrototypeRequest).history ?? []).filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      : []
+    const baseIndex = typeof (req.body as PrototypeRequest).variantIndex === 'number' ? (req.body as PrototypeRequest).variantIndex! : 0
+    const variantConfigs = buildVariantConfigs(
+      clampVariantCount((req.body as PrototypeRequest).numVariants, DEFAULT_UPDATE_VARIANTS),
+      Math.max(0, baseIndex),
+    ).map((cfg) => ({ ...cfg, index: baseIndex + cfg.index }))
+
+    const settled = await Promise.allSettled(
+      variantConfigs.map((cfg) => generateUpdateVariant(requirementState, normalizedCurrentHtml!, updateInstruction, imageBlocks, cfg, updateHistory)),
+    )
+
+    const variants: PrototypeVariantPayload[] = settled.map((result, index) => {
+      const cfg = variantConfigs[index]
+      if (result.status === 'fulfilled') return result.value
+      console.error(`[prototype] update variant ${cfg.index} failed:`, result.reason)
+      return { index: cfg.index, html: null, mode: 'update', status: 'error', focus: cfg.focus, appliedEdits: 0, history: updateHistory }
+    })
+
+    res.json({ variants })
+    return
+  }
+
+  // ── Create path: fan out N variants in parallel, isolating per-variant failures ──
+  const variantConfigs = buildVariantConfigs(clampVariantCount((req.body as PrototypeRequest).numVariants, DEFAULT_CREATE_VARIANTS))
+
+  const settled = await Promise.allSettled(
+    variantConfigs.map((cfg) => generateCreateVariant(requirementState, imageBlocks, cfg)),
+  )
+
+  const variants: PrototypeVariantPayload[] = settled.map((result, index) => {
+    const focus = variantConfigs[index].focus
+    if (result.status === 'fulfilled') return result.value
+    console.error(`[prototype] variant ${index} failed:`, result.reason)
+    return { index, html: null, mode: 'create', status: 'error', focus, appliedEdits: 0, history: [] }
   })
+
+  res.json({ variants })
 })
 
 app.post('/api/export-prompt', async (req, res) => {

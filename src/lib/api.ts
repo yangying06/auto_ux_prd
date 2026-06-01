@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatResponse, ProxyHealth, RagSearchResult } from '../types/chat'
+import type { ChatMessage, ChatResponse, ContentBlock, ProxyHealth, RagSearchResult } from '../types/chat'
 import type { UXRequirementState } from '../types/uxRequirement'
 import type { PrdNode } from '../types/prdNode'
 
@@ -47,23 +47,45 @@ export function searchCocosRag(baseUrl: string, query: string) {
   })
 }
 
-export interface PrototypeResponse {
-  html: string
+export interface PrototypeVariantPayload {
+  index: number
+  html: string | null
   mode: 'create' | 'update' | 'rewrite'
+  status: 'complete' | 'error'
+  focus?: string
   appliedEdits: number
+  history?: string[]
+}
+
+export interface PrototypeResponse {
+  variants: PrototypeVariantPayload[]
 }
 
 export function generatePrototype(
   baseUrl: string,
   requirementState: UXRequirementState,
-  options: { currentHtml?: string | null; instruction?: string } = {},
+  options: {
+    currentHtml?: string | null
+    instruction?: string
+    images?: ContentBlock[]
+    numVariants?: number
+    variantIndex?: number
+    history?: string[]
+    stream?: boolean
+  } = {},
 ) {
+  const imageBlocks = (options.images ?? []).filter((block) => block.type === 'image')
   return requestJson<PrototypeResponse>(baseUrl, '/api/prototype', {
     method: 'POST',
     body: JSON.stringify({
       requirementState,
       currentHtml: options.currentHtml ?? null,
       instruction: options.instruction ?? null,
+      images: imageBlocks,
+      numVariants: options.numVariants ?? null,
+      variantIndex: options.variantIndex ?? null,
+      history: options.history ?? null,
+      stream: options.stream ?? null,
     }),
   })
 }

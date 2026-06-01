@@ -3,10 +3,13 @@ import { useLocation, useParams } from 'wouter'
 import { ForgeChat } from '../components/map/ForgeChat'
 import { ForgeNodePanel } from '../components/map/ForgeNodePanel'
 import { generatePrototype, sendNodeChatMessage } from '../lib/api'
+import { streamPrototype } from '../lib/prototypeStream'
 import { useAppStore } from '../store/appStore'
-import type { ChatMessage } from '../types/chat'
+import type { ChatMessage, ContentBlock } from '../types/chat'
 import type { PrdNode } from '../types/prdNode'
 import type { UXRequirementState } from '../types/uxRequirement'
+
+const MAX_PROTOTYPE_IMAGES = 6
 
 type NodePolishPatch = NonNullable<Awaited<ReturnType<typeof sendNodeChatMessage>>['nodePatch']>
 
@@ -58,6 +61,41 @@ function countImageBlocks(messages: ChatMessage[]) {
     if (typeof message.content === 'string') return sum
     return sum + message.content.filter((block) => block.type === 'image').length
   }, 0)
+}
+
+// Image blocks carry no role metadata; ForgeChat encodes the role in text lines like
+// "1. 布局参考：name". We parse those lines to map each image (same order) to its role
+// so reference images can be prioritized for prototype generation.
+function isReferenceRoleLine(line: string) {
+  return line.includes('布局参考')
+}
+
+function collectPrototypeImages(messages: ChatMessage[]): ContentBlock[] {
+  const referenceImages: ContentBlock[] = []
+  const otherImages: ContentBlock[] = []
+
+  for (const message of messages) {
+    if (message.role !== 'user' || typeof message.content === 'string') continue
+
+    const textBlock = message.content.find((block) => block.type === 'text')
+    const roleLines = textBlock?.type === 'text'
+      ? textBlock.text.split('\n').filter((line) => /^\s*\d+\.\s/.test(line))
+      : []
+
+    let imageIndex = 0
+    for (const block of message.content) {
+      if (block.type !== 'image' || !block.source) continue
+      const roleLine = roleLines[imageIndex] ?? ''
+      imageIndex += 1
+      if (roleLine === '' || isReferenceRoleLine(roleLine)) {
+        referenceImages.push(block)
+      } else {
+        otherImages.push(block)
+      }
+    }
+  }
+
+  return [...referenceImages, ...otherImages].slice(0, MAX_PROTOTYPE_IMAGES)
 }
 
 function buildNodePrototypeRequirement(node: PrdNode, messages: ChatMessage[]): UXRequirementState {
@@ -113,12 +151,18 @@ export function ForgePage() {
   const nodeChats = useAppStore((s) => s.nodeChats)
   const settings = useAppStore((s) => s.settings)
   const appendNodeMessage = useAppStore((s) => s.appendNodeMessage)
+  const clearNodeChat = useAppStore((s) => s.clearNodeChat)
   const applyNodePolish = useAppStore((s) => s.applyNodePolish)
   const updateNodeStatus = useAppStore((s) => s.updateNodeStatus)
   const prototypeHtml = useAppStore((s) => s.prototypeHtml)
   const prototypeHistory = useAppStore((s) => s.prototypeHistory)
-  const setPrototypeHtml = useAppStore((s) => s.setPrototypeHtml)
+  const recordPrototypeHistory = useAppStore((s) => s.recordPrototypeHistory)
   const restorePrototypeVersion = useAppStore((s) => s.restorePrototypeVersion)
+  const setPrototypeVariants = useAppStore((s) => s.setPrototypeVariants)
+  const updatePrototypeVariant = useAppStore((s) => s.updatePrototypeVariant)
+  const selectPrototypeVariant = useAppStore((s) => s.selectPrototypeVariant)
+  const prototypeVariants = useAppStore((s) => s.prototypeVariants)
+  const selectedVariantIndex = useAppStore((s) => s.selectedVariantIndex)
 
   const [nodeComplete, setNodeComplete] = useState(false)
   const [isGeneratingPrototype, setIsGeneratingPrototype] = useState(false)
@@ -174,21 +218,120 @@ export function ForgePage() {
     const trimmedInstruction = instruction?.trim() ?? ''
     const currentMessages = nodeId ? (useAppStore.getState().nodeChats[nodeId] ?? messages) : messages
     const currentNode = nodeId ? (useAppStore.getState().prdTree?.[nodeId] ?? node) : node
+    const referenceImages = collectPrototypeImages(currentMessages)
+    const requirementState = buildNodePrototypeRequirement(currentNode, currentMessages)
+    const currentStore = useAppStore.getState()
+    const selectedVariant = currentStore.prototypeVariants.find((variant) => variant.index === currentStore.selectedVariantIndex)
+    const isUpdate = Boolean(trimmedInstruction && selectedVariant?.html)
 
     setIsGeneratingPrototype(true)
     try {
-      const result = await generatePrototype(
+      if (isUpdate && selectedVariant?.html) {
+        recordPrototypeHistory(selectedVariant.html, { mode: 'update', note: `修改前：${trimmedInstruction}` })
+        updatePrototypeVariant(selectedVariant.index, { status: 'streaming' })
+        await streamPrototype(
+          settings.proxyBaseUrl,
+          requirementState,
+          {
+            currentHtml: selectedVariant.html,
+            instruction: trimmedInstruction,
+            images: referenceImages,
+            numVariants: 1,
+            variantIndex: selectedVariant.index,
+            history: selectedVariant.history ?? [],
+          },
+          (event) => {
+            if (event.type === 'setCode') {
+              updatePrototypeVariant(event.variantIndex, {
+                html: event.html,
+                status: 'streaming',
+                focus: event.focus,
+                history: event.history,
+              })
+              if (event.variantIndex === selectedVariant.index && event.html) selectPrototypeVariant(event.variantIndex)
+            } else if (event.type === 'variantComplete') {
+              updatePrototypeVariant(event.variantIndex, {
+                html: event.html,
+                status: 'complete',
+                focus: event.focus,
+                history: event.history,
+              })
+              if (event.variantIndex === selectedVariant.index && event.html) selectPrototypeVariant(event.variantIndex)
+            } else if (event.type === 'variantError') {
+              updatePrototypeVariant(event.variantIndex, { status: 'error', focus: event.focus })
+            }
+          },
+        )
+        selectPrototypeVariant(selectedVariant.index)
+        return
+      }
+
+      setPrototypeVariants(Array.from({ length: 4 }, (_, index) => ({ index, html: null, status: 'streaming' as const })))
+      await streamPrototype(
         settings.proxyBaseUrl,
-        buildNodePrototypeRequirement(currentNode, currentMessages),
-        {
-          currentHtml: trimmedInstruction ? prototypeHtml : null,
-          instruction: trimmedInstruction || undefined,
+        requirementState,
+        { images: referenceImages, numVariants: 4 },
+        (event) => {
+          if (event.type === 'setCode') {
+            updatePrototypeVariant(event.variantIndex, {
+              html: event.html,
+              status: 'streaming',
+              focus: event.focus,
+              history: event.history,
+            })
+          } else if (event.type === 'variantComplete') {
+            updatePrototypeVariant(event.variantIndex, {
+              html: event.html,
+              status: 'complete',
+              focus: event.focus,
+              history: event.history,
+            })
+            if (event.html && useAppStore.getState().selectedVariantIndex === -1) {
+              selectPrototypeVariant(event.variantIndex)
+            }
+          } else if (event.type === 'variantError') {
+            updatePrototypeVariant(event.variantIndex, { status: 'error', focus: event.focus })
+          }
         },
       )
-      setPrototypeHtml(result.html, {
-        mode: result.mode === 'create' ? 'create' : 'update',
-        note: trimmedInstruction || `节点 ${currentNode.id} 原型`,
-      })
+    } catch {
+      const result = await generatePrototype(
+        settings.proxyBaseUrl,
+        requirementState,
+        {
+          currentHtml: isUpdate ? selectedVariant?.html : null,
+          instruction: trimmedInstruction || undefined,
+          images: referenceImages,
+          numVariants: isUpdate ? 1 : 4,
+          variantIndex: isUpdate ? selectedVariant?.index : undefined,
+          history: isUpdate ? selectedVariant?.history : undefined,
+        },
+      )
+
+      if (isUpdate && selectedVariant) {
+        const chosen = result.variants.find((variant) => variant.status === 'complete' && variant.html) ?? result.variants[0]
+        if (chosen?.html) {
+          updatePrototypeVariant(selectedVariant.index, {
+            html: chosen.html,
+            status: 'complete',
+            focus: chosen.focus,
+            history: chosen.history,
+          })
+          selectPrototypeVariant(selectedVariant.index)
+        }
+      } else {
+        setPrototypeVariants(result.variants.map((variant) => ({
+          index: variant.index,
+          html: variant.html,
+          status: variant.status,
+          focus: variant.focus,
+          history: variant.history,
+        })))
+        const chosen = result.variants.find((variant) => variant.status === 'complete' && variant.html)
+        if (chosen?.html) {
+          selectPrototypeVariant(chosen.index)
+        }
+      }
     } finally {
       setIsGeneratingPrototype(false)
     }
@@ -259,12 +402,16 @@ export function ForgePage() {
           nodeComplete={nodeComplete}
           prototypeHtml={prototypeHtml}
           prototypeHistory={prototypeHistory}
+          prototypeVariants={prototypeVariants}
+          selectedVariantIndex={selectedVariantIndex}
           isGeneratingPrototype={isGeneratingPrototype}
           onSend={handleSend}
           onConfirm={handleConfirm}
           onBack={() => navigate('/')}
           onGeneratePrototype={handleGeneratePrototype}
           onRestorePrototype={restorePrototypeVersion}
+          onSelectVariant={selectPrototypeVariant}
+          onClearChat={() => clearNodeChat(nodeId)}
         />
       </main>
     </div>

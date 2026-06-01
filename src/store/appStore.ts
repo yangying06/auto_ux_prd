@@ -4,6 +4,7 @@ import { defaultSettings } from '../data/defaultSettings'
 import type { AppSettings, ChatMessage, RagSearchResult } from '../types/chat'
 import type { UXRequirementState } from '../types/uxRequirement'
 import type { DecompositionStatus, DecompositionStep, PrdNode, PrdTree } from '../types/prdNode'
+import type { PrototypeVariant } from '../types/prototypeVariant'
 
 const emptyRequirement: UXRequirementState = {
   trigger_condition: null,
@@ -51,14 +52,12 @@ function normalizeOptionalText(value: string | null | undefined) {
 function persistableMessage(message: ChatMessage): ChatMessage {
   if (typeof message.content === 'string') return message
 
-  const textParts = message.content.flatMap((block) => {
-    if (block.type === 'text') return block.text.trim() ? [block.text.trim()] : []
-    return [`[图片附件: ${block.source.media_type}]`]
-  })
-
   return {
     ...message,
-    content: textParts.join('\n\n'),
+    content: message.content.map((block) => {
+      if (block.type === 'text') return { ...block }
+      return { type: 'image', source: { ...block.source } }
+    }),
   }
 }
 
@@ -147,6 +146,8 @@ interface AppStoreState {
   latestRag: RagSearchResult | null
   prototypeHtml: string | null
   prototypeHistory: PrototypeVersion[]
+  prototypeVariants: PrototypeVariant[]
+  selectedVariantIndex: number
   settings: AppSettings
   prdTree: PrdTree | null
   selectedNodeId: string | null
@@ -161,8 +162,13 @@ interface AppStoreState {
   setMessages: (messages: ChatMessage[] | ((current: ChatMessage[]) => ChatMessage[])) => void
   setLatestRag: (rag: RagSearchResult | null) => void
   setPrototypeHtml: (html: string | null, meta?: PrototypeVersionMeta) => void
+  recordPrototypeHistory: (html: string, meta?: PrototypeVersionMeta) => void
   restorePrototypeVersion: (id: string) => void
   clearPrototypeHistory: () => void
+  setPrototypeVariants: (variants: PrototypeVariant[]) => void
+  updatePrototypeVariant: (index: number, patch: Partial<PrototypeVariant>) => void
+  selectPrototypeVariant: (index: number) => void
+  clearPrototypeVariants: () => void
   updateSettings: (settings: AppSettings) => void
   resetSession: () => void
   resetRequirement: () => void
@@ -183,6 +189,8 @@ export const useAppStore = create<AppStoreState>()(
       latestRag: null,
       prototypeHtml: null,
       prototypeHistory: [],
+      prototypeVariants: [],
+      selectedVariantIndex: -1,
       settings: defaultSettings,
       prdTree: null,
       selectedNodeId: null,
@@ -261,6 +269,13 @@ export const useAppStore = create<AppStoreState>()(
             prototypeHistory: [version, ...state.prototypeHistory].slice(0, PROTOTYPE_HISTORY_LIMIT),
           }
         }),
+      recordPrototypeHistory: (html, meta) =>
+        set((state) => {
+          const version = makePrototypeVersion(html, state.prototypeHistory, meta)
+          return {
+            prototypeHistory: [version, ...state.prototypeHistory].slice(0, PROTOTYPE_HISTORY_LIMIT),
+          }
+        }),
       restorePrototypeVersion: (id) =>
         set((state) => {
           const version = state.prototypeHistory.find((item) => item.id === id)
@@ -268,9 +283,26 @@ export const useAppStore = create<AppStoreState>()(
           return { prototypeHtml: version.html }
         }),
       clearPrototypeHistory: () => set({ prototypeHtml: null, prototypeHistory: [] }),
+      setPrototypeVariants: (variants) => set({ prototypeVariants: variants, selectedVariantIndex: -1 }),
+      updatePrototypeVariant: (index, patch) =>
+        set((state) => ({
+          prototypeVariants: state.prototypeVariants.map((variant) =>
+            variant.index === index ? { ...variant, ...patch } : variant,
+          ),
+        })),
+      selectPrototypeVariant: (index) =>
+        set((state) => {
+          const variant = state.prototypeVariants.find((item) => item.index === index)
+          if (!variant) return state
+          return {
+            selectedVariantIndex: index,
+            prototypeHtml: variant.html ?? state.prototypeHtml,
+          }
+        }),
+      clearPrototypeVariants: () => set({ prototypeVariants: [], selectedVariantIndex: -1 }),
       updateSettings: (settings) => set({ settings }),
-      resetSession: () => set({ messages: initialMessages, latestRag: null, prototypeHtml: null, prototypeHistory: [] }),
-      resetRequirement: () => set({ requirement: emptyRequirement, latestRag: null, prototypeHtml: null, prototypeHistory: [] }),
+      resetSession: () => set({ messages: initialMessages, latestRag: null, prototypeHtml: null, prototypeHistory: [], prototypeVariants: [], selectedVariantIndex: -1 }),
+      resetRequirement: () => set({ requirement: emptyRequirement, latestRag: null, prototypeHtml: null, prototypeHistory: [], prototypeVariants: [], selectedVariantIndex: -1 }),
       setPrdTree: (prdTree) => set({ prdTree: rebuildPrdTreeLinks(prdTree) }),
       setSelectedNodeId: (selectedNodeId) => set({ selectedNodeId }),
       setDecompositionStatus: (decompositionStatus) => set({ decompositionStatus }),

@@ -14,19 +14,51 @@
         background: #05070d;
       }
 
+      #viewport {
+        display: flex;
+        width: 100vw;
+        height: 100vh;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+      }
+
+      #canvas {
+        width: 750px;
+        height: 1624px;
+        overflow: hidden;
+        transform-origin: center center;
+      }
+
       #preview {
         display: block;
-        width: 100%;
-        height: 100%;
+        width: 750px;
+        height: 1624px;
         border: 0;
+        overflow: hidden;
         background: #05070d;
       }
     </style>
   </head>
   <body>
-    <iframe id="preview" title="Prototype content" sandbox="allow-scripts"></iframe>
+    <div id="viewport">
+      <div id="canvas">
+        <iframe id="preview" title="Prototype content" sandbox="allow-scripts"></iframe>
+      </div>
+    </div>
     <script>
+      const DESIGN_WIDTH = 750;
+      const DESIGN_HEIGHT = 1624;
+      const canvas = document.getElementById('canvas');
       const preview = document.getElementById('preview');
+
+      function resizeCanvas() {
+        const scale = Math.max(0.01, Math.min(window.innerWidth / DESIGN_WIDTH, window.innerHeight / DESIGN_HEIGHT));
+        canvas.style.transform = `scale(${scale})`;
+      }
+
+      window.addEventListener('resize', resizeCanvas);
+      resizeCanvas();
 
       window.addEventListener('message', (event) => {
         const data = event.data;

@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactElement } from 'react'
 import { normalizePrototypeHtml } from '../../lib/prototypeUtils'
 import type { PrototypeVersion } from '../../store/appStore'
 import type { ChatMessage, ContentBlock, ImageBlock } from '../../types/chat'
+import type { PrototypeVariant } from '../../types/prototypeVariant'
 import { PrototypeBoard } from '../state/PrototypeBoard'
+import { PrototypeVariants } from '../state/PrototypeVariants'
 
 interface ForgeChatProps {
   nodeId: string
@@ -10,12 +13,16 @@ interface ForgeChatProps {
   nodeComplete: boolean
   prototypeHtml: string | null
   prototypeHistory: PrototypeVersion[]
+  prototypeVariants: PrototypeVariant[]
+  selectedVariantIndex: number
   isGeneratingPrototype: boolean
   onSend: (content: ChatMessage['content']) => void | Promise<void>
   onConfirm: () => void
   onBack: () => void
   onGeneratePrototype: (instruction?: string) => void | Promise<void>
   onRestorePrototype: (id: string) => void
+  onSelectVariant: (index: number) => void
+  onClearChat: () => void
 }
 
 type ReferenceRole = 'reference' | 'asset' | 'state' | 'anti'
@@ -75,8 +82,121 @@ function detectRoleFromText(text: string): ReferenceRole {
   return 'reference'
 }
 
+function renderInlineMarkdown(text: string) {
+  const parts = text.split(/(`[^`]+`|\*\*.+?\*\*)/g).filter(Boolean)
+  return parts.map((part, index) => {
+    if (part.startsWith('**') && part.endsWith('**')) {
+      return <strong key={index} className="font-semibold text-on-surface">{part.slice(2, -2)}</strong>
+    }
+    if (part.startsWith('`') && part.endsWith('`')) {
+      return <code key={index} className="rounded bg-surface-container-high px-1 py-0.5 font-mono text-[0.85em]">{part.slice(1, -1)}</code>
+    }
+    return part
+  })
+}
+
+function renderMarkdownText(text: string) {
+  const lines = text.replace(/\r\n/g, '\n').split('\n')
+  const blocks: ReactElement[] = []
+  let paragraph: string[] = []
+  let list: string[] = []
+  let orderedList = false
+  let codeLines: string[] | null = null
+
+  function flushParagraph() {
+    if (!paragraph.length) return
+    blocks.push(
+      <p key={`p-${blocks.length}`} className="leading-relaxed">
+        {renderInlineMarkdown(paragraph.join(' '))}
+      </p>,
+    )
+    paragraph = []
+  }
+
+  function flushList() {
+    if (!list.length) return
+    const Tag = orderedList ? 'ol' : 'ul'
+    blocks.push(
+      <Tag key={`list-${blocks.length}`} className={`space-y-1 pl-md leading-relaxed ${orderedList ? 'list-decimal' : 'list-disc'}`}>
+        {list.map((item, index) => <li key={index}>{renderInlineMarkdown(item)}</li>)}
+      </Tag>,
+    )
+    list = []
+  }
+
+  lines.forEach((line) => {
+    const trimmed = line.trim()
+    if (trimmed.startsWith('```')) {
+      if (codeLines) {
+        blocks.push(
+          <pre key={`code-${blocks.length}`} className="overflow-x-auto rounded-lg bg-zinc-950 p-sm font-mono text-[11px] leading-relaxed text-zinc-100">
+            <code>{codeLines.join('\n')}</code>
+          </pre>,
+        )
+        codeLines = null
+      } else {
+        flushParagraph()
+        flushList()
+        codeLines = []
+      }
+      return
+    }
+
+    if (codeLines) {
+      codeLines.push(line)
+      return
+    }
+
+    if (!trimmed) {
+      flushParagraph()
+      flushList()
+      return
+    }
+
+    const heading = /^(#{1,3})\s+(.+)$/.exec(trimmed)
+    if (heading) {
+      flushParagraph()
+      flushList()
+      const level = heading[1].length
+      const className = level === 1 ? 'text-title-md' : level === 2 ? 'text-label-lg' : 'text-label-md'
+      blocks.push(
+        <div key={`h-${blocks.length}`} className={`${className} font-semibold text-on-surface`}>
+          {renderInlineMarkdown(heading[2])}
+        </div>,
+      )
+      return
+    }
+
+    const unordered = /^[-*]\s+(.+)$/.exec(trimmed)
+    const ordered = /^\d+[.)]\s+(.+)$/.exec(trimmed)
+    if (unordered || ordered) {
+      flushParagraph()
+      const nextOrdered = Boolean(ordered)
+      if (list.length && orderedList !== nextOrdered) flushList()
+      orderedList = nextOrdered
+      list.push((unordered ?? ordered)?.[1] ?? trimmed)
+      return
+    }
+
+    paragraph.push(trimmed)
+  })
+
+  flushParagraph()
+  flushList()
+  const trailingCodeLines = codeLines as string[] | null
+  if (trailingCodeLines) {
+    blocks.push(
+      <pre key={`code-${blocks.length}`} className="overflow-x-auto rounded-lg bg-zinc-950 p-sm font-mono text-[11px] leading-relaxed text-zinc-100">
+        <code>{trailingCodeLines.join('\n')}</code>
+      </pre>,
+    )
+  }
+
+  return <div className="flex flex-col gap-xs whitespace-normal">{blocks}</div>
+}
+
 function renderMessageContent(content: ChatMessage['content']) {
-  if (typeof content === 'string') return <p className="whitespace-pre-line leading-relaxed">{content}</p>
+  if (typeof content === 'string') return renderMarkdownText(content)
 
   const textBlocks = content.filter((b): b is ContentBlock & { type: 'text' } => b.type === 'text')
   const imageBlocks = content.filter((b): b is ImageBlock => b.type === 'image')
@@ -84,9 +204,7 @@ function renderMessageContent(content: ChatMessage['content']) {
   return (
     <div className="flex flex-col gap-sm">
       {textBlocks.map((block, index) => (
-        <p key={`text-${index}`} className="whitespace-pre-line leading-relaxed">
-          {block.text}
-        </p>
+        <div key={`text-${index}`}>{renderMarkdownText(block.text)}</div>
       ))}
       {imageBlocks.length > 0 ? (
         <div className="grid grid-cols-2 gap-xs">
@@ -221,12 +339,16 @@ export function ForgeChat({
   nodeComplete,
   prototypeHtml,
   prototypeHistory,
+  prototypeVariants,
+  selectedVariantIndex,
   isGeneratingPrototype,
   onSend,
   onConfirm,
   onBack,
   onGeneratePrototype,
   onRestorePrototype,
+  onSelectVariant,
+  onClearChat,
 }: ForgeChatProps) {
   const [draft, setDraft] = useState('')
   const [isSending, setIsSending] = useState(false)
@@ -234,6 +356,20 @@ export function ForgeChat({
   const [referenceRole, setReferenceRole] = useState<ReferenceRole>('reference')
   const [attachments, setAttachments] = useState<ImageAttachment[]>([])
   const [visualTab, setVisualTab] = useState<VisualTab>('prototype')
+  const [variantView, setVariantView] = useState<'grid' | 'single'>('single')
+
+  const hasMultipleVariants = prototypeVariants.length > 1
+
+  // Whenever a fresh batch of variants arrives, default back to the comparison grid so the
+  // user can choose; collapse to single preview when there is at most one variant.
+  useEffect(() => {
+    setVariantView(prototypeVariants.length > 1 ? 'grid' : 'single')
+  }, [prototypeVariants])
+
+  function handleSelectVariant(index: number) {
+    onSelectVariant(index)
+    setVariantView('single')
+  }
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -352,6 +488,14 @@ export function ForgeChat({
     await onGeneratePrototype(instruction)
   }
 
+  function handleClearChat() {
+    if (isSending) return
+    setAttachments([])
+    setSelectedImageId(null)
+    setError(null)
+    onClearChat()
+  }
+
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -382,6 +526,15 @@ export function ForgeChat({
                 {item.done ? '✓' : '○'} {item.label}
               </span>
             ))}
+            <button
+              onClick={handleClearChat}
+              disabled={isSending || messages.length === 0}
+              className="ml-auto flex min-h-[30px] items-center gap-xs rounded-lg border border-outline-variant bg-surface px-sm py-xs font-mono text-[11px] text-on-surface-variant transition-colors hover:border-error hover:text-error disabled:opacity-40"
+              title="清空当前节点聊天和参考图"
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>delete</span>
+              清空聊天
+            </button>
           </div>
         </div>
 
@@ -597,13 +750,42 @@ export function ForgeChat({
 
         {visualTab === 'prototype' ? (
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-sm">
-            <PrototypeBoard
-              html={prototypeHtml}
-              history={prototypeHistory}
-              isLoading={isGeneratingPrototype}
-              onIterate={(instruction) => void handleGeneratePrototype(instruction)}
-              onRestore={onRestorePrototype}
-            />
+            {hasMultipleVariants && variantView === 'grid' ? (
+              <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-outline-variant/30 bg-zinc-950">
+                <div className="flex items-center justify-between border-b border-outline-variant/20 bg-zinc-900/80 px-sm py-xs">
+                  <span className="font-mono text-code-sm text-on-surface-variant">
+                    {prototypeVariants.length} 个候选方案 · 选择一个继续打磨
+                  </span>
+                  <span className="font-mono text-[10px] uppercase text-on-surface-variant">Alt+1~{prototypeVariants.length} 快速切换</span>
+                </div>
+                <div className="min-h-0 flex-1 overflow-hidden">
+                  <PrototypeVariants
+                    variants={prototypeVariants}
+                    selectedIndex={selectedVariantIndex}
+                    onSelect={handleSelectVariant}
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                {hasMultipleVariants ? (
+                  <button
+                    onClick={() => setVariantView('grid')}
+                    className="mb-sm flex items-center gap-xs self-start rounded-md border border-outline-variant/30 bg-surface-container px-sm py-xs font-mono text-[11px] text-on-surface-variant transition-colors hover:text-on-surface"
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>grid_view</span>
+                    全部方案（{prototypeVariants.length}）
+                  </button>
+                ) : null}
+                <PrototypeBoard
+                  html={prototypeHtml}
+                  history={prototypeHistory}
+                  isLoading={isGeneratingPrototype}
+                  onIterate={(instruction) => void handleGeneratePrototype(instruction)}
+                  onRestore={onRestorePrototype}
+                />
+              </div>
+            )}
           </div>
         ) : null}
 

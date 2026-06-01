@@ -1,4 +1,6 @@
 const TAILWIND_CDN = 'https://cdn.tailwindcss.com'
+export const PROTOTYPE_DESIGN_WIDTH = 750
+export const PROTOTYPE_DESIGN_HEIGHT = 1624
 
 function stripFrontmatter(input: string) {
   return input.replace(/^---[\s\S]*?---\s*/u, '').trim()
@@ -82,7 +84,8 @@ export function normalizePrototypeHtml(raw: string) {
   })();
 </script>`
   const baseStyle = `<style>
-  html, body { margin: 0; min-height: 100%; background: #05070d; color: #f7f7fb; }
+  :root { --prototype-design-width: 750px; --prototype-design-height: 1624px; }
+  html, body { margin: 0; width: 100%; min-height: 100%; overflow: hidden; background: #05070d; color: #f7f7fb; }
   * { box-sizing: border-box; }
   button, input, textarea, select { font: inherit; }
 </style>`
