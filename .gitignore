@@ -20,9 +20,10 @@ Thumbs.db
 # Logs
 *.log
 
-# Local Claude/GSD scratch data
-.claude/worktrees/
-.planning/debug/
+# Local Claude/GSD/docs data
+.claude/
+.planning/
+docs/
 progress.txt
 archive/
 
