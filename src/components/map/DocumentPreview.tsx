@@ -54,6 +54,13 @@ export function buildDocumentMarkdown(node: PrdNode) {
     lines.push('', hasMarkdownHeading(body) ? body : `## 拆分整理\n\n${body}`)
   }
 
+  if (node.references?.length) {
+    lines.push('', '## 跨页面引用', '')
+    for (const reference of node.references) {
+      lines.push(`- ${reference.label}${reference.targetNodeId ? ` → ${reference.targetNodeId}` : ''}${reference.reason ? `：${reference.reason}` : ''}`)
+    }
+  }
+
   if (textOrNull(node.handoffGoal)) {
     lines.push('', '## AI 接力用途', '', node.handoffGoal!.trim())
   }
@@ -79,6 +86,13 @@ function buildNodeBodyMarkdown(node: PrdNode) {
   const body = normalizeBody(node.content)
   if (body && body !== node.summary?.trim()) {
     lines.push('', hasMarkdownHeading(body) ? body : body)
+  }
+
+  if (node.references?.length) {
+    lines.push('', '## 跨页面引用', '')
+    for (const reference of node.references) {
+      lines.push(`- ${reference.label}${reference.targetNodeId ? ` → ${reference.targetNodeId}` : ''}${reference.reason ? `：${reference.reason}` : ''}`)
+    }
   }
 
   if (textOrNull(node.handoffGoal)) {

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useLocation, useParams } from 'wouter'
 import { ForgeChat } from '../components/map/ForgeChat'
 import { ForgeNodePanel } from '../components/map/ForgeNodePanel'
-import { generatePrototype, sendNodeChatMessage } from '../lib/api'
+import { generatePrototype, sendNodeChatMessage, suggestPrdNodeOperations } from '../lib/api'
 import { streamPrototype } from '../lib/prototypeStream'
 import { useAppStore } from '../store/appStore'
 import type { ChatMessage, ContentBlock } from '../types/chat'
@@ -98,7 +98,22 @@ function collectPrototypeImages(messages: ChatMessage[]): ContentBlock[] {
   return [...referenceImages, ...otherImages].slice(0, MAX_PROTOTYPE_IMAGES)
 }
 
-function buildNodePrototypeRequirement(node: PrdNode, messages: ChatMessage[]): UXRequirementState {
+function buildMvcChildContext(node: PrdNode, tree: Record<string, PrdNode> | null) {
+  const children = node.children.map((childId) => tree?.[childId]).filter((child): child is PrdNode => Boolean(child))
+  if (!children.length) return null
+  return [
+    '页面下属 MVC 子节点上下文：',
+    ...children.map((child) => [
+      `- ${child.label}（${child.id} / ${child.type}）`,
+      `  摘要：${child.summary}`,
+      `  内容：${child.content}`,
+      child.techNotes ? `  技术备注：${child.techNotes}` : null,
+      child.docPath ? `  文档路径：${child.docPath}` : null,
+    ].filter(Boolean).join('\n')),
+  ].join('\n')
+}
+
+function buildNodePrototypeRequirement(node: PrdNode, messages: ChatMessage[], tree: Record<string, PrdNode> | null): UXRequirementState {
   const transcript = messages
     .slice(-12)
     .map((message) => {
@@ -109,11 +124,13 @@ function buildNodePrototypeRequirement(node: PrdNode, messages: ChatMessage[]): 
     .filter((item): item is string => Boolean(item))
     .join('\n')
   const referenceCount = countImageBlocks(messages)
+  const mvcChildContext = node.type === 'page' ? buildMvcChildContext(node, tree) : null
 
   return {
     trigger_condition: `基于 PRD 节点 ${node.id}「${node.label}」生成手机端交互原型。`,
     sequence_rules: [
       stripPolishSection(node.content),
+      mvcChildContext,
       transcript ? `\nDeep Forge 对话摘要：\n${transcript}` : null,
     ].filter(Boolean).join('\n\n'),
     asset_dependencies: referenceCount > 0
@@ -149,15 +166,20 @@ export function ForgePage() {
 
   const prdTree = useAppStore((s) => s.prdTree)
   const nodeChats = useAppStore((s) => s.nodeChats)
+  const nodeOperationSuggestions = useAppStore((s) => s.nodeOperationSuggestions)
   const settings = useAppStore((s) => s.settings)
   const appendNodeMessage = useAppStore((s) => s.appendNodeMessage)
   const clearNodeChat = useAppStore((s) => s.clearNodeChat)
+  const setNodeOperationSuggestions = useAppStore((s) => s.setNodeOperationSuggestions)
+  const applyNodeOperationSuggestion = useAppStore((s) => s.applyNodeOperationSuggestion)
+  const dismissNodeOperationSuggestion = useAppStore((s) => s.dismissNodeOperationSuggestion)
   const applyNodePolish = useAppStore((s) => s.applyNodePolish)
   const updateNodeStatus = useAppStore((s) => s.updateNodeStatus)
   const prototypeHtml = useAppStore((s) => s.prototypeHtml)
   const prototypeHistory = useAppStore((s) => s.prototypeHistory)
   const recordPrototypeHistory = useAppStore((s) => s.recordPrototypeHistory)
   const restorePrototypeVersion = useAppStore((s) => s.restorePrototypeVersion)
+  const clearPrototypeHistory = useAppStore((s) => s.clearPrototypeHistory)
   const setPrototypeVariants = useAppStore((s) => s.setPrototypeVariants)
   const updatePrototypeVariant = useAppStore((s) => s.updatePrototypeVariant)
   const selectPrototypeVariant = useAppStore((s) => s.selectPrototypeVariant)
@@ -205,12 +227,32 @@ export function ForgePage() {
         const currentNode = useAppStore.getState().prdTree?.[nodeId] ?? node
         applyNodePolish(nodeId, mergePolishPatch(currentNode, response.nodePatch))
       }
-      if (response.nodeComplete) setNodeComplete(true)
+      if (response.nodeComplete) {
+        setNodeComplete(true)
+        updateNodeStatus(nodeId, 'done')
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : '发送失败'
       appendNodeMessage(nodeId, { role: 'assistant', content: `请求失败：${message}` })
       throw err
     }
+  }
+
+  async function handleSuggestNodeOperations(input: { supplementText: string; sources: Array<{ name: string; sourceKind: 'upload'; text: string }> }) {
+    if (!nodeId || !prdTree || !node) return
+    const response = await suggestPrdNodeOperations(settings.proxyBaseUrl, {
+      tree: prdTree,
+      selectedNodeId: nodeId,
+      supplementText: input.supplementText,
+      sources: input.sources.map((source) => ({ name: source.name, sourceKind: source.sourceKind, text: source.text })),
+    })
+    setNodeOperationSuggestions(nodeId, response.suggestions)
+    appendNodeMessage(nodeId, {
+      role: 'assistant',
+      content: response.suggestions.length
+        ? `${response.reply}\n\n已生成 ${response.suggestions.length} 条待确认节点建议，请在输入框上方逐条应用或忽略。`
+        : response.reply,
+    })
   }
 
   async function handleGeneratePrototype(instruction?: string) {
@@ -219,8 +261,8 @@ export function ForgePage() {
     const currentMessages = nodeId ? (useAppStore.getState().nodeChats[nodeId] ?? messages) : messages
     const currentNode = nodeId ? (useAppStore.getState().prdTree?.[nodeId] ?? node) : node
     const referenceImages = collectPrototypeImages(currentMessages)
-    const requirementState = buildNodePrototypeRequirement(currentNode, currentMessages)
     const currentStore = useAppStore.getState()
+    const requirementState = buildNodePrototypeRequirement(currentNode, currentMessages, currentStore.prdTree)
     const selectedVariant = currentStore.prototypeVariants.find((variant) => variant.index === currentStore.selectedVariantIndex)
     const isUpdate = Boolean(trimmedInstruction && selectedVariant?.html)
 
@@ -405,11 +447,16 @@ export function ForgePage() {
           prototypeVariants={prototypeVariants}
           selectedVariantIndex={selectedVariantIndex}
           isGeneratingPrototype={isGeneratingPrototype}
+          nodeOperationSuggestions={nodeOperationSuggestions[nodeId] ?? []}
           onSend={handleSend}
+          onSuggestNodeOperations={handleSuggestNodeOperations}
+          onApplyNodeOperationSuggestion={(suggestionId) => applyNodeOperationSuggestion(nodeId, suggestionId)}
+          onDismissNodeOperationSuggestion={(suggestionId) => dismissNodeOperationSuggestion(nodeId, suggestionId)}
           onConfirm={handleConfirm}
           onBack={() => navigate('/')}
           onGeneratePrototype={handleGeneratePrototype}
           onRestorePrototype={restorePrototypeVersion}
+          onClearPrototypeHistory={clearPrototypeHistory}
           onSelectVariant={selectPrototypeVariant}
           onClearChat={() => clearNodeChat(nodeId)}
         />

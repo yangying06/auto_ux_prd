@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'wouter'
-import { startDecomposition, pollDecomposition, exportSpec } from '../lib/api'
+import { startDecomposition, pollDecomposition, exportSpecFolder, exportNodeMarkdown } from '../lib/api'
+import { MapAdjustmentPanel } from '../components/map/MapAdjustmentPanel'
+import type { PrdNode } from '../types/prdNode'
 import { openBoltWithPrompt, prdTreeToBoltPrompt } from '../lib/specPrompt'
 import { useAppStore } from '../store/appStore'
 import { UploadCard } from '../components/upload/UploadCard'
@@ -12,7 +14,7 @@ import { PreviewDrawer } from '../components/map/PreviewDrawer'
 
 type Stage = 'upload' | 'decomposing' | 'error' | 'map'
 
-const INITIAL_STEP = '正在识别顶层文档包目录'
+const INITIAL_STEP = '正在通读原文并建立结构'
 const POLL_INTERVAL_MS = 700
 
 function findLastActiveIdx(steps: Array<{ status: string }>) {
@@ -28,6 +30,19 @@ function normalizeStepPhase(label: string) {
     .replace(/（\d+\/\d+）$/, '')
     .replace(/[.。…]+$/, '')
     .trim()
+}
+
+function canForgeNode(node: PrdNode | null) {
+  return Boolean(node && node.type === 'page' && node.needsPolish && node.status !== 'done')
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 export function MapPage() {
@@ -53,6 +68,11 @@ export function MapPage() {
   const updateDecompositionStep = useAppStore((s) => s.updateDecompositionStep)
   const resetDecomposition = useAppStore((s) => s.resetDecomposition)
   const setPrdTree = useAppStore((s) => s.setPrdTree)
+  const createPageNode = useAppStore((s) => s.createPageNode)
+  const updateNodeContent = useAppStore((s) => s.updateNodeContent)
+  const deleteNode = useAppStore((s) => s.deleteNode)
+  const applyMapAdjustmentOperations = useAppStore((s) => s.applyMapAdjustmentOperations)
+  const setNodeDocPath = useAppStore((s) => s.setNodeDocPath)
   const setSelectedNodeId = useAppStore((s) => s.setSelectedNodeId)
   const selectedNodeId = useAppStore((s) => s.selectedNodeId)
 
@@ -112,7 +132,7 @@ export function MapPage() {
           appendDecompositionStep({ label: '分析完成', status: 'complete' })
 
           if (data.nodes.length === 0) {
-            setDecompError('分析完成但没有生成任何文档包节点，请检查 PRD 是否包含可读取文本。')
+            setDecompError('分析完成但没有生成任何导图节点，请检查 PRD 是否包含可读取文本。')
             setDecompositionStatus('error')
             setStage('error')
             return
@@ -189,23 +209,49 @@ export function MapPage() {
     const canExport = Object.values(prdTree).length > 0
       && Object.values(prdTree)
           .filter(n => n.children.length === 0)
-          .every(n => n.status === 'done' || !n.needsPolish)
+          .every(n => n.status === 'done')
 
     const handleExport = async () => {
       setIsExporting(true)
       setExportError(null)
       try {
-        const blob = await exportSpec(settings.proxyBaseUrl, prdTree)
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = 'AI接力文档包.zip'
-        a.click()
-        URL.revokeObjectURL(url)
+        const result = await exportSpecFolder(settings.proxyBaseUrl, prdTree)
+        for (const doc of result.documents) {
+          setNodeDocPath(doc.nodeId, doc.docPath)
+        }
+        alert(`已导出页面级 spec 文件夹：${result.exportDir}`)
       } catch (err) {
         setExportError(err instanceof Error ? err.message : '导出失败，请重试')
       } finally {
         setIsExporting(false)
+      }
+    }
+
+    const handleCreatePage = () => {
+      const title = window.prompt('请输入页面名称，例如：主界面、规则页、排行榜')
+      if (!title?.trim()) return
+      createPageNode({ title, parentId: selectedNode?.id ?? null })
+    }
+
+    const handleDeleteNode = (node: PrdNode) => {
+      if (window.confirm(`确定删除「${node.label}」及其子节点吗？`)) {
+        deleteNode(node.id)
+      }
+    }
+
+    const handleOpenDoc = async (node: PrdNode) => {
+      try {
+        const blob = await exportNodeMarkdown(settings.proxyBaseUrl, prdTree, node.id)
+        const url = URL.createObjectURL(blob)
+        const opened = window.open(url, '_blank')
+        if (opened) {
+          window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+        } else {
+          URL.revokeObjectURL(url)
+          downloadBlob(blob, node.docPath?.split('/').pop() ?? `${node.id}.md`)
+        }
+      } catch (err) {
+        setExportError(err instanceof Error ? err.message : '打开文档失败')
       }
     }
 
@@ -242,18 +288,42 @@ export function MapPage() {
           </div>
         )}
         <main className="flex-1 flex overflow-hidden">
-          <TreeCanvas
+          <MapAdjustmentPanel
+            baseUrl={settings.proxyBaseUrl}
             tree={prdTree}
-            selectedNodeId={selectedNodeId}
-            onNodeClick={(id) => setSelectedNodeId(id)}
-            onNodeDoubleClick={(id) => {
-              setSelectedNodeId(null)
-              navigate('/forge/' + id)
-            }}
+            onApply={applyMapAdjustmentOperations}
           />
+          <div className="flex min-w-0 flex-1 flex-col">
+            <div className="flex items-center justify-between border-b border-outline-variant bg-surface-container-low px-md py-sm">
+              <div className="text-label-md text-on-surface-variant">页面级导图：单击查看，双击打磨</div>
+              <button
+                onClick={handleCreatePage}
+                className="rounded-lg bg-primary px-md py-sm text-label-md text-on-primary hover:bg-primary/90"
+              >
+                新建页面
+              </button>
+            </div>
+            <TreeCanvas
+              tree={prdTree}
+              selectedNodeId={selectedNodeId}
+              onNodeClick={(id) => setSelectedNodeId(id)}
+              onNodeDoubleClick={(id) => {
+                const node = prdTree[id]
+                if (!canForgeNode(node)) {
+                  setSelectedNodeId(id)
+                  return
+                }
+                setSelectedNodeId(null)
+                navigate('/forge/' + id)
+              }}
+            />
+          </div>
           <PreviewDrawer
             node={selectedNode}
             onClose={() => setSelectedNodeId(null)}
+            onDelete={handleDeleteNode}
+            onOpenDoc={handleOpenDoc}
+            onUpdateContent={updateNodeContent}
           />
         </main>
       </div>

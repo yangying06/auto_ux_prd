@@ -13,8 +13,8 @@ export function DecompProgress({ steps, nodeCount, error }: DecompProgressProps)
   const statusText = error
     ? 'PRD 分析失败'
     : nodeCount > 0
-      ? `已生成 ${nodeCount} 个文档节点`
-      : activeStep?.label ?? '等待 AI 返回首批文档包'
+      ? `已生成 ${nodeCount} 个导图节点`
+      : activeStep?.label ?? '正在生成导图节点'
 
   return (
     <>
@@ -23,7 +23,7 @@ export function DecompProgress({ steps, nodeCount, error }: DecompProgressProps)
         <span className={`w-2 h-2 rounded-full flex-shrink-0 ${error ? 'bg-error' : 'pulse-dot bg-secondary-container'}`} />
         <span className="min-w-0 flex-1 text-headline-sm text-on-surface">{statusText}</span>
         <span className="shrink-0 text-label-md text-on-surface-variant">
-          {nodeCount > 0 ? `${nodeCount} 个文档节点` : ''}
+          {nodeCount > 0 ? `${nodeCount} 个导图节点` : ''}
         </span>
       </div>
 
@@ -81,7 +81,7 @@ export function DecompProgress({ steps, nodeCount, error }: DecompProgressProps)
       <div className="flex items-center gap-1 border-t border-outline-variant pt-2 mt-4 w-full">
         <span className="material-symbols-outlined text-tertiary" style={{ fontSize: '14px' }}>account_tree</span>
         <span className="text-code-sm text-on-surface-variant">
-          {nodeCount > 0 ? `已发现 ${nodeCount} 个文档节点` : 'AI 尚未返回可展示的文档包节点'}
+          {nodeCount > 0 ? `已发现 ${nodeCount} 个导图节点` : 'AI 正在建立可展示的导图节点'}
         </span>
       </div>
     </>

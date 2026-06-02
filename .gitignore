@@ -20,6 +20,12 @@ Thumbs.db
 # Logs
 *.log
 
+# Local Claude/GSD scratch data
+.claude/worktrees/
+.planning/debug/
+progress.txt
+archive/
+
 # TypeScript graph cache
 .ts-graph/
 

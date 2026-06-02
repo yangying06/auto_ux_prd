@@ -5,7 +5,7 @@ milestone_name: milestone
 status: Milestone complete
 stopped_at: Completed 04-02-PLAN.md
 last_updated: "2026-05-29T03:33:46.731Z"
-last_activity: 2026-06-01 - Completed quick task 260601-ofu: Ralph 新需求更新 prd.json
+last_activity: 2026-06-02 - Completed quick task 260602-pyi: 检查本地改动，忽略仅本地内容，提交并推送到 GitHub
 progress:
   total_phases: 4
   completed_phases: 4
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-05-26)
 Phase: 04
 Plan: Not started
 Phase: 04 (export) — NEXT
-Last activity: 2026-06-01 - Completed quick task 260601-mf8: 打磨界面改进
+Last activity: 2026-06-02 - Completed quick task 260602-pyi: 检查本地改动，忽略仅本地内容，提交并推送到 GitHub
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -112,6 +112,8 @@ Recent decisions affecting current work:
 - [Quick 260528-k8w]: 顶层拆分只做轻量目录规划，分支拆分按 `extractedFrom` 截取相关章节；AI 空结果先重试，分支进度聚合展示，避免重复步骤和整单失败
 - [Quick 260529-fty]: PRD 拆分流程进入 decomposing 后直接展示动态解析画布；轮询返回的完整节点集直接刷新导图；完成后跳转 map 而不再经过 TreeSummary 确认页；节点卡片使用内嵌 Markdown 预览。
 - [Quick 260529-o5r]: Tauri 启动窗口最大化；Deep Forge 打磨界面保持左侧上下文/中间对话/右侧视觉舱结构，但右侧默认进入原型预览并扩大为主工作区，更接近 abi-screenshot-to-code 的 preview-first 编辑布局。
+- [Quick 260602-h4b]: 原型历史版本最多保留 4 个；清空历史只清空 prototypeHistory，保留当前 prototypeHtml/当前变体预览。
+- [Quick 260602-nb6]: MVC 拆分必须按原文证据维度分类；用户补充/上传资料只能生成待确认节点建议，应用前不得改动导图。
 
 ### Pending Todos
 
@@ -146,6 +148,13 @@ None yet.
 | 260601-lld | 修复原型预览 750×1624 沙盒缩放适配 | 2026-06-01 | 未提交（主会话交付） | [260601-lld-750-1624-sandbox-iframe-prompt-npm-run-t](./quick/260601-lld-750-1624-sandbox-iframe-prompt-npm-run-t/) |
 | 260601-mf8 | 打磨界面改进：清空聊天、Markdown 回复、迭代入文档、参考图持久化 | 2026-06-01 | worktree-agent-a4785e34e58e8e992 | [260601-mf8-1-2-md-3-4](./quick/260601-mf8-1-2-md-3-4/) |
 | 260601-ofu | Ralph 新需求更新 prd.json：页面级思维导图拆分与打磨 | 2026-06-01 | 未提交（主会话交付） | [260601-ofu-ralph-prd-json-branchname-prd-json-progr](./quick/260601-ofu-ralph-prd-json-branchname-prd-json-progr/) |
+| 260601-pgg | Ralph US-001..US-006 页面级导图打磨执行 | 2026-06-01 | 未提交（主会话交付） | [260601-pgg-ralph-story-us-001-us-006-prdnode-store-](./quick/260601-pgg-ralph-story-us-001-us-006-prdnode-store-/) |
+| 260601-tx6 | 大 PRD 无感分段分析支持 | 2026-06-01 | 未提交（主会话交付） | [260601-tx6-prd-mdtext-30kb-prd-decomposel1-markdown](./quick/260601-tx6-prd-mdtext-30kb-prd-decomposel1-markdown/) |
+| 260602-f4c | PRD 原文目录与 MVC 拆解策略修正 | 2026-06-02 | 未提交（主会话交付） | [260602-f4c-prd-mvc-model-ctrl-view-mvc-mvc](./quick/260602-f4c-prd-mvc-model-ctrl-view-mvc-mvc/) |
+| 260602-h3g | 页面打磨、内容编辑与单节点导出调整 | 2026-06-02 | 未提交（主会话交付） | [260602-h3g-forge-mvc-ai-content-typescript](./quick/260602-h3g-forge-mvc-ai-content-typescript/) |
+| 260602-h4b | 原型历史保留 4 个并支持清空历史 | 2026-06-02 | worktree-agent-a08ff778eed360691 | [260602-h4b-4](./quick/260602-h4b-4/) |
+| 260602-nb6 | 优化 PRD 导图 MVC 拆分和聊天补充节点建议 | 2026-06-02 | 未提交（主会话交付） | [260602-nb6-prd-mvc-model-ctrl-view-ai](./quick/260602-nb6-prd-mvc-model-ctrl-view-ai/) |
+| 260602-pyi | 检查本地改动，忽略仅本地内容，提交并推送到 GitHub | 2026-06-02 | 待提交 | [260602-pyi-github](./quick/260602-pyi-github/) |
 
 ## Session Continuity
 

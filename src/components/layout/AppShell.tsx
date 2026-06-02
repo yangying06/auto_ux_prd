@@ -26,6 +26,7 @@ export function AppShell({ onBack, onConfirm }: { onBack?: () => void; onConfirm
   const prototypeHistory = useAppStore((state) => state.prototypeHistory)
   const setPrototypeHtml = useAppStore((state) => state.setPrototypeHtml)
   const restorePrototypeVersion = useAppStore((state) => state.restorePrototypeVersion)
+  const clearPrototypeHistory = useAppStore((state) => state.clearPrototypeHistory)
   const resetSession = useAppStore((state) => state.resetSession)
   const resetRequirement = useAppStore((state) => state.resetRequirement)
 
@@ -97,6 +98,7 @@ export function AppShell({ onBack, onConfirm }: { onBack?: () => void; onConfirm
         isExportingPrompt={isExportingPrompt}
         onGeneratePrototype={handleGeneratePrototype}
         onRestorePrototype={restorePrototypeVersion}
+        onClearPrototypeHistory={clearPrototypeHistory}
         onExportPrompt={handleExportPrompt}
         onOpenBolt={handleOpenBolt}
       />

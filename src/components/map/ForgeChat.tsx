@@ -4,6 +4,8 @@ import { normalizePrototypeHtml } from '../../lib/prototypeUtils'
 import type { PrototypeVersion } from '../../store/appStore'
 import type { ChatMessage, ContentBlock, ImageBlock } from '../../types/chat'
 import type { PrototypeVariant } from '../../types/prototypeVariant'
+import type { PrdNodeOperationSuggestion } from '../../types/prdNode'
+import { NodeOperationReview } from './NodeOperationReview'
 import { PrototypeBoard } from '../state/PrototypeBoard'
 import { PrototypeVariants } from '../state/PrototypeVariants'
 
@@ -16,11 +18,16 @@ interface ForgeChatProps {
   prototypeVariants: PrototypeVariant[]
   selectedVariantIndex: number
   isGeneratingPrototype: boolean
+  nodeOperationSuggestions: PrdNodeOperationSuggestion[]
   onSend: (content: ChatMessage['content']) => void | Promise<void>
+  onSuggestNodeOperations: (input: { supplementText: string; sources: SupplementSource[] }) => void | Promise<void>
+  onApplyNodeOperationSuggestion: (suggestionId: string) => void
+  onDismissNodeOperationSuggestion: (suggestionId: string) => void
   onConfirm: () => void
   onBack: () => void
   onGeneratePrototype: (instruction?: string) => void | Promise<void>
   onRestorePrototype: (id: string) => void
+  onClearPrototypeHistory: () => void
   onSelectVariant: (index: number) => void
   onClearChat: () => void
 }
@@ -35,6 +42,13 @@ interface ImageAttachment {
   mediaType: ImageBlock['source']['media_type']
   data: string
   previewUrl: string
+}
+
+interface SupplementSource {
+  id: string
+  name: string
+  sourceKind: 'upload'
+  text: string
 }
 
 interface VisualImage {
@@ -342,11 +356,16 @@ export function ForgeChat({
   prototypeVariants,
   selectedVariantIndex,
   isGeneratingPrototype,
+  nodeOperationSuggestions,
   onSend,
+  onSuggestNodeOperations,
+  onApplyNodeOperationSuggestion,
+  onDismissNodeOperationSuggestion,
   onConfirm,
   onBack,
   onGeneratePrototype,
   onRestorePrototype,
+  onClearPrototypeHistory,
   onSelectVariant,
   onClearChat,
 }: ForgeChatProps) {
@@ -355,6 +374,8 @@ export function ForgeChat({
   const [error, setError] = useState<string | null>(null)
   const [referenceRole, setReferenceRole] = useState<ReferenceRole>('reference')
   const [attachments, setAttachments] = useState<ImageAttachment[]>([])
+  const [supplementSources, setSupplementSources] = useState<SupplementSource[]>([])
+  const [isSuggesting, setIsSuggesting] = useState(false)
   const [visualTab, setVisualTab] = useState<VisualTab>('prototype')
   const [variantView, setVariantView] = useState<'grid' | 'single'>('single')
 
@@ -373,6 +394,7 @@ export function ForgeChat({
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const supplementInputRef = useRef<HTMLInputElement>(null)
 
   const sentImages = useMemo(() => extractSentImages(messages), [messages])
   const visualImages = useMemo<VisualImage[]>(() => [
@@ -439,6 +461,31 @@ export function ForgeChat({
     event.target.value = ''
   }
 
+  function handleSupplementFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? [])
+    files.forEach((file) => {
+      if (!/\.(md|txt|json)$/iu.test(file.name)) {
+        setError('补充节点资料只支持 .md、.txt、.json。')
+        return
+      }
+      const reader = new FileReader()
+      reader.onload = (e) => {
+        const text = String(e.target?.result ?? '').trim()
+        if (!text) return
+        setSupplementSources((current) => [
+          ...current,
+          { id: `supplement-${Date.now()}-${file.name}-${current.length}`, name: file.name, sourceKind: 'upload', text },
+        ])
+      }
+      reader.readAsText(file)
+    })
+    event.target.value = ''
+  }
+
+  function removeSupplementSource(id: string) {
+    setSupplementSources((current) => current.filter((source) => source.id !== id))
+  }
+
   function buildMessageContent(text: string): ChatMessage['content'] {
     if (attachments.length === 0) return text
 
@@ -480,6 +527,25 @@ export function ForgeChat({
       setError(err instanceof Error ? err.message : '发送失败，请重试')
     } finally {
       setIsSending(false)
+    }
+  }
+
+  async function handleSuggestNodeOperations() {
+    const text = draft.trim()
+    if ((!text && supplementSources.length === 0) || isSuggesting) return
+    setError(null)
+    setIsSuggesting(true)
+    try {
+      await onSuggestNodeOperations({
+        supplementText: text,
+        sources: supplementSources,
+      })
+      setDraft('')
+      setSupplementSources([])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '生成节点建议失败，请重试')
+    } finally {
+      setIsSuggesting(false)
     }
   }
 
@@ -548,6 +614,16 @@ export function ForgeChat({
         </div>
 
         <div className="shrink-0 border-t border-outline-variant bg-surface px-lg py-md">
+          {nodeOperationSuggestions.length > 0 ? (
+            <div className="mb-sm">
+              <NodeOperationReview
+                suggestions={nodeOperationSuggestions}
+                onApply={onApplyNodeOperationSuggestion}
+                onDismiss={onDismissNodeOperationSuggestion}
+              />
+            </div>
+          ) : null}
+
           {attachments.length > 0 ? (
             <div className="mb-sm flex gap-xs overflow-x-auto rounded-lg border border-secondary/30 bg-secondary/10 p-xs">
               {attachments.map((item) => (
@@ -561,6 +637,27 @@ export function ForgeChat({
                     onClick={() => removeAttachment(item.id)}
                     className="rounded px-xs font-mono text-code-sm text-on-surface-variant hover:bg-surface-container-high hover:text-error"
                     title="移除图片"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          {supplementSources.length > 0 ? (
+            <div className="mb-sm flex gap-xs overflow-x-auto rounded-lg border border-primary/30 bg-primary/10 p-xs">
+              {supplementSources.map((source) => (
+                <div key={source.id} className="flex max-w-[220px] shrink-0 items-center gap-xs rounded bg-surface-container p-xs">
+                  <span className="material-symbols-outlined text-primary" style={{ fontSize: '16px' }}>description</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-mono text-[10px] text-primary">上传资料</div>
+                    <div className="truncate font-mono text-[10px] text-on-surface-variant">{source.name}</div>
+                  </div>
+                  <button
+                    onClick={() => removeSupplementSource(source.id)}
+                    className="rounded px-xs font-mono text-code-sm text-on-surface-variant hover:bg-surface-container-high hover:text-error"
+                    title="移除资料"
                   >
                     ×
                   </button>
@@ -606,6 +703,32 @@ export function ForgeChat({
                     {prompt}
                   </button>
                 ))}
+                <input
+                  ref={supplementInputRef}
+                  type="file"
+                  accept=".md,.txt,.json,application/json,text/markdown,text/plain"
+                  multiple
+                  className="hidden"
+                  onChange={handleSupplementFileChange}
+                />
+                <button
+                  onClick={() => supplementInputRef.current?.click()}
+                  className="flex min-h-[36px] items-center gap-xs rounded-lg border border-outline-variant bg-surface px-md py-sm text-label-md text-on-surface-variant transition-colors hover:border-primary hover:text-primary"
+                  title="上传补充资料生成节点建议"
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>attach_file</span>
+                  资料
+                </button>
+                <button
+                  onClick={() => void handleSuggestNodeOperations()}
+                  disabled={(!draft.trim() && supplementSources.length === 0) || isSuggesting}
+                  className="flex min-h-[36px] items-center gap-xs rounded-lg border border-primary bg-primary-container px-md py-sm text-label-md font-medium text-on-primary-container transition-opacity hover:opacity-90 disabled:opacity-40"
+                >
+                  <span className={['material-symbols-outlined', isSuggesting ? 'animate-spin' : ''].join(' ')} style={{ fontSize: '16px' }}>
+                    {isSuggesting ? 'sync' : 'add_node'}
+                  </span>
+                  生成节点建议
+                </button>
                 <button
                   onClick={onConfirm}
                   className={[
@@ -783,6 +906,7 @@ export function ForgeChat({
                   isLoading={isGeneratingPrototype}
                   onIterate={(instruction) => void handleGeneratePrototype(instruction)}
                   onRestore={onRestorePrototype}
+                  onClearHistory={onClearPrototypeHistory}
                 />
               </div>
             )}

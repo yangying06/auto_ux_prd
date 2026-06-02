@@ -63,9 +63,9 @@ function buildChildrenMap(tree: PrdTree) {
 }
 
 function layerLabel(depth: number) {
-  if (depth === 0) return 'PRD'
-  if (depth === 1) return '文档目录'
-  if (depth === 2) return '文档包'
+  if (depth === 0) return '原文目录'
+  if (depth === 1) return '页面节点'
+  if (depth === 2) return 'MVC 文档'
   if (depth === 3) return '细分文档'
   return `拆分层 ${depth - 2}`
 }

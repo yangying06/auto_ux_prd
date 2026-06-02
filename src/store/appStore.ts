@@ -3,7 +3,7 @@ import { persist } from 'zustand/middleware'
 import { defaultSettings } from '../data/defaultSettings'
 import type { AppSettings, ChatMessage, RagSearchResult } from '../types/chat'
 import type { UXRequirementState } from '../types/uxRequirement'
-import type { DecompositionStatus, DecompositionStep, PrdNode, PrdTree } from '../types/prdNode'
+import type { CreatePageNodeInput, DecompositionStatus, DecompositionStep, MapAdjustmentOperation, PrdNode, PrdNodeOperationSuggestion, PrdNodeReference, PrdTree, UpdateNodePatch } from '../types/prdNode'
 import type { PrototypeVariant } from '../types/prototypeVariant'
 
 const emptyRequirement: UXRequirementState = {
@@ -21,7 +21,7 @@ const emptyRequirement: UXRequirementState = {
 
 const STORAGE_KEY = 'gameux-promptforge-state'
 const STORAGE_VERSION = 7
-const PROTOTYPE_HISTORY_LIMIT = 8
+const PROTOTYPE_HISTORY_LIMIT = 4
 
 export interface PrototypeVersion {
   id: string
@@ -47,6 +47,78 @@ function normalizeOptionalText(value: string | null | undefined) {
   if (typeof value !== 'string') return null
   const trimmed = value.trim()
   return trimmed.length ? trimmed : null
+}
+
+function normalizeReferences(value: PrdNodeReference[] | null | undefined): PrdNodeReference[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((reference) => ({
+      targetNodeId: normalizeOptionalText(reference.targetNodeId),
+      label: normalizeOptionalText(reference.label) ?? '跨页面引用',
+      reason: normalizeOptionalText(reference.reason),
+      sourceNodeId: normalizeOptionalText(reference.sourceNodeId),
+    }))
+    .filter((reference) => reference.targetNodeId || reference.label)
+}
+
+function makePageNodeId(tree: PrdTree | null, title: string) {
+  const slug = title
+    .trim()
+    .replace(/[\s/\\]+/g, '-')
+    .replace(/[<>:"|?*\x00-\x1F]/g, '')
+    .slice(0, 24)
+  const base = `PAGE-${slug || Date.now().toString(36)}`
+  let id = base
+  let index = 2
+  while (tree?.[id]) {
+    id = `${base}-${index}`
+    index += 1
+  }
+  return id
+}
+
+function collectDescendantIds(tree: PrdTree, nodeId: string) {
+  const ids = new Set<string>()
+  const visit = (id: string) => {
+    if (ids.has(id)) return
+    ids.add(id)
+    for (const childId of tree[id]?.children ?? []) visit(childId)
+  }
+  visit(nodeId)
+  return ids
+}
+
+function sanitizePatch(patch: UpdateNodePatch): UpdateNodePatch {
+  return {
+    ...patch,
+    label: patch.label?.trim() || undefined,
+    summary: patch.summary?.trim() || undefined,
+    content: patch.content?.trim() || undefined,
+    docPath: patch.docPath === undefined ? undefined : normalizeOptionalText(patch.docPath),
+    references: patch.references ? normalizeReferences(patch.references) : undefined,
+    techNotes: patch.techNotes === undefined ? undefined : normalizeOptionalText(patch.techNotes),
+    handoffGoal: patch.handoffGoal === undefined ? undefined : normalizeOptionalText(patch.handoffGoal),
+    qualityGate: patch.qualityGate === undefined ? undefined : normalizeOptionalText(patch.qualityGate),
+    sourceKind: patch.sourceKind,
+    evidenceRefs: patch.evidenceRefs,
+  }
+}
+
+function makeSuggestionNodeId(tree: PrdTree, suggestion: PrdNodeOperationSuggestion) {
+  const label = suggestion.patch.label ?? '补充节点'
+  const slug = label
+    .trim()
+    .replace(/[\s/\\]+/g, '-')
+    .replace(/[<>:"|?*\x00-\x1F]/g, '')
+    .slice(0, 24)
+  const base = `${suggestion.parentId ?? 'NODE'}-${slug || Date.now().toString(36)}`.slice(0, 48)
+  let id = base
+  let index = 2
+  while (tree[id]) {
+    id = `${base}-${index}`
+    index += 1
+  }
+  return id
 }
 
 function persistableMessage(message: ChatMessage): ChatMessage {
@@ -115,7 +187,18 @@ function rebuildPrdTreeLinks(tree: PrdTree): PrdTree {
 function normalizePersistedPrdTree(value: unknown): PrdTree | null {
   if (!isRecord(value)) return null
   if (persistedTreeHasLocalTemplates(value)) return null
-  return rebuildPrdTreeLinks(value as PrdTree)
+  const normalized = Object.fromEntries(
+    Object.entries(value).map(([id, rawNode]) => {
+      const node = rawNode as PrdNode
+      return [id, {
+        ...node,
+        type: node.type ?? 'feature',
+        status: node.status ?? 'pending',
+        references: normalizeReferences(node.references),
+      }]
+    })
+  ) as PrdTree
+  return rebuildPrdTreeLinks(normalized)
 }
 
 export const initialMessages: ChatMessage[] = [
@@ -154,8 +237,18 @@ interface AppStoreState {
   decompositionStatus: DecompositionStatus
   decompositionSteps: DecompositionStep[]
   nodeChats: Record<string, ChatMessage[]>
+  nodeOperationSuggestions: Record<string, PrdNodeOperationSuggestion[]>
+  createPageNode: (input: CreatePageNodeInput) => string
+  updateNode: (nodeId: string, patch: UpdateNodePatch) => void
+  updateNodeContent: (nodeId: string, content: string) => void
+  deleteNode: (nodeId: string) => void
+  applyMapAdjustmentOperations: (operations: MapAdjustmentOperation[]) => void
+  setNodeDocPath: (nodeId: string, docPath: string | null) => void
   appendNodeMessage: (nodeId: string, msg: ChatMessage) => void
   clearNodeChat: (nodeId: string) => void
+  setNodeOperationSuggestions: (scopeId: string, suggestions: PrdNodeOperationSuggestion[]) => void
+  dismissNodeOperationSuggestion: (scopeId: string, suggestionId: string) => void
+  applyNodeOperationSuggestion: (scopeId: string, suggestionId: string) => void
   applyNodePolish: (nodeId: string, patch: NodePolishPatch) => void
   updateNodeStatus: (nodeId: string, status: PrdNode['status']) => void
   applyRequirementPatch: (patch: Partial<UXRequirementState>) => void
@@ -197,6 +290,151 @@ export const useAppStore = create<AppStoreState>()(
       decompositionStatus: 'idle',
       decompositionSteps: [],
       nodeChats: {},
+      nodeOperationSuggestions: {},
+      createPageNode: (input) => {
+        const title = input.title.trim()
+        if (!title) return ''
+        const state = useAppStore.getState()
+        const tree = state.prdTree ?? {}
+        const parent = input.parentId ? tree[input.parentId] : null
+        const siblings = Object.values(tree).filter((node) => node.parentId === (parent?.id ?? null))
+        const id = makePageNodeId(tree, title)
+        const node: PrdNode = {
+          id,
+          parentId: parent?.id ?? null,
+          label: title,
+          summary: input.summary?.trim() || `${title} 页面待打磨。`,
+          content: input.content?.trim() || `## 页面内容\n\n${title} 页面尚未打磨，请在右侧详情或 Deep Forge 中补齐交互规则、状态和跳转关系。`,
+          type: 'page',
+          status: 'pending_refine',
+          level: parent ? parent.level + 1 : 1,
+          order: siblings.length,
+          needsPolish: true,
+          extractedFrom: null,
+          techNotes: null,
+          children: [],
+          docPath: `pages/${id}.md`,
+          audience: 'client',
+          handoffGoal: `打磨 ${title} 页面的交互设计规格。`,
+          qualityGate: '页面目标、入口、UI 元素、状态、跳转关系和验收点清晰。',
+          references: [],
+        }
+        set({ prdTree: rebuildPrdTreeLinks({ ...tree, [id]: node }), selectedNodeId: id })
+        return id
+      },
+      updateNode: (nodeId, patch) =>
+        set((state) => {
+          const node = state.prdTree?.[nodeId]
+          if (!node || !state.prdTree) return state
+          const nextPatch = sanitizePatch(patch)
+          return {
+            prdTree: rebuildPrdTreeLinks({
+              ...state.prdTree,
+              [nodeId]: { ...node, ...nextPatch },
+            }),
+          }
+        }),
+      updateNodeContent: (nodeId, content) =>
+        set((state) => {
+          const node = state.prdTree?.[nodeId]
+          if (!node || !state.prdTree) return state
+          return { prdTree: { ...state.prdTree, [nodeId]: { ...node, content } } }
+        }),
+      deleteNode: (nodeId) =>
+        set((state) => {
+          if (!state.prdTree?.[nodeId]) return state
+          const removedIds = collectDescendantIds(state.prdTree, nodeId)
+          const next = Object.fromEntries(
+            Object.entries(state.prdTree)
+              .filter(([id]) => !removedIds.has(id))
+              .map(([id, node]) => [id, {
+                ...node,
+                references: normalizeReferences(node.references).filter((reference) => !reference.targetNodeId || !removedIds.has(reference.targetNodeId)),
+              }])
+          ) as PrdTree
+          return {
+            prdTree: rebuildPrdTreeLinks(next),
+            selectedNodeId: removedIds.has(state.selectedNodeId ?? '') ? null : state.selectedNodeId,
+          }
+        }),
+      applyMapAdjustmentOperations: (operations) =>
+        set((state) => {
+          let tree = state.prdTree ?? {}
+          let selectedNodeId = state.selectedNodeId
+          for (const operation of operations) {
+            if (operation.type === 'create_node') {
+              const title = operation.title.trim()
+              if (!title) continue
+              const parent = operation.parentId ? tree[operation.parentId] : null
+              const siblings = Object.values(tree).filter((node) => node.parentId === (parent?.id ?? null))
+              const id = makePageNodeId(tree, title)
+              tree = {
+                ...tree,
+                [id]: {
+                  id,
+                  parentId: parent?.id ?? null,
+                  label: title,
+                  summary: operation.summary?.trim() || `${title} 页面待打磨。`,
+                  content: operation.content?.trim() || `## 页面内容\n\n${title} 页面尚未打磨。`,
+                  type: 'page',
+                  status: 'pending_refine',
+                  level: parent ? parent.level + 1 : 1,
+                  order: siblings.length,
+                  needsPolish: true,
+                  extractedFrom: null,
+                  techNotes: null,
+                  children: [],
+                  docPath: `pages/${id}.md`,
+                  audience: 'client',
+                  handoffGoal: `打磨 ${title} 页面的交互设计规格。`,
+                  qualityGate: '页面目标、入口、UI 元素、状态、跳转关系和验收点清晰。',
+                  references: [],
+                },
+              }
+              selectedNodeId = id
+            } else if (operation.type === 'delete_node') {
+              if (!tree[operation.nodeId]) continue
+              const removedIds = collectDescendantIds(tree, operation.nodeId)
+              tree = Object.fromEntries(Object.entries(tree).filter(([id]) => !removedIds.has(id))) as PrdTree
+              if (selectedNodeId && removedIds.has(selectedNodeId)) selectedNodeId = null
+            } else if (operation.type === 'update_node') {
+              const node = tree[operation.nodeId]
+              if (!node) continue
+              tree = { ...tree, [operation.nodeId]: { ...node, ...sanitizePatch(operation.patch) } }
+            } else if (operation.type === 'move_content') {
+              const from = tree[operation.fromNodeId]
+              const to = tree[operation.toNodeId]
+              const content = operation.content.trim()
+              if (!from || !to || !content) continue
+              tree = {
+                ...tree,
+                [operation.fromNodeId]: { ...from, content: from.content.replace(content, '').trim() || from.content },
+                [operation.toNodeId]: { ...to, content: `${to.content.trim()}\n\n${content}`.trim(), status: to.status === 'done' ? 'done' : 'pending_refine' },
+              }
+            } else if (operation.type === 'add_reference') {
+              const source = tree[operation.sourceNodeId]
+              const target = tree[operation.targetNodeId]
+              if (!source || !target) continue
+              tree = {
+                ...tree,
+                [operation.sourceNodeId]: {
+                  ...source,
+                  references: normalizeReferences([
+                    ...(source.references ?? []),
+                    { targetNodeId: operation.targetNodeId, label: operation.label, reason: operation.reason ?? null, sourceNodeId: operation.sourceNodeId },
+                  ]),
+                },
+              }
+            }
+          }
+          return { prdTree: rebuildPrdTreeLinks(tree), selectedNodeId }
+        }),
+      setNodeDocPath: (nodeId, docPath) =>
+        set((state) => {
+          const node = state.prdTree?.[nodeId]
+          if (!node || !state.prdTree) return state
+          return { prdTree: { ...state.prdTree, [nodeId]: { ...node, docPath } } }
+        }),
       appendNodeMessage: (nodeId, msg) =>
         set((state) => ({
           nodeChats: {
@@ -208,6 +446,70 @@ export const useAppStore = create<AppStoreState>()(
         set((state) => {
           const { [nodeId]: _, ...rest } = state.nodeChats
           return { nodeChats: rest }
+        }),
+      setNodeOperationSuggestions: (scopeId, suggestions) =>
+        set((state) => ({
+          nodeOperationSuggestions: {
+            ...state.nodeOperationSuggestions,
+            [scopeId]: suggestions.map((suggestion) => ({ ...suggestion, status: 'pending' })),
+          },
+        })),
+      dismissNodeOperationSuggestion: (scopeId, suggestionId) =>
+        set((state) => ({
+          nodeOperationSuggestions: {
+            ...state.nodeOperationSuggestions,
+            [scopeId]: (state.nodeOperationSuggestions[scopeId] ?? []).filter((suggestion) => suggestion.id !== suggestionId),
+          },
+        })),
+      applyNodeOperationSuggestion: (scopeId, suggestionId) =>
+        set((state) => {
+          const suggestion = (state.nodeOperationSuggestions[scopeId] ?? []).find((item) => item.id === suggestionId)
+          if (!suggestion || !state.prdTree) return state
+          let tree = state.prdTree
+          if (suggestion.operation === 'update') {
+            const targetId = suggestion.targetNodeId ?? ''
+            const node = tree[targetId]
+            if (!node) return state
+            tree = { ...tree, [targetId]: { ...node, ...sanitizePatch(suggestion.patch as UpdateNodePatch) } }
+          } else {
+            const parent = suggestion.parentId ? tree[suggestion.parentId] : null
+            const siblings = Object.values(tree).filter((node) => node.parentId === (parent?.id ?? null))
+            const id = suggestion.targetNodeId && !tree[suggestion.targetNodeId]
+              ? suggestion.targetNodeId
+              : makeSuggestionNodeId(tree, suggestion)
+            tree = {
+              ...tree,
+              [id]: {
+                id,
+                parentId: parent?.id ?? null,
+                label: suggestion.patch.label ?? '补充节点',
+                summary: suggestion.patch.summary ?? '基于补充资料生成的待打磨节点。',
+                content: suggestion.patch.content ?? '## 来源\n用户补充或上传资料。',
+                type: suggestion.patch.type ?? 'feature',
+                status: 'pending',
+                level: parent ? parent.level + 1 : 1,
+                order: siblings.length,
+                needsPolish: suggestion.patch.needsPolish ?? true,
+                extractedFrom: null,
+                techNotes: suggestion.patch.techNotes ?? null,
+                children: [],
+                docPath: suggestion.patch.docPath ?? null,
+                audience: suggestion.patch.audience ?? null,
+                handoffGoal: suggestion.patch.handoffGoal ?? null,
+                qualityGate: suggestion.patch.qualityGate ?? null,
+                references: [],
+                sourceKind: suggestion.patch.sourceKind,
+                evidenceRefs: suggestion.patch.evidenceRefs ?? suggestion.evidenceRefs,
+              },
+            }
+          }
+          return {
+            prdTree: rebuildPrdTreeLinks(tree),
+            nodeOperationSuggestions: {
+              ...state.nodeOperationSuggestions,
+              [scopeId]: (state.nodeOperationSuggestions[scopeId] ?? []).filter((item) => item.id !== suggestionId),
+            },
+          }
         }),
       applyNodePolish: (nodeId, patch) =>
         set((state) => {
@@ -233,10 +535,15 @@ export const useAppStore = create<AppStoreState>()(
       updateNodeStatus: (nodeId, status) =>
         set((state) => {
           if (!state.prdTree?.[nodeId]) return state
+          const node = state.prdTree[nodeId]
           return {
             prdTree: {
               ...state.prdTree,
-              [nodeId]: { ...state.prdTree[nodeId], status },
+              [nodeId]: {
+                ...node,
+                status,
+                needsPolish: status === 'done' ? false : node.needsPolish,
+              },
             },
           }
         }),
@@ -282,7 +589,7 @@ export const useAppStore = create<AppStoreState>()(
           if (!version) return state
           return { prototypeHtml: version.html }
         }),
-      clearPrototypeHistory: () => set({ prototypeHtml: null, prototypeHistory: [] }),
+      clearPrototypeHistory: () => set({ prototypeHistory: [] }),
       setPrototypeVariants: (variants) => set({ prototypeVariants: variants, selectedVariantIndex: -1 }),
       updatePrototypeVariant: (index, patch) =>
         set((state) => ({
@@ -317,7 +624,7 @@ export const useAppStore = create<AppStoreState>()(
       mergePartialTree: (nodes) =>
         set((state) => ({ prdTree: rebuildPrdTreeLinks({ ...(state.prdTree ?? {}), ...nodes }) })),
       resetDecomposition: () =>
-        set({ prdTree: null, selectedNodeId: null, decompositionStatus: 'idle', decompositionSteps: [], nodeChats: {} }),
+        set({ prdTree: null, selectedNodeId: null, decompositionStatus: 'idle', decompositionSteps: [], nodeChats: {}, nodeOperationSuggestions: {} }),
     }),
     {
       name: STORAGE_KEY,
@@ -344,7 +651,7 @@ export const useAppStore = create<AppStoreState>()(
             prdTree,
             selectedNodeId: prdTree ? previous.selectedNodeId ?? null : null,
             prototypeHtml: typeof previous.prototypeHtml === 'string' ? previous.prototypeHtml : null,
-            prototypeHistory: Array.isArray(previous.prototypeHistory) ? previous.prototypeHistory : [],
+            prototypeHistory: Array.isArray(previous.prototypeHistory) ? previous.prototypeHistory.slice(0, PROTOTYPE_HISTORY_LIMIT) : [],
             nodeChats: prdTree && previous.nodeChats && typeof previous.nodeChats === 'object' ? previous.nodeChats : {},
           }
         }

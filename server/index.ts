@@ -4,9 +4,12 @@ import dotenv from 'dotenv'
 import express from 'express'
 import { zipSync } from 'fflate'
 import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
 import { applyPrototypeEdit, normalizePrototypeHtml } from '../src/lib/prototypeUtils'
 import type { UXRequirementState } from '../src/types/uxRequirement'
-import type { PrdNode } from '../src/types/prdNode'
+import type { MapAdjustmentOperation, PrdNode, PrdNodeAudience, PrdNodeEvidenceRef, PrdNodeOperationPatch, PrdNodeOperationSuggestion, PrdNodeReference, PrdNodeSourceKind, PrdNodeStatus } from '../src/types/prdNode'
+import { contentDispositionHeader } from './exportHeaders'
 import { buildVariantConfigs, clampVariantCount, DEFAULT_CREATE_VARIANTS, DEFAULT_UPDATE_VARIANTS } from './prototypePrompts'
 
 dotenv.config()
@@ -22,9 +25,12 @@ const MCP_ENDPOINT_TIMEOUT_MS = 8000
 const MCP_RPC_TIMEOUT_MS = 12000
 const SESSION_CLEANUP_DELAY_MS = 5 * 60 * 1000
 const MAX_TOOL_ITERATIONS = 4
-const MAX_PARALLEL_DECOMPOSITION_BRANCHES = 3
 const DECOMPOSITION_HEARTBEAT_MS = 8000
 const DECOMPOSITION_CALL_TIMEOUT_MS = Number.parseInt(process.env.DECOMPOSITION_CALL_TIMEOUT_MS ?? '180000', 10)
+const LARGE_PRD_DECOMPOSE_THRESHOLD = 30 * 1024
+const LARGE_PRD_SLICE_TARGET_LENGTH = 12 * 1024
+const SOURCE_OUTLINE_ROOT_ID = 'SOURCE_OUTLINE_ROOT'
+const SPEC_EXPORT_ROOT = path.resolve(process.cwd(), 'generated', 'specs')
 
 const anthropic = process.env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL })
@@ -128,6 +134,24 @@ interface NodeChatRequest {
   nodeId: string
   messages: ChatMessage[]
   tree: Record<string, PrdNode>
+}
+
+interface MapAdjustmentRequest {
+  messages: ChatMessage[]
+  tree: Record<string, PrdNode>
+}
+
+interface NodeOperationSourceInput {
+  name?: string
+  sourceKind?: PrdNodeSourceKind
+  text?: string
+}
+
+interface PrdNodeSuggestionRequest {
+  tree: Record<string, PrdNode>
+  selectedNodeId?: string
+  supplementText?: string
+  sources?: NodeOperationSourceInput[]
 }
 
 interface NodePolishPatch {
@@ -273,6 +297,18 @@ function safeParseClaudeJson(text: string) {
 function stripJsonEcho(text: string) {
   const jsonStart = text.indexOf('{')
   return (jsonStart === -1 ? text : text.slice(0, jsonStart)).trim()
+}
+
+function safeParseMapAdjustmentJson(text: string) {
+  const trimmed = text.trim()
+  const firstBrace = trimmed.indexOf('{')
+  const lastBrace = trimmed.lastIndexOf('}')
+  const candidate = firstBrace !== -1 && lastBrace > firstBrace ? trimmed.slice(firstBrace, lastBrace + 1) : trimmed
+  try {
+    return JSON.parse(candidate) as { reply?: string; operations?: unknown }
+  } catch {
+    return { reply: stripJsonEcho(trimmed), operations: [] }
+  }
 }
 
 function normalizeNullableString(value: unknown) {
@@ -701,17 +737,6 @@ async function queryCocosKnowledge(query: string) {
 
 // ── Decomposition Tool ──────────────────────────────────────────────────────
 
-const decompositionMethodologyGuide = `拆解方法论：
-1. 拆分目标不是生成漂亮的功能树，而是把单一 PRD 转成可导航、可维护、可逐篇投喂给 AI Agent 的多文件知识库。
-2. 每个叶子节点必须对应一篇未来可导出的 Markdown 文档，而不是一个零散控件、动画片段或标题摘抄。文档粒度以“一个 AI 能拿着它完成一类任务”为准。
-3. 先通读全文建立全局认知，再按维度轴拆分：职责维度（client/server）、阶段维度（流程步骤）、功能维度（UI/动画/网络/存储）、数据维度（config/api/埋点）、质量维度（acceptance/测试/风险）。
-4. 顶层结构优先贴近 docs/prd/<game>/ 模板：01-overview、02-gameplay-rules、client/、server/、config/、api/、acceptance/、appendix/。00-INDEX.md 由系统导出时生成，不要作为普通叶子反复展开。
-5. 客户端文档聚焦视觉、动画、用户交互、状态反馈，并必须列出依赖的服务端字段；服务端文档聚焦计算、RNG、结算、持久化和业务判定；接口/配置/验收文档必须单独成篇。
-6. 严禁添加原文没有明确说明的推断或假设。原文明确则直接整理；原文模糊则标注「需澄清」；原文未提及则不要写入。
-7. 每个叶子节点都要填 docPath、audience、handoffGoal、qualityGate。content 要按“原文位置、核心规则、详细说明、边界条件、依赖关系、需澄清点、AI 接力提示”组织，确保后续 AI 不需要再吞整篇 PRD。
-8. 所有会展示给用户或进入导出文档的生成内容必须使用中文，包括 label、summary、content、techNotes、handoffGoal、qualityGate 以及 Markdown 标题；只有字段名、ID、docPath、代码/API/库名、枚举值和不可翻译产品名可以保留英文。
-9. 禁止输出模板化占位内容，例如「原文标题『某标题』下的内容」「本地标题骨架」「需 AI 深度拆解后补齐」。如果原文某节没有足够信息，应在真实文档正文里明确列出已知原文、缺口和需澄清问题。`
-
 const decomposePrdTool: Anthropic.Tool = {
   name: 'decompose_prd',
   description: '将 PRD 文档拆解为 AI 可接力执行的多文件知识库树。每个叶子节点代表一篇可导出的 Markdown 文档包。',
@@ -720,28 +745,45 @@ const decomposePrdTool: Anthropic.Tool = {
     properties: {
       nodes: {
         type: 'array',
-        minItems: 1,
+        minItems: 0,
         maxItems: 6,
-        description: '扁平 PrdNode 数组。每次最多 6 个直接有价值的目录/文档包节点，叶子节点必须是一篇可导出的 Markdown 文档。',
+        description: '扁平 PrdNode 数组。用于页面下有原文依据的 model、ctrl、view 子节点；没有明确依据的 MVC 类别不要输出。',
         items: {
           type: 'object',
           additionalProperties: false,
           properties: {
-            id: { type: 'string', maxLength: 40, description: '稳定唯一 ID，例如 "CE-01"。ID 可用英文功能缩写 + 序号。' },
-            parentId: { type: ['string', 'null'], description: '父节点 ID；顶层目录/主题为 null。' },
-            label: { type: 'string', maxLength: 32, description: '中文短标题，建议 3-12 个汉字；叶子节点标题应对应文档主题。' },
-            summary: { type: 'string', maxLength: 120, description: '中文一句话摘要，说明该节点覆盖的需求范围。' },
-            content: { type: 'string', maxLength: 900, description: '按可交给 AI 的 Markdown 文档包组织的中文内容，保留原文依据、职责边界、依赖、需澄清点和验收线索；不要逐字复述整段 PRD。' },
-            type: { type: 'string', enum: ['module', 'feature', 'ui'], description: 'module=目录/主题分组；feature=非 UI 文档包；ui=客户端界面、交互、动画或状态相关文档包。' },
+            id: { type: 'string', maxLength: 40, description: '稳定唯一 ID，例如 "PAGE-MAIN-VIEW"、"PAGE-RANK-CTRL"。ID 可用英文功能缩写 + MVC 类型。' },
+            parentId: { type: ['string', 'null'], description: '父页面节点 ID。' },
+            label: { type: 'string', maxLength: 32, description: '中文短标题，建议包含 Model、Ctrl 或 View，例如“主界面 View”。' },
+            summary: { type: 'string', maxLength: 120, description: '中文一句话摘要，说明该 MVC 子节点覆盖的原文范围。' },
+            content: { type: 'string', maxLength: 1200, description: '必须按“原文位置、关键原文摘录、整理说明、需澄清点”组织；关键原文摘录必须来自相关 PRD 片段。' },
+            type: { type: 'string', enum: ['module', 'feature', 'ui', 'page'], description: 'view 用 ui；model/ctrl 用 feature。' },
+            status: { type: 'string', enum: ['pending_refine', 'pending', 'done'], description: '页面初始必须为 pending_refine。' },
             level: { type: 'integer', description: '树深度。顶层目录为 1，子目录为 2，文档包通常为 2-4。不要为了控件状态无限下钻。' },
             order: { type: 'integer', description: '同父节点内的排序位置，从 0 开始。' },
             needsPolish: { type: 'boolean', description: '该文档是否还需要 Deep Forge 补齐才能直接交给 AI 执行。UI/交互文档通常为 true；配置/API/验收若原文已完整可为 false。' },
             extractedFrom: { type: ['string', 'null'], maxLength: 120, description: '原文位置，例如标题名、章节号或行号范围。无法定位时为 null；若原文标题是中文应保持中文。' },
             techNotes: { type: ['string', 'null'], maxLength: 220, description: '面向开发的中文技术备注，可为空。' },
-            docPath: { type: ['string', 'null'], maxLength: 120, description: '叶子文档的导出路径，必须是相对路径，例如 "client/01-ui-layout.md"、"api/01-spin-api.md"。目录节点为 null。' },
-            audience: { type: ['string', 'null'], enum: ['overview', 'client', 'server', 'config', 'api', 'acceptance', 'appendix', 'mixed', null], description: '该文档主要服务的下游角色/AI 上下文类型。枚举值可用英文。' },
+            docPath: { type: ['string', 'null'], maxLength: 120, description: 'MVC 子文档导出路径，例如 "pages/page-main/model.md"、"pages/page-main/ctrl.md"、"pages/page-main/view.md"。' },
+            audience: { type: ['string', 'null'], enum: ['overview', 'client', 'server', 'config', 'api', 'acceptance', 'appendix', 'mixed', 'model', 'ctrl', 'view', null], description: '该文档主要服务的下游角色/AI 上下文类型。MVC 必须按证据维度归类：model=数据/配置/状态/规则，ctrl=流程/接口/命令/校验/状态流转，view=布局/文案/动画/视觉反馈；禁止只按关键词判断。' },
             handoffGoal: { type: ['string', 'null'], maxLength: 220, description: '中文一句话说明后续 AI 拿到这篇文档应完成什么任务。目录节点可为 null。' },
             qualityGate: { type: ['string', 'null'], maxLength: 220, description: '中文说明该文档可交给 AI 前必须满足的检查点，例如字段完整、验收项可测试、职责边界清晰。' },
+            sourceKind: { type: ['string', 'null'], enum: ['prd', 'user', 'upload', null], description: '证据来源；原始 PRD 拆分固定为 prd。' },
+            evidenceRefs: {
+              type: ['array', 'null'],
+              maxItems: 5,
+              description: '真实证据引用。原始 PRD 拆分应引用 PRD 章节/标题/短句，不得把用户补充伪装成 PRD。',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  sourceKind: { type: 'string', enum: ['prd', 'user', 'upload'] },
+                  sourceLabel: { type: 'string', maxLength: 80 },
+                  quote: { type: ['string', 'null'], maxLength: 180 },
+                },
+                required: ['sourceKind', 'sourceLabel'],
+              },
+            },
           },
           required: ['id', 'parentId', 'label', 'summary', 'content', 'type', 'level', 'order', 'needsPolish'],
         },
@@ -753,7 +795,7 @@ const decomposePrdTool: Anthropic.Tool = {
 
 const decomposePrdTopLevelTool: Anthropic.Tool = {
   name: 'decompose_prd',
-  description: '仅输出 PRD 的顶层文档包目录/主题。不要生成详细 Markdown 正文，详细文档会在后续分支展开阶段生成。',
+  description: '仅输出 PRD 中真实存在或强烈暗示的页面/界面/弹窗节点。不要生成 MVC 子节点，后续会按页面展开。',
   input_schema: {
     type: 'object',
     properties: {
@@ -761,7 +803,7 @@ const decomposePrdTopLevelTool: Anthropic.Tool = {
         type: 'array',
         minItems: 1,
         maxItems: 8,
-        description: '少量顶层目录/主题节点，parentId 必须为 null，level 必须为 1。',
+        description: '少量页面/界面/弹窗节点；系统会把它们挂到 PRD 原文目录根节点下。',
         items: {
           type: 'object',
           additionalProperties: false,
@@ -770,17 +812,33 @@ const decomposePrdTopLevelTool: Anthropic.Tool = {
             parentId: { type: ['string', 'null'], description: '顶层目录必须为 null。' },
             label: { type: 'string', maxLength: 24, description: '中文短标题，3-12 个汉字。' },
             summary: { type: 'string', maxLength: 80, description: '一句中文摘要，说明该目录覆盖范围。' },
-            content: { type: 'string', maxLength: 240, description: '中文短说明，只写覆盖范围、关键依据、职责边界和需澄清点；不要写 Markdown 长文。' },
-            type: { type: 'string', enum: ['module', 'feature', 'ui'], description: '顶层通常为 module；若整份 PRD 只有单个可执行文档可用 feature/ui。' },
+            content: { type: 'string', maxLength: 600, description: '按“原文位置、关键原文摘录、整理说明、需澄清点”组织；摘录必须来自原文。' },
+            type: { type: 'string', enum: ['module', 'feature', 'ui', 'page'], description: '顶层可以是 module；若是独立页面/界面则用 page。' },
+            status: { type: 'string', enum: ['pending_refine', 'pending', 'done'], description: '页面初始必须为 pending_refine。' },
             level: { type: 'integer', enum: [1], description: '顶层目录固定为 1。' },
             order: { type: 'integer', description: '同级排序，从 0 开始。' },
             needsPolish: { type: 'boolean', description: '顶层目录通常为 false；单篇 UI 文档可为 true。' },
             extractedFrom: { type: ['string', 'null'], maxLength: 80, description: '原文章节或标题位置。' },
             techNotes: { type: ['string', 'null'], maxLength: 120, description: '简短技术备注；无则为 null。' },
             docPath: { type: ['null'], description: '顶层目录固定为 null；可导出的 Markdown 路径只在后续分支展开阶段填写。' },
-            audience: { type: ['string', 'null'], enum: ['overview', 'client', 'server', 'config', 'api', 'acceptance', 'appendix', 'mixed', null], description: '下游消费角色。' },
+            audience: { type: ['string', 'null'], enum: ['overview', 'client', 'server', 'config', 'api', 'acceptance', 'appendix', 'mixed', 'model', 'ctrl', 'view', null], description: '下游消费角色；MVC 必须按证据维度判断，不得关键词归类。' },
             handoffGoal: { type: ['string', 'null'], maxLength: 120, description: '一句话说明后续 AI 应如何展开该目录。' },
             qualityGate: { type: ['string', 'null'], maxLength: 120, description: '一句话说明该目录展开时的检查标准。' },
+            sourceKind: { type: ['string', 'null'], enum: ['prd', 'user', 'upload', null], description: '证据来源；原始 PRD 拆分固定为 prd。' },
+            evidenceRefs: {
+              type: ['array', 'null'],
+              maxItems: 3,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  sourceKind: { type: 'string', enum: ['prd', 'user', 'upload'] },
+                  sourceLabel: { type: 'string', maxLength: 80 },
+                  quote: { type: ['string', 'null'], maxLength: 140 },
+                },
+                required: ['sourceKind', 'sourceLabel'],
+              },
+            },
           },
           required: ['id', 'parentId', 'label', 'summary', 'content', 'type', 'level', 'order', 'needsPolish'],
         },
@@ -823,23 +881,70 @@ function normalizeBooleanValue(value: unknown, fallback: boolean): boolean {
 
 function normalizeNodeType(value: unknown): PrdNode['type'] {
   const text = normalizeTextValue(value)?.toLowerCase()
-  if (!text) return 'feature'
+  if (!text) return 'page'
+  if (['page', 'screen', '页面', '界面', '弹窗', '模块页'].includes(text)) return 'page'
   if (['module', '模块', 'domain', 'category'].includes(text)) return 'module'
-  if (['ui', 'interaction', 'screen', 'control', '界面', '交互', '控件', '状态'].includes(text)) return 'ui'
+  if (['ui', 'interaction', 'control', '交互', '控件', '状态'].includes(text)) return 'ui'
   return 'feature'
 }
 
-function normalizeAudience(value: unknown): PrdNode['audience'] {
+function normalizeNodeStatus(value: unknown, fallback: PrdNodeStatus): PrdNodeStatus {
+  const text = normalizeTextValue(value)?.toLowerCase()
+  if (text === 'done' || text === '已确认' || text === 'completed') return 'done'
+  if (text === 'pending_refine' || text === '待打磨' || text === 'refine') return 'pending_refine'
+  if (text === 'pending' || text === '可导出') return 'pending'
+  return fallback
+}
+
+function normalizeNodeReferences(value: unknown): PrdNodeReference[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item): PrdNodeReference | null => {
+      if (!item || typeof item !== 'object') return null
+      const candidate = item as Record<string, unknown>
+      const targetNodeId = normalizeTextValue(candidate.targetNodeId ?? candidate.target_node_id ?? candidate.targetId ?? candidate.target_id)
+      const label = normalizeTextValue(candidate.label ?? candidate.title ?? candidate.name) ?? '跨页面引用'
+      const reason = normalizeTextValue(candidate.reason ?? candidate.note ?? candidate.description)
+      const sourceNodeId = normalizeTextValue(candidate.sourceNodeId ?? candidate.source_node_id ?? candidate.sourceId ?? candidate.source_id)
+      return { targetNodeId, label, reason, sourceNodeId }
+    })
+    .filter((item): item is PrdNodeReference => item !== null && Boolean(item.label))
+}
+
+function normalizeAudience(value: unknown): PrdNodeAudience | null {
   const text = normalizeTextValue(value)?.toLowerCase()
   if (!text) return null
   if (['overview', 'project', '概览', '总览'].includes(text)) return 'overview'
-  if (['client', 'frontend', 'ui', '客户端', '前端', '表现层'].includes(text)) return 'client'
+  if (['client', 'frontend', '客户端', '前端', '表现层'].includes(text)) return 'client'
   if (['server', 'backend', '服务端', '后端'].includes(text)) return 'server'
   if (['config', '配置', '参数'].includes(text)) return 'config'
   if (['api', 'interface', '接口', '字段'].includes(text)) return 'api'
   if (['acceptance', 'qa', 'test', '验收', '测试', '质量'].includes(text)) return 'acceptance'
   if (['appendix', 'risk', 'tracking', '附录', '风险', '埋点'].includes(text)) return 'appendix'
+  if (['model', '模型', '数据模型', '领域模型'].includes(text)) return 'model'
+  if (['ctrl', 'controller', 'control', '控制', '控制器', '流程控制'].includes(text)) return 'ctrl'
+  if (['view', 'ui', 'screen', '界面', '视图', '视觉层'].includes(text)) return 'view'
   return 'mixed'
+}
+
+function normalizeSourceKind(value: unknown, fallback: PrdNodeSourceKind = 'prd'): PrdNodeSourceKind {
+  const text = normalizeTextValue(value)?.toLowerCase()
+  if (['user', '用户', '用户补充'].includes(text ?? '')) return 'user'
+  if (['upload', 'file', '上传', '上传资料'].includes(text ?? '')) return 'upload'
+  return fallback
+}
+
+function normalizeEvidenceRefs(value: unknown, fallbackSourceKind: PrdNodeSourceKind, fallbackLabel: string): PrdNodeEvidenceRef[] {
+  if (!Array.isArray(value)) return []
+  return value.slice(0, 5).flatMap((item): PrdNodeEvidenceRef[] => {
+    if (!item || typeof item !== 'object') return []
+    const ref = item as Record<string, unknown>
+    return [{
+      sourceKind: normalizeSourceKind(ref.sourceKind ?? ref.source_kind, fallbackSourceKind),
+      sourceLabel: normalizeTextValue(ref.sourceLabel ?? ref.source_label ?? ref.label ?? ref.source) ?? fallbackLabel,
+      quote: normalizeTextValue(ref.quote ?? ref.text) ?? null,
+    }]
+  })
 }
 
 function isTemplateDecompositionNode(node: PrdNode) {
@@ -889,22 +994,33 @@ function normalizeDecompositionNodes(raw: unknown): PrdNode[] {
       const summary = normalizeTextValue(n.summary ?? n.description) ?? ''
       const content = normalizeTextValue(n.content ?? n.body ?? n.detail) ?? summary
       const type = normalizeNodeType(n.type ?? n.nodeType ?? n.node_type)
+      const status = normalizeNodeStatus(n.status, type === 'page' ? 'pending_refine' : 'pending')
       const level = normalizeNumberValue(n.level ?? n.depth, parentId ? 2 : 1)
       const order = normalizeNumberValue(n.order ?? n.sort ?? n.index, index)
-      const needsPolish = normalizeBooleanValue(n.needsPolish ?? n.needs_polish, type === 'ui')
+      const needsPolish = normalizeBooleanValue(n.needsPolish ?? n.needs_polish, type === 'page' || type === 'ui')
       const extractedFrom = normalizeTextValue(n.extractedFrom ?? n.extracted_from ?? n.source ?? n.sourceRange) ?? null
       const techNotes = normalizeTextValue(n.techNotes ?? n.tech_notes ?? n.notes) ?? null
-      const docPath = normalizeTextValue(n.docPath ?? n.doc_path ?? n.path ?? n.filePath ?? n.file_path) ?? null
-      const audience = normalizeAudience(n.audience ?? n.targetAudience ?? n.target_audience ?? n.role)
+      const docPath = normalizeTextValue(n.docPath ?? n.doc_path ?? n.path ?? n.filePath ?? n.file_path) ?? (type === 'page' ? `pages/${id}.md` : null)
+      const audience = normalizeAudience(n.audience ?? n.targetAudience ?? n.target_audience ?? n.role) ?? (type === 'page' ? 'client' : null)
       const handoffGoal = normalizeTextValue(n.handoffGoal ?? n.handoff_goal ?? n.aiHandoff ?? n.ai_handoff) ?? null
       const qualityGate = normalizeTextValue(n.qualityGate ?? n.quality_gate ?? n.acceptanceGate ?? n.acceptance_gate) ?? null
+      const references = normalizeNodeReferences(n.references ?? n.crossPageReferences ?? n.cross_page_references)
+      const sourceKind = normalizeSourceKind(n.sourceKind ?? n.source_kind, 'prd')
+      const evidenceRefs = normalizeEvidenceRefs(
+        n.evidenceRefs ?? n.evidence_refs ?? n.sources,
+        sourceKind,
+        extractedFrom ?? 'PRD 原文',
+      )
 
       return {
         id, parentId, label, summary, content, type,
-        status: 'pending',
+        status,
         level, order, needsPolish, techNotes,
         extractedFrom,
         docPath, audience, handoffGoal, qualityGate,
+        references,
+        sourceKind,
+        evidenceRefs,
         children: [] as string[],
       } as PrdNode
     })
@@ -1024,6 +1140,233 @@ function buildSourceOutlineForPrompt(mdText: string) {
   return `${lines.join('\n')}${omitted}`
 }
 
+function buildSourceOutlineRootNode(mdText: string): PrdNode {
+  const headings = extractMarkdownHeadings(mdText)
+  const content = headings.length
+    ? headings.map((heading) => `${'  '.repeat(Math.max(0, heading.level - 1))}- 第 ${heading.line} 行：${heading.title}`).join('\n')
+    : '原文没有明显 Markdown 标题。后续页面节点仍必须由 AI 根据原文内容识别，不能使用本地标题生成假节点。'
+
+  return {
+    id: SOURCE_OUTLINE_ROOT_ID,
+    parentId: null,
+    label: 'PRD 原文目录',
+    summary: headings.length ? `原文包含 ${headings.length} 个 Markdown 标题，页面节点均应回溯到这些原文位置。` : '原文没有明显 Markdown 标题，页面节点需直接依据正文内容生成。',
+    content: `## 原文目录\n\n${content}`,
+    type: 'module',
+    status: 'pending',
+    level: 0,
+    order: 0,
+    needsPolish: false,
+    extractedFrom: '原文 Markdown 标题',
+    techNotes: null,
+    children: [],
+    docPath: null,
+    audience: 'overview',
+    handoffGoal: '作为导图根节点，帮助后续 AI 和用户从原文标题回溯页面拆解依据。',
+    qualityGate: '只承载原文标题索引，不作为 AI 伪造页面节点的依据。',
+    references: [],
+  }
+}
+
+function attachPagesToSourceRoot(nodes: PrdNode[]) {
+  return nodes.map((node, order): PrdNode => ({
+    ...node,
+    parentId: SOURCE_OUTLINE_ROOT_ID,
+    type: 'page',
+    status: 'pending_refine',
+    level: 1,
+    order,
+    needsPolish: true,
+    docPath: null,
+    children: [],
+  }))
+}
+
+function pageDocPathSegment(node: PrdNode) {
+  return sanitizeDocPathSegment(`${sanitizeNodeId(node.id)}-${sanitizeLabel(node.label)}`)
+}
+
+interface PrdSourceSlice {
+  label: string
+  text: string
+  startLine: number
+  endLine: number
+}
+
+function pushPrdSourceSlice(slices: PrdSourceSlice[], lines: string[], startLine: number) {
+  const text = lines.join('\n').trim()
+  if (!text) return
+  slices.push({
+    label: `第 ${startLine}-${startLine + lines.length - 1} 行`,
+    text,
+    startLine,
+    endLine: startLine + lines.length - 1,
+  })
+}
+
+function splitLongSectionLines(lines: string[], startLine: number, targetLength: number) {
+  const slices: PrdSourceSlice[] = []
+  let current: string[] = []
+  let currentStart = startLine
+  let currentLength = 0
+
+  lines.forEach((line, index) => {
+    if (current.length && currentLength + line.length > targetLength) {
+      pushPrdSourceSlice(slices, current, currentStart)
+      current = []
+      currentStart = startLine + index
+      currentLength = 0
+    }
+    current.push(line)
+    currentLength += line.length + 1
+  })
+
+  pushPrdSourceSlice(slices, current, currentStart)
+  return slices
+}
+
+function buildPrdSourceSlices(mdText: string) {
+  const lines = mdText.split(/\r?\n/)
+  const headings = extractMarkdownHeadings(mdText)
+  if (!headings.length) return splitLongSectionLines(lines, 1, LARGE_PRD_SLICE_TARGET_LENGTH)
+
+  const sections = headings.map((heading, index) => {
+    const nextHeading = headings[index + 1]
+    const endLine = nextHeading ? nextHeading.line - 1 : lines.length
+    return {
+      label: `${heading.title}（第 ${heading.line}-${endLine} 行）`,
+      startLine: heading.line,
+      endLine,
+      text: lines.slice(heading.line - 1, endLine).join('\n').trim(),
+    }
+  }).filter((section) => section.text)
+
+  const slices: PrdSourceSlice[] = []
+  let current: PrdSourceSlice[] = []
+  let currentLength = 0
+
+  const flush = () => {
+    if (!current.length) return
+    const startLine = current[0].startLine
+    const endLine = current[current.length - 1].endLine
+    const labels = current.map((section) => section.label).join('；')
+    slices.push({
+      label: `${labels}（第 ${startLine}-${endLine} 行）`,
+      text: current.map((section) => section.text).join('\n\n'),
+      startLine,
+      endLine,
+    })
+    current = []
+    currentLength = 0
+  }
+
+  for (const section of sections) {
+    if (section.text.length > LARGE_PRD_SLICE_TARGET_LENGTH) {
+      flush()
+      slices.push(...splitLongSectionLines(section.text.split(/\r?\n/), section.startLine, LARGE_PRD_SLICE_TARGET_LENGTH))
+      continue
+    }
+    if (current.length && currentLength + section.text.length > LARGE_PRD_SLICE_TARGET_LENGTH) flush()
+    current.push(section)
+    currentLength += section.text.length + 2
+  }
+
+  flush()
+  return slices
+}
+
+function normalizedNodeMergeKey(node: PrdNode) {
+  return node.label
+    .replace(/[\s《》「」【】\[\]（）()：:，,。.!！?？\-_/\\]/g, '')
+    .toLowerCase()
+}
+
+function mergeTextValues(...values: Array<string | null | undefined>) {
+  return values.find((value) => value?.trim())?.trim() ?? null
+}
+
+function mergeLargePrdCandidates(candidates: PrdNode[]) {
+  const merged = new Map<string, PrdNode>()
+
+  for (const node of candidates) {
+    const key = normalizedNodeMergeKey(node)
+    if (!key) continue
+    const existing = merged.get(key)
+    if (!existing) {
+      merged.set(key, {
+        ...node,
+        parentId: null,
+        level: 1,
+        docPath: null,
+        children: [],
+        references: node.references ?? [],
+      })
+      continue
+    }
+
+    merged.set(key, {
+      ...existing,
+      summary: existing.summary.length >= node.summary.length ? existing.summary : node.summary,
+      content: existing.content.length >= node.content.length ? existing.content : node.content,
+      extractedFrom: [existing.extractedFrom, node.extractedFrom].filter(Boolean).join('；') || null,
+      techNotes: mergeTextValues(existing.techNotes, node.techNotes),
+      audience: existing.audience ?? node.audience,
+      handoffGoal: mergeTextValues(existing.handoffGoal, node.handoffGoal),
+      qualityGate: mergeTextValues(existing.qualityGate, node.qualityGate),
+      references: [...(existing.references ?? []), ...(node.references ?? [])],
+    })
+  }
+
+  return attachPagesToSourceRoot([...merged.values()].slice(0, 8).map((node, order) => ({
+    ...node,
+    id: `PAGE-${String(order + 1).padStart(2, '0')}-${idSegmentFromTitle(node.label, String(order + 1))}`,
+    parentId: null,
+    type: 'page' as const,
+    status: 'pending_refine' as const,
+    level: 1,
+    order,
+    needsPolish: true,
+    docPath: null,
+    children: [],
+  })))
+}
+
+async function decomposeLargeL1(mdText: string, session: DecompositionSession, claude: Anthropic) {
+  const slices = buildPrdSourceSlices(mdText)
+  const candidates: PrdNode[] = []
+
+  for (const [index, slice] of slices.entries()) {
+    const response = await withDecompositionProgress(session, '正在通读原文并建立结构', () =>
+      claude.messages.create({
+        model,
+        max_tokens: 2200,
+        system: decompositionL1SystemPrompt,
+        tools: [decomposePrdTopLevelTool],
+        tool_choice: { type: 'tool', name: 'decompose_prd' },
+        messages: [
+          {
+            role: 'user',
+            content: `请从下面这段 PRD 原文中识别页面/界面/弹窗级候选节点。本段只是原文的一部分，只输出本段有明确依据的候选；不要补全没出现的信息，不要输出按钮、字段、奖励条目等内部细节节点。每个节点正文必须很短，只写覆盖范围、关键依据、职责边界和需澄清点。所有展示给用户的文字必须是中文；ID、路径、字段名、枚举值可以保留英文。\n\n原文位置：${slice.label}\n原文阅读进度：${index + 1}/${slices.length}\n\nPRD 原文：\n${slice.text}`,
+          },
+        ],
+      })
+    )
+
+    const toolUse = response.content.find(
+      (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === 'decompose_prd'
+    )
+    if (!toolUse) continue
+
+    const raw = (toolUse.input as { nodes?: unknown }).nodes ?? toolUse.input
+    candidates.push(...normalizeDecompositionNodes(raw).map((node) => ({
+      ...node,
+      extractedFrom: node.extractedFrom ?? slice.label,
+    })))
+  }
+
+  return withDecompositionProgress(session, '正在归并页面线索', async () => mergeLargePrdCandidates(candidates))
+}
+
 function sectionTextForHeading(mdText: string, heading: MarkdownHeading, headings: MarkdownHeading[]) {
   const lines = mdText.split(/\r?\n/)
   const nextPeer = headings.find((item) => item.line > heading.line && item.rawLevel <= heading.rawLevel)
@@ -1125,44 +1468,56 @@ async function withDecompositionProgress<T>(
 }
 
 const decompositionL1SystemPrompt = `你是游戏 UX 架构师，正在分析一份产品需求文档（PRD）。
-任务：只识别这份 PRD 应该被整理成哪些顶层“文档包目录/主题”。
-本轮是轻量目录规划，不写叶子文档，不展开详细正文，详细内容会在下一轮逐个目录生成。
-顶层节点必须服务于后续多文件知识库，例如「项目概览」「核心玩法规则」「客户端文档」「服务端文档」「配置文档」「接口文档」「验收与测试」「附录与风险」等；只输出原文中确实存在的领域。
-不要机械复制文档标题层级，也不要围绕 UI 控件下钻；要按“后续哪个 AI/角色会消费这批文档”来分组。
-必须通过工具返回非空 nodes 数组。本轮只返回 level=1 的顶层目录/主题节点，parentId 必须为 null。通常 2-6 个，最多 8 个。
-每个顶层节点的 summary 控制在 40 字以内，content 控制在 160 字以内，只概括覆盖范围、关键依据、职责边界和需澄清点，不要写 Markdown 长文。
-顶层目录节点 docPath 必须为 null；可导出的 Markdown 路径只在后续分支展开阶段填写。
-如果原文标题结构清晰，extractedFrom 写入对应章节/标题；无法定位则为 null。
-所有 label、summary、content、techNotes、handoffGoal、qualityGate 必须使用中文；ID、docPath、字段名、枚举值可以使用英文。
-每个顶层范围必须清晰、互不重叠。`
+	任务：识别这份 PRD 中玩家实际会看到、且适合逐个打磨的页面/界面/弹窗节点。
+	不要把按钮、字段、奖励条目、动画帧或规则段落单独拆成页面节点；这些内部细节必须放入所属页面节点的 content，并在后续 MVC 子节点中展开。
+	优先输出主界面、规则页、帮助页、排行榜、商城页、任务页、结算页、活动详情页、弹窗等页面级节点；只输出原文中确实存在或强烈暗示的页面。
+	如果内容涉及页面跳转，源页面只记录入口和跳转关系，目标页面记录完整页面内容；跨页面关系写入 references，不要复制全文。
+	每个页面节点 type 必须为 page，status 必须为 pending_refine，needsPolish 必须为 true，docPath 必须为 null。
+	content 必须按“原文位置、关键原文摘录、整理说明、需澄清点”组织；引用原文时摘取关键短句，不要脱离原文改写成泛泛总结。
+	本轮只返回页面级节点，parentId 可为 null，系统会挂到 PRD 原文目录根节点下；除非原文明确存在父子页面关系，不要制造多层树。
+	必须通过工具返回非空 nodes 数组。通常 2-8 个，最多 8 个。
+	所有 label、summary、content、techNotes、handoffGoal、qualityGate 必须使用中文；ID、docPath、字段名、枚举值可以使用英文。
+	每个页面范围必须清晰、互不重叠。`
 
 function decompositionBranchSystemPrompt(parentLabel: string, parentId: string): string {
-  return `你正在展开 PRD 树中的一个模块。
-待展开模块：「${parentLabel}」
-${decompositionMethodologyGuide}
-请把该模块展开为一组“可导出的 Markdown 文档包”，而不是控件清单。
-必须返回非空 nodes 数组；如果该模块只需要一篇文档，也要输出 1 个 level=2 叶子文档包，parentId 为 "${parentId}"，不要返回空数组。
-level=2：主要子目录或关键文档包，parentId 为 "${parentId}"。
-level=3：当一个 level=2 主题仍过粗时，拆成更聚焦的文档包，例如 client/02-board-display.md、api/01-spin-api.md、acceptance/01-client-acceptance.md。
-level=4：仅当一篇文档仍无法被单个 AI 接力执行时才继续拆分；不要把按钮、动画帧、状态枚举单独拆成叶子，除非它们独立形成一篇 AI 任务上下文。
-每个父节点最多 6 个直接子节点；优先输出后续最值得独立交给 AI 的文档包，不要为了穷举而拉长单次输出。
-叶子节点必须填写 docPath、audience、handoffGoal、qualityGate；目录节点 docPath 可以为 null。
-客户端/服务端混写的内容必须按职责拆开；接口、配置、验收内容单独成篇，不要塞进 UI 文档。
-content 必须保留原文依据、核心规则、边界条件、依赖字段/配置、跨文档关系、验收线索和「需澄清」标注，但每篇控制在 300-900 字内，不要逐字复述整段 PRD。
-任何 UI/交互/动画/状态反馈文档，或原文信息不足以直接交给 AI 的文档，都应将 needsPolish 标记为 true。
-如果能定位原文位置，extractedFrom 写入章节标题或行号范围。
-所有 label、summary、content、techNotes、handoffGoal、qualityGate 和 content 内部 Markdown 标题必须使用中文；ID、docPath、字段名、枚举值可以使用英文。`
+  return `你正在展开 PRD 页面节点。
+待展开页面：「${parentLabel}」
+任务：只生成该页面下有原文依据的 MVC 子节点。
+
+MVC 拆分规则：
+- model：页面依赖的数据字段、领域状态、配置、规则参数、存储或依赖数据。判断标准：原文事实回答“页面显示/判断需要哪些数据”。
+- ctrl：用户操作、控制流程、跳转、接口调用、校验、业务逻辑、状态流转。判断标准：原文事实回答“用户操作或系统事件触发后发生什么”。
+- view：页面布局、视觉层级、控件呈现、文案、动画、状态反馈。判断标准：原文事实回答“用户在屏幕上看到什么样子”。
+
+严禁只因为出现“状态、交互、控件、接口、规则、UI”等关键词就归类；必须先抽取原文事实，再按事实维度归入 model/ctrl/view。
+状态反馈、按钮置灰、Loading、空状态等用户可见呈现通常是 view；状态流转、校验、请求响应才是 ctrl；配置、数值、领取状态等领域数据才是 model。
+只输出原文明确涉及的类别；不要为了凑齐 model/ctrl/view 而输出空节点或占位节点。
+每个子节点 sourceKind 必须为 prd；evidenceRefs 必须引用真实原文标题或短句，不得编造原文证据。
+每个子节点 parentId 必须为 "${parentId}"，level 必须为 2。
+每个子节点 content 必须按以下结构输出：
+## 原文位置
+写章节名、标题或行号范围。
+## 关键原文摘录
+摘取相关原文短句，不要自行扩写。
+## 整理说明
+把摘录整理成可执行需求。
+## 需澄清点
+只列原文模糊或缺失的信息；没有则写“无”。
+
+docPath 使用 pages/<page-slug>/model.md、pages/<page-slug>/ctrl.md 或 pages/<page-slug>/view.md。
+所有 label、summary、content、techNotes、handoffGoal、qualityGate 和 content 内部 Markdown 标题必须使用中文；model、ctrl、view、ID、docPath、字段名、枚举值可以保留英文。`
 }
 
 async function decomposeL1(mdText: string, session: DecompositionSession): Promise<PrdNode[]> {
   if (!anthropic) throw new Error('Anthropic 客户端未初始化，请检查 ANTHROPIC_API_KEY')
   const claude = anthropic
+  if (mdText.length >= LARGE_PRD_DECOMPOSE_THRESHOLD) return decomposeLargeL1(mdText, session, claude)
   const sourceOutline = buildSourceOutlineForPrompt(mdText)
 
   async function requestTopLevel(label: string, retry: boolean) {
     const retryInstruction = retry
-      ? '上一轮顶层目录返回了空数组，这是无效结果。请重新通读标题参考和原文，必须返回 2-6 个真实顶层目录；即使 PRD 很短，也至少输出「项目概览」和一个最核心的玩法/客户端/验收目录。'
-      : '请把下面 PRD 拆解为顶层文档包目录/主题。'
+      ? '上一轮页面级拆分返回了空数组，这是无效结果。请重新通读标题参考和原文，必须返回 2-8 个真实页面/界面节点；如果 PRD 很短，也至少输出一个最核心页面和一个规则/帮助/结算等页面。'
+      : '请把下面 PRD 拆解为页面级思维导图节点。'
 
     const response = await withDecompositionProgress(session, label, () =>
       claude.messages.create({
@@ -1174,7 +1529,7 @@ async function decomposeL1(mdText: string, session: DecompositionSession): Promi
         messages: [
           {
             role: 'user',
-            content: `${retryInstruction} 本次只输出 level=1 节点，parentId 必须为 null，docPath 必须为 null，不要输出更深层级。拆分目标是后续一篇篇交给 AI Agent 使用，不是 UI 控件树。所有展示给用户的文字必须是中文，包括节点标题、摘要、正文、接力目标、质量门槛；只有 ID、字段名、枚举值可以保留英文。不要照抄标题骨架当正文，必须给出你通读原文后的真实整理结果。\n\n原文标题参考（只作为定位线索，不是输出模板）：\n${sourceOutline}\n\n完整 PRD 原文：\n${mdText}`,
+            content: `${retryInstruction} 本次只输出页面/界面/弹窗级节点，type 必须为 page，status 必须为 pending_refine，needsPolish 必须为 true。不要输出按钮、字段、奖励条目等内部细节节点；这些内容应写入所属页面的 content。拆分目标是后续以单个页面为单位逐个打磨。所有展示给用户的文字必须是中文，包括节点标题、摘要、正文、接力目标、质量门槛；只有 ID、路径、字段名、枚举值可以保留英文。跨页面关系写入 references，不要重复复制全文。\n\n原文标题参考（只作为定位线索，不是输出模板）：\n${sourceOutline}\n\n完整 PRD 原文：\n${mdText}`,
           },
         ],
       })
@@ -1183,7 +1538,7 @@ async function decomposeL1(mdText: string, session: DecompositionSession): Promi
     const toolUse = response.content.find(
       (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === 'decompose_prd'
     )
-    if (!toolUse) throw new Error('Claude 未返回顶层文档包目录拆解结果')
+    if (!toolUse) throw new Error('Claude 未返回导图节点分析结果')
 
     const raw = (toolUse.input as { nodes?: unknown }).nodes ?? toolUse.input
     return {
@@ -1192,17 +1547,17 @@ async function decomposeL1(mdText: string, session: DecompositionSession): Promi
     }
   }
 
-  const first = await requestTopLevel('正在识别顶层文档包目录', false)
-  if (first.nodes.length > 0) return first.nodes
+  const first = await requestTopLevel('正在通读原文并建立结构', false)
+  if (first.nodes.length > 0) return attachPagesToSourceRoot(first.nodes)
   if (first.stopReason === 'max_tokens') {
-    throw new Error('AI 顶层目录输出过长并被截断。请重试，或缩小 PRD 范围后再导入。')
+    throw new Error('AI 生成导图节点时输出过长并被截断。请重试，或缩小 PRD 范围后再导入。')
   }
 
-  const retry = await requestTopLevel('正在重新校验顶层文档包目录', true)
+  const retry = await requestTopLevel('正在生成导图节点', true)
   if (!retry.nodes.length && retry.stopReason === 'max_tokens') {
-    throw new Error('AI 顶层目录输出过长并被截断。请重试，或缩小 PRD 范围后再导入。')
+    throw new Error('AI 生成导图节点时输出过长并被截断。请重试，或缩小 PRD 范围后再导入。')
   }
-  return retry.nodes
+  return attachPagesToSourceRoot(retry.nodes)
 }
 
 async function decomposeBranch(mdText: string, parentNode: PrdNode, session: DecompositionSession): Promise<PrdNode[]> {
@@ -1213,8 +1568,8 @@ async function decomposeBranch(mdText: string, parentNode: PrdNode, session: Dec
 
   async function requestBranch(label: string, retry: boolean) {
     const retryInstruction = retry
-      ? `上一轮「${parentNode.label}」返回了空数组，这是无效结果。请至少输出 1 个 level=2 叶子文档包，parentId 必须为 "${parentNode.id}"，docPath 必须填写。`
-      : `请把「${parentNode.label}」展开为可导出的 Markdown 文档包。`
+      ? `上一轮「${parentNode.label}」没有返回有原文依据的 MVC 子节点。请重新检查相关原文；如果确实没有 model、ctrl 或 view 信息，可以返回空数组。`
+      : `请把「${parentNode.label}」展开为有原文依据的 MVC 子节点。`
 
     const response = await withDecompositionProgress(session, label, () =>
       claude.messages.create({
@@ -1226,7 +1581,7 @@ async function decomposeBranch(mdText: string, parentNode: PrdNode, session: Dec
         messages: [
           {
             role: 'user',
-            content: `${retryInstruction} 必须至少输出 1 个节点；如果该主题本身已经足够小，就输出 1 个 level=2 叶子文档包，parentId 必须为 "${parentNode.id}"，并填写 docPath。请输出 level=2 到 level=4 的节点，并确保 parentId 指向正确父节点。叶子节点要能单独交给 AI Agent 继续完成 UI、服务端、接口、配置或验收任务。所有展示给用户的文字必须是中文，包括节点标题、摘要、正文、接力目标、质量门槛和 Markdown 标题；只有 ID、路径、字段名、枚举值可以保留英文。不要输出模板化标题说明，content 必须是你对原文相关内容的拆分整理。\n\n原文标题参考（只作为定位线索，不是输出模板）：\n${sourceOutline}\n\n相关 PRD 原文片段：\n${branchContext}`,
+            content: `${retryInstruction} 只输出有原文依据的 model、ctrl、view 子节点；缺失的 MVC 类别不要输出空节点或占位节点。分类必须基于原文事实维度：数据/配置/规则/领域状态归 model，操作流程/接口/校验/状态流转归 ctrl，布局/文案/动画/视觉反馈归 view；禁止按关键词机械归类。每个返回节点 parentId 必须为 "${parentNode.id}"，level 必须为 2，sourceKind 必须为 prd，evidenceRefs 必须引用真实原文，content 必须包含“原文位置 / 关键原文摘录 / 整理说明 / 需澄清点”。所有展示给用户的文字必须是中文；model、ctrl、view、ID、路径、字段名、枚举值可以保留英文。不要输出模板化标题说明，content 必须是你对原文相关内容的引用+整理。\n\n原文标题参考（只作为定位线索，不是输出模板）：\n${sourceOutline}\n\n相关 PRD 原文片段：\n${branchContext}`,
           },
         ],
       })
@@ -1238,13 +1593,32 @@ async function decomposeBranch(mdText: string, parentNode: PrdNode, session: Dec
     if (!toolUse) throw new Error(`Claude 未返回分支拆解结果：${parentNode.id}`)
 
     const raw = (toolUse.input as { nodes?: unknown }).nodes ?? toolUse.input
+    const pageSegment = pageDocPathSegment(parentNode)
     return {
-      nodes: normalizeDecompositionNodes(raw),
+      nodes: normalizeDecompositionNodes(raw)
+        .filter((node) => ['model', 'ctrl', 'view'].includes(node.audience ?? ''))
+        .map((node, index): PrdNode => {
+          const kind = node.audience === 'model' || node.audience === 'ctrl' || node.audience === 'view' ? node.audience : 'view'
+          return {
+            ...node,
+            id: `${parentNode.id}-${kind.toUpperCase()}`,
+            parentId: parentNode.id,
+            type: kind === 'view' ? 'ui' : 'feature',
+            status: 'pending_refine',
+            level: 2,
+            order: index,
+            needsPolish: true,
+            docPath: `pages/${pageSegment}/${kind}.md`,
+            audience: kind,
+            sourceKind: 'prd',
+            children: [],
+          }
+        }),
       stopReason: response.stop_reason,
     }
   }
 
-  const first = await requestBranch('正在展开文档包分支', false)
+  const first = await requestBranch('正在展开 MVC 子节点', false)
   if (first.nodes.length > 0) return first.nodes
   if (first.stopReason === 'max_tokens') {
     throw new Error(`AI 展开「${parentNode.label}」时输出过长并被截断。请重试，或缩小 PRD 范围后再导入。`)
@@ -1262,32 +1636,22 @@ async function runMockDecompositionJob(sessionId: string): Promise<void> {
   if (!session) return
 
   const mockSteps = [
-    { step: '正在识别顶层文档包目录', delay: 800 },
-    { step: '正在展开：核心玩法系统', delay: 1000 },
-    { step: '正在展开：用户界面层', delay: 1000 },
-    { step: '正在展开：数据与存档', delay: 800 },
+    { step: '正在生成导图节点', delay: 800 },
   ]
 
   const mockNodes: PrdNode[] = [
-    { id: 'CORE-01', parentId: null, label: '核心玩法系统', summary: '游戏核心循环与机制', content: 'mock', type: 'module', status: 'pending', level: 1, order: 0, needsPolish: false, extractedFrom: null, techNotes: null, children: ['CORE-02', 'CORE-03'] },
-    { id: 'CORE-02', parentId: 'CORE-01', label: '战斗系统', summary: '实时战斗与技能触发', content: 'mock', type: 'feature', status: 'pending', level: 2, order: 0, needsPolish: true, extractedFrom: null, techNotes: null, children: [] },
-    { id: 'CORE-03', parentId: 'CORE-01', label: '关卡进程', summary: '关卡解锁与难度曲线', content: 'mock', type: 'feature', status: 'pending', level: 2, order: 1, needsPolish: false, extractedFrom: null, techNotes: null, children: [] },
-    { id: 'UI-01', parentId: null, label: '用户界面层', summary: '主界面与导航结构', content: 'mock', type: 'module', status: 'pending', level: 1, order: 1, needsPolish: false, extractedFrom: null, techNotes: null, children: ['UI-02', 'UI-03'] },
-    { id: 'UI-02', parentId: 'UI-01', label: '主菜单界面', summary: '游戏入口与模式选择', content: 'mock', type: 'ui', status: 'pending', level: 2, order: 0, needsPolish: true, extractedFrom: null, techNotes: null, children: [] },
-    { id: 'UI-03', parentId: 'UI-01', label: 'HUD 战斗界面', summary: '战斗中的信息显示层', content: 'mock', type: 'ui', status: 'pending', level: 2, order: 1, needsPolish: true, extractedFrom: null, techNotes: null, children: [] },
-    { id: 'DATA-01', parentId: null, label: '数据与存档', summary: '本地存档与进度同步', content: 'mock', type: 'module', status: 'pending', level: 1, order: 2, needsPolish: false, extractedFrom: null, techNotes: null, children: ['DATA-02'] },
-    { id: 'DATA-02', parentId: 'DATA-01', label: '存档管理', summary: '多存档槽与自动存档', content: 'mock', type: 'feature', status: 'pending', level: 2, order: 0, needsPolish: false, extractedFrom: null, techNotes: null, children: [] },
+    buildSourceOutlineRootNode('# 示例 PRD\n\n## 主界面\n\n## 规则页\n\n## 排行榜'),
+    { id: 'PAGE-MAIN', parentId: SOURCE_OUTLINE_ROOT_ID, label: '主界面', summary: '活动入口、倒计时、核心状态与页面跳转。', content: '## 原文位置\n示例 PRD\n\n## 关键原文摘录\n“展示活动入口、倒计时、当前积分和关键操作。”\n\n## 整理说明\n主界面承载活动入口与关键状态展示。\n\n## 需澄清点\n需确认主按钮状态与空状态。', type: 'page', status: 'pending_refine', level: 1, order: 0, needsPolish: true, extractedFrom: '示例 PRD', techNotes: null, children: [], docPath: null, audience: 'client', handoffGoal: '打磨主界面交互设计规格。', qualityGate: '入口、状态、跳转和验收点清晰。', references: [{ targetNodeId: 'PAGE-RANK', label: '排行榜入口', reason: '主界面点击进入排行榜页', sourceNodeId: 'PAGE-MAIN' }] },
+    { id: 'PAGE-MAIN-VIEW', parentId: 'PAGE-MAIN', label: '主界面 View', summary: '主界面的布局、入口和状态展示。', content: '## 原文位置\n示例 PRD\n\n## 关键原文摘录\n“展示活动入口、倒计时、当前积分和关键操作。”\n\n## 整理说明\n需要呈现活动入口、倒计时、积分与关键操作控件。\n\n## 需澄清点\n需确认空状态。', type: 'ui', status: 'pending_refine', level: 2, order: 0, needsPolish: true, extractedFrom: '示例 PRD', techNotes: null, children: [], docPath: 'pages/PAGE-MAIN/view.md', audience: 'client', handoffGoal: '打磨主界面 View 规格。', qualityGate: '原文摘录、布局状态和待确认点清晰。', references: [] },
+    { id: 'PAGE-RULES', parentId: SOURCE_OUTLINE_ROOT_ID, label: '规则页', summary: '活动规则、积分规则和奖励说明。', content: '## 原文位置\n示例 PRD\n\n## 关键原文摘录\n“说明活动玩法、积分获取和奖励规则。”\n\n## 整理说明\n规则页承载玩法、积分与奖励说明。\n\n## 需澄清点\n需确认规则文本是否需要分段折叠。', type: 'page', status: 'pending_refine', level: 1, order: 1, needsPolish: true, extractedFrom: '示例 PRD', techNotes: null, children: [], docPath: null, audience: 'client', handoffGoal: '打磨规则页说明和交互规格。', qualityGate: '规则文案、入口和返回行为清晰。', references: [] },
+    { id: 'PAGE-RANK', parentId: SOURCE_OUTLINE_ROOT_ID, label: '排行榜', summary: '榜单展示、排名规则和奖励领取说明。', content: '## 原文位置\n示例 PRD\n\n## 关键原文摘录\n“展示玩家排行、排名变化和奖励状态。”\n\n## 整理说明\n排行榜页面承载排名展示和奖励状态。\n\n## 需澄清点\n需确认榜单刷新频率和未上榜状态。', type: 'page', status: 'pending_refine', level: 1, order: 2, needsPolish: true, extractedFrom: '示例 PRD', techNotes: null, children: [], docPath: null, audience: 'client', handoffGoal: '打磨排行榜页面交互设计规格。', qualityGate: '榜单字段、状态和跳转来源清晰。', references: [] },
   ]
 
   for (const { step, delay } of mockSteps) {
     session.currentStep = step
     await new Promise((r) => setTimeout(r, delay))
     // Push nodes that belong to this step
-    const pushed = mockNodes.filter((n) =>
-      n.parentId === null
-        ? step === '正在识别顶层文档包目录'
-        : step.includes(n.label) || (n.parentId !== null && mockNodes.find((p) => p.id === n.parentId && step.includes(p.label)))
-    )
+    const pushed = step === '正在生成导图节点' ? mockNodes : []
     mergeSessionNodes(session, pushed.filter((n) => !session.nodes.find((e) => e.id === n.id)))
   }
 
@@ -1301,44 +1665,28 @@ async function runDecompositionJob(sessionId: string, mdText: string): Promise<v
   if (!session) return
   const activeSession = session
 
-  activeSession.currentStep = '正在通读原文并建立 AI 文档包骨架...'
-
-  // Step 1: L1 nodes
-  activeSession.currentStep = '正在识别顶层文档包目录'
-  const l1Nodes = await decomposeL1(mdText, activeSession)
-  if (l1Nodes.length === 0) {
-    throw new Error('AI 未返回有效顶层文档包目录。已拒绝使用本地标题模板生成假文档，请重试或检查 PRD 是否包含足够可读取文本。')
-  }
+  activeSession.currentStep = '正在通读原文并建立结构'
   activeSession.nodes = []
-  mergeSessionNodes(activeSession, l1Nodes)
+  const sourceOutlineRoot = buildSourceOutlineRootNode(mdText)
+  mergeSessionNodes(activeSession, [sourceOutlineRoot])
 
-  // Step 2: Expand L1 branches with limited concurrency.
-  const expandableL1Nodes = l1Nodes.filter((node) => !node.docPath)
-  let nextIndex = 0
-  let completed = 0
-  const workerCount = Math.min(MAX_PARALLEL_DECOMPOSITION_BRANCHES, expandableL1Nodes.length)
-
-  async function expandNextBranch() {
-    while (nextIndex < expandableL1Nodes.length) {
-      const l1 = expandableL1Nodes[nextIndex]
-      nextIndex += 1
-      activeSession.currentStep = `正在展开文档包分支（${completed}/${expandableL1Nodes.length}）`
-      const branchNodes = await decomposeBranch(mdText, l1, activeSession)
-      if (branchNodes.length === 0) {
-        throw new Error(`AI 未返回「${l1.label}」的有效文档包。已拒绝使用本地标题模板生成假文档，请重试或缩小 PRD 范围。`)
-      }
-      if (branchNodes.length > 0) mergeSessionNodes(activeSession, branchNodes)
-      completed += 1
-      activeSession.currentStep = `正在展开文档包分支（${completed}/${expandableL1Nodes.length}）`
-    }
+  const pageNodes = await decomposeL1(mdText, activeSession)
+  if (pageNodes.length === 0) {
+    throw new Error('AI 未返回有效导图节点。已拒绝使用本地标题模板生成假文档，请重试或检查 PRD 是否包含足够可读取文本。')
   }
+  mergeSessionNodes(activeSession, pageNodes)
 
-  await Promise.all(Array.from({ length: workerCount }, () => expandNextBranch()))
+  for (const pageNode of pageNodes) {
+    const mvcNodes = await decomposeBranch(mdText, pageNode, activeSession)
+    if (mvcNodes.length > 0) mergeSessionNodes(activeSession, mvcNodes)
+  }
 
   activeSession.status = 'done'
   activeSession.currentStep = '分析完成'
   scheduleSessionCleanup(sessionId)
 }
+
+void decomposeBranch
 
 const allowedOrigins = new Set([
   'http://127.0.0.1:5173',
@@ -1390,7 +1738,7 @@ app.post('/api/decompose/start', (req, res) => {
   decompositionSessions.set(sessionId, {
     status: 'running',
     nodes: [],
-    currentStep: '正在识别顶层文档包目录',
+    currentStep: '正在通读原文并建立结构',
   })
 
   // Fire-and-forget: do NOT await. Frontend polls for status.
@@ -1477,6 +1825,234 @@ app.post('/api/chat', async (req, res) => {
   })
 })
 
+app.post('/api/map-adjust', async (req, res) => {
+  const { messages, tree } = req.body as MapAdjustmentRequest
+  if (!messages?.length || !tree) {
+    res.status(400).json({ error: '缺少调整对话或导图树数据' })
+    return
+  }
+  if (!anthropic) {
+    res.status(400).json({ error: '未配置 ANTHROPIC_API_KEY。' })
+    return
+  }
+
+  const treeSummary = Object.values(tree)
+    .map((node) => `- ${node.id}｜${node.label}｜${node.status}｜${node.summary}`)
+    .join('\n')
+
+  const response = await anthropic.messages.create({
+    model,
+    max_tokens: 2048,
+    system: `你是 GameUX PromptForge 的页面级导图调整助手。\n只给出建议，不直接修改导图。\n必须返回 JSON：{"reply":"中文说明","operations":[]}。\noperations 只能包含 create_node/delete_node/update_node/move_content/add_reference。\n新增页面默认 status 为 pending_refine；不要拆按钮/字段级节点；跨页面关系用 add_reference。`,
+    messages: [
+      { role: 'user', content: `当前导图：\n${treeSummary}\n\n用户对话：\n${messages.map((message) => `${message.role}: ${extractText(message.content)}`).join('\n')}` },
+    ],
+  })
+  const parsed = safeParseMapAdjustmentJson(textFromClaudeContent(response.content))
+  res.json({
+    reply: parsed.reply ?? '我没有找到可安全应用的调整建议。',
+    operations: normalizeMapAdjustmentOperations(parsed.operations, tree),
+  })
+})
+
+function normalizeMapAdjustmentOperations(value: unknown, tree: Record<string, PrdNode>): MapAdjustmentOperation[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item): MapAdjustmentOperation | null => {
+      if (!item || typeof item !== 'object') return null
+      const candidate = item as Record<string, unknown>
+      const type = normalizeTextValue(candidate.type)
+      if (type === 'create_node') {
+        const title = normalizeTextValue(candidate.title ?? candidate.label ?? candidate.name)
+        if (!title) return null
+        const parentId = normalizeParentId(candidate.parentId ?? candidate.parent_id)
+        return {
+          type,
+          title,
+          parentId: parentId && tree[parentId] ? parentId : null,
+          summary: normalizeTextValue(candidate.summary),
+          content: normalizeTextValue(candidate.content),
+        }
+      }
+      if (type === 'delete_node') {
+        const nodeId = normalizeTextValue(candidate.nodeId ?? candidate.node_id)
+        return nodeId && tree[nodeId] ? { type, nodeId } : null
+      }
+      if (type === 'update_node') {
+        const nodeId = normalizeTextValue(candidate.nodeId ?? candidate.node_id)
+        const rawPatch = candidate.patch && typeof candidate.patch === 'object' ? candidate.patch as Record<string, unknown> : candidate
+        if (!nodeId || !tree[nodeId]) return null
+        return {
+          type,
+          nodeId,
+          patch: {
+            label: normalizeTextValue(rawPatch.label ?? rawPatch.title) ?? undefined,
+            summary: normalizeTextValue(rawPatch.summary) ?? undefined,
+            content: normalizeTextValue(rawPatch.content) ?? undefined,
+            docPath: normalizeTextValue(rawPatch.docPath ?? rawPatch.doc_path) ?? undefined,
+            techNotes: normalizeTextValue(rawPatch.techNotes ?? rawPatch.tech_notes) ?? undefined,
+            handoffGoal: normalizeTextValue(rawPatch.handoffGoal ?? rawPatch.handoff_goal) ?? undefined,
+            qualityGate: normalizeTextValue(rawPatch.qualityGate ?? rawPatch.quality_gate) ?? undefined,
+            status: normalizeNodeStatus(rawPatch.status, tree[nodeId].status),
+            type: normalizeNodeType(rawPatch.nodeType ?? rawPatch.type),
+            audience: normalizeAudience(rawPatch.audience),
+            references: normalizeNodeReferences(rawPatch.references),
+          },
+        }
+      }
+      if (type === 'move_content') {
+        const fromNodeId = normalizeTextValue(candidate.fromNodeId ?? candidate.from_node_id)
+        const toNodeId = normalizeTextValue(candidate.toNodeId ?? candidate.to_node_id)
+        const content = normalizeTextValue(candidate.content)
+        return fromNodeId && toNodeId && content && tree[fromNodeId] && tree[toNodeId]
+          ? { type, fromNodeId, toNodeId, content }
+          : null
+      }
+      if (type === 'add_reference') {
+        const sourceNodeId = normalizeTextValue(candidate.sourceNodeId ?? candidate.source_node_id)
+        const targetNodeId = normalizeTextValue(candidate.targetNodeId ?? candidate.target_node_id)
+        const label = normalizeTextValue(candidate.label)
+        if (!sourceNodeId || !targetNodeId || !label || !tree[sourceNodeId] || !tree[targetNodeId]) return null
+        return { type, sourceNodeId, targetNodeId, label, reason: normalizeTextValue(candidate.reason) }
+      }
+      return null
+    })
+    .filter((operation): operation is MapAdjustmentOperation => operation !== null)
+}
+
+function safeParseSuggestionJson(text: string) {
+  const trimmed = text.trim()
+  const firstBrace = trimmed.indexOf('{')
+  const lastBrace = trimmed.lastIndexOf('}')
+  const candidate = firstBrace !== -1 && lastBrace > firstBrace ? trimmed.slice(firstBrace, lastBrace + 1) : trimmed
+  try {
+    return JSON.parse(candidate) as { reply?: string; suggestions?: unknown }
+  } catch {
+    return { reply: stripJsonEcho(trimmed), suggestions: [] }
+  }
+}
+
+function normalizeConfidence(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, Math.min(100, Math.round(value)))
+  if (typeof value === 'string') {
+    const parsed = Number.parseInt(value, 10)
+    if (Number.isFinite(parsed)) return Math.max(0, Math.min(100, parsed))
+  }
+  return 60
+}
+
+function normalizeOperationPatch(value: unknown, fallbackSourceKind: PrdNodeSourceKind): PrdNodeOperationPatch {
+  const candidate = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  const sourceKind = normalizeSourceKind(candidate.sourceKind ?? candidate.source_kind, fallbackSourceKind)
+  const patch: PrdNodeOperationPatch = {
+    label: normalizeTextValue(candidate.label ?? candidate.title) ?? undefined,
+    summary: normalizeTextValue(candidate.summary) ?? undefined,
+    content: normalizeTextValue(candidate.content ?? candidate.body) ?? undefined,
+    type: candidate.type === undefined && candidate.nodeType === undefined ? undefined : normalizeNodeType(candidate.type ?? candidate.nodeType),
+    needsPolish: candidate.needsPolish === undefined && candidate.needs_polish === undefined ? undefined : normalizeBooleanValue(candidate.needsPolish ?? candidate.needs_polish, true),
+    docPath: normalizeTextValue(candidate.docPath ?? candidate.doc_path) ?? undefined,
+    audience: normalizeAudience(candidate.audience) ?? undefined,
+    handoffGoal: normalizeTextValue(candidate.handoffGoal ?? candidate.handoff_goal) ?? undefined,
+    qualityGate: normalizeTextValue(candidate.qualityGate ?? candidate.quality_gate) ?? undefined,
+    techNotes: normalizeTextValue(candidate.techNotes ?? candidate.tech_notes) ?? undefined,
+    sourceKind,
+    evidenceRefs: normalizeEvidenceRefs(candidate.evidenceRefs ?? candidate.evidence_refs ?? candidate.sources, sourceKind, sourceKind === 'upload' ? '上传资料' : '用户补充'),
+  }
+  return Object.fromEntries(Object.entries(patch).filter(([, item]) => item !== undefined)) as PrdNodeOperationPatch
+}
+
+function normalizePrdNodeSuggestions(
+  value: unknown,
+  tree: Record<string, PrdNode>,
+  selectedNodeId: string,
+  sources: NodeOperationSourceInput[],
+): PrdNodeOperationSuggestion[] {
+  if (!Array.isArray(value)) return []
+  const fallbackSourceKind: PrdNodeSourceKind = sources.some((source) => source.sourceKind === 'upload') ? 'upload' : 'user'
+  return value.slice(0, 5).flatMap((item, index): PrdNodeOperationSuggestion[] => {
+    if (!item || typeof item !== 'object') return []
+    const candidate = item as Record<string, unknown>
+    const operation = normalizeTextValue(candidate.operation ?? candidate.type)
+    if (operation !== 'create' && operation !== 'update') return []
+    const targetNodeId = normalizeTextValue(candidate.targetNodeId ?? candidate.target_node_id ?? candidate.nodeId ?? candidate.node_id)
+    if (operation === 'update' && (!targetNodeId || !tree[targetNodeId])) return []
+    const parentId = normalizeParentId(candidate.parentId ?? candidate.parent_id) ?? selectedNodeId
+    if (operation === 'create' && parentId && !tree[parentId]) return []
+    const rawPatch = candidate.patch && typeof candidate.patch === 'object' ? candidate.patch : candidate
+    const patch = normalizeOperationPatch(rawPatch, fallbackSourceKind)
+    if (operation === 'create' && !patch.label) return []
+    if (operation === 'update' && Object.keys(patch).length === 0) return []
+    const evidenceRefs = normalizeEvidenceRefs(candidate.evidenceRefs ?? candidate.evidence_refs ?? candidate.sources, patch.sourceKind ?? fallbackSourceKind, patch.sourceKind === 'upload' ? '上传资料' : '用户补充')
+    return [{
+      id: normalizeTextValue(candidate.id) ?? `suggestion-${Date.now()}-${index}`,
+      operation,
+      targetNodeId: operation === 'update' ? targetNodeId : null,
+      parentId: operation === 'create' ? parentId : null,
+      patch: evidenceRefs.length && !patch.evidenceRefs ? { ...patch, evidenceRefs } : patch,
+      rationale: normalizeTextValue(candidate.rationale ?? candidate.reason) ?? '基于补充资料生成节点调整建议。',
+      confidence: normalizeConfidence(candidate.confidence),
+      evidenceRefs: evidenceRefs.length ? evidenceRefs : patch.evidenceRefs ?? [],
+      status: 'pending',
+    }]
+  })
+}
+
+
+app.post('/api/prd-node-suggestions', async (req, res) => {
+  const { tree, selectedNodeId, supplementText, sources = [] } = req.body as PrdNodeSuggestionRequest
+  if (!tree || !selectedNodeId || !tree[selectedNodeId]) {
+    res.status(400).json({ error: '缺少导图树或当前节点。' })
+    return
+  }
+  const normalizedSources = sources
+    .map((source) => ({
+      name: normalizeTextValue(source.name) ?? '上传资料',
+      sourceKind: normalizeSourceKind(source.sourceKind, 'upload'),
+      text: normalizeTextValue(source.text),
+    }))
+    .filter((source): source is { name: string; sourceKind: PrdNodeSourceKind; text: string } => Boolean(source.text))
+  const userText = normalizeTextValue(supplementText)
+  if (!userText && !normalizedSources.length) {
+    res.status(400).json({ error: '请先输入补充说明或上传资料。' })
+    return
+  }
+  if (!anthropic) {
+    res.status(400).json({ error: '未配置 ANTHROPIC_API_KEY。' })
+    return
+  }
+
+  const selectedNode = tree[selectedNodeId]
+  const treeSummary = Object.values(tree)
+    .map((node) => `- ${node.id}｜parent=${node.parentId ?? 'ROOT'}｜${node.label}｜audience=${node.audience ?? '未定'}｜${node.summary}`)
+    .join('\n')
+  const sourceText = [
+    userText ? `## 用户补充\n${userText}` : null,
+    ...normalizedSources.map((source) => `## ${source.sourceKind === 'upload' ? '上传资料' : '用户补充'}：${source.name}\n${source.text}`),
+  ].filter(Boolean).join('\n\n')
+
+  const response = await anthropic.messages.create({
+    model,
+    max_tokens: 3000,
+    system: `你是 GameUX PromptForge 的导图节点补齐助手。你只能生成待用户确认的 create/update 建议，绝不能声称已经修改导图。
+返回 JSON：{"reply":"中文说明","suggestions":[]}。
+suggestions 最多 5 条，每条包含 id、operation(create/update)、targetNodeId、parentId、patch、rationale、confidence、evidenceRefs。
+MVC 分类必须按证据维度：model=领域事实/数据/配置/状态/规则；ctrl=流程编排/API/命令/校验/请求响应/状态流转；view=UI 布局/文案/动画/视觉反馈。禁止因为关键词出现就归类。
+如果建议只来自用户补充或上传资料，patch.sourceKind 和 evidenceRefs.sourceKind 必须用 user 或 upload，不得写成 prd。只有能从现有节点 content/extractedFrom 明确引用原 PRD 时才能标 prd。
+新增 MVC 子节点应挂在当前页面或用户指定页面下，label 使用中文标题并包含 Model/Ctrl/View，audience 使用 model/ctrl/view。`,
+    messages: [{
+      role: 'user',
+      content: `当前选中节点：${selectedNode.id}｜${selectedNode.label}\n\n当前导图：\n${treeSummary}\n\n补充资料：\n${sourceText}`,
+    }],
+  })
+
+  const parsed = safeParseSuggestionJson(textFromClaudeContent(response.content))
+  const suggestions = normalizePrdNodeSuggestions(parsed.suggestions, tree, selectedNodeId, normalizedSources)
+  res.json({
+    reply: parsed.reply ?? (suggestions.length ? '已生成待确认的节点调整建议。' : '没有找到可安全生成的节点建议。'),
+    suggestions,
+  })
+})
+
 app.post('/api/node-chat', async (req, res) => {
   const { nodeId, messages, tree } = req.body as NodeChatRequest
 
@@ -1497,6 +2073,20 @@ app.post('/api/node-chat', async (req, res) => {
   }
 
   const parentNode = targetNode.parentId ? tree[targetNode.parentId] : null
+  const mvcChildren = targetNode.type === 'page'
+    ? targetNode.children.map((childId) => tree[childId]).filter((node): node is PrdNode => Boolean(node))
+    : []
+  const mvcChildContext = mvcChildren.length
+    ? `\n\n页面下属 MVC 子节点上下文：\n${mvcChildren.map((child) => [
+        `- 编号: ${child.id}`,
+        `  类型: ${formatNodeType(child.type)}`,
+        `  标题: ${child.label}`,
+        `  摘要: ${child.summary}`,
+        `  导出路径: ${child.docPath ?? '未指定'}`,
+        `  内容: ${child.content}`,
+        child.techNotes ? `  技术备注: ${child.techNotes}` : null,
+      ].filter(Boolean).join('\n')).join('\n\n')}`
+    : ''
 
   const nodeContext = `目标节点：
 编号: ${targetNode.id}
@@ -1507,7 +2097,7 @@ app.post('/api/node-chat', async (req, res) => {
 面向角色: ${formatAudience(targetNode.audience)}
 AI 接力目标: ${targetNode.handoffGoal ?? '未指定'}
 质量门槛: ${targetNode.qualityGate ?? '未指定'}
-内容: ${targetNode.content}${targetNode.techNotes ? `\n技术备注: ${targetNode.techNotes}` : ''}${parentNode ? `\n\n父节点上下文：\n标题: ${parentNode.label}\n摘要: ${parentNode.summary}` : ''}`
+内容: ${targetNode.content}${targetNode.techNotes ? `\n技术备注: ${targetNode.techNotes}` : ''}${parentNode ? `\n\n父节点上下文：\n标题: ${parentNode.label}\n摘要: ${parentNode.summary}` : ''}${mvcChildContext}`
 
   const hasReferenceImages = messages.some((message) => hasImages(message.content))
 
@@ -2013,6 +2603,7 @@ function buildNodePath(nodeId: string, tree: Record<string, PrdNode>): string {
 
 function formatNodeType(type: PrdNode['type']) {
   if (type === 'module') return '模块'
+  if (type === 'page') return '页面'
   if (type === 'ui') return '界面/交互'
   return '功能'
 }
@@ -2030,7 +2621,7 @@ function formatAudience(audience: PrdNode['audience']) {
 }
 
 function generateMarkdown(node: PrdNode): string {
-  const statusLabel = node.status === 'done' ? '已完成' : node.needsPolish ? '待打磨' : '无需打磨'
+  const statusLabel = node.status === 'done' ? '已完成' : node.status === 'pending_refine' || node.needsPolish ? '待打磨' : '无需打磨'
   const lines = [
     `# ${node.label}`,
     '',
@@ -2058,6 +2649,12 @@ function generateMarkdown(node: PrdNode): string {
     '',
     node.content,
   ]
+  if (node.references?.length) {
+    lines.push('', '## 跨页面引用', '')
+    for (const reference of node.references) {
+      lines.push(`- ${reference.label}${reference.targetNodeId ? ` → ${reference.targetNodeId}` : ''}${reference.reason ? `：${reference.reason}` : ''}`)
+    }
+  }
   if (node.techNotes) {
     lines.push('', '## 技术备注', '', node.techNotes)
   }
@@ -2111,7 +2708,7 @@ function generateIndexMarkdown(exportedNodes: PrdNode[], tree: Record<string, Pr
   ])
 
   const topLevelLines = Object.values(tree)
-    .filter((node) => node.parentId === null)
+    .filter((node) => node.parentId === SOURCE_OUTLINE_ROOT_ID || (node.parentId === null && node.id !== SOURCE_OUTLINE_ROOT_ID))
     .sort((a, b) => a.order - b.order)
     .map((node) => `- **${node.label}**：${node.summary}`)
 
@@ -2139,9 +2736,65 @@ function generateIndexMarkdown(exportedNodes: PrdNode[], tree: Record<string, Pr
   ].join('\n')
 }
 
+function resolveGeneratedSpecPath(docPath: string) {
+  const normalized = docPath.replace(/\\/g, '/').trim()
+  if (!normalized || normalized.startsWith('/') || /^[a-zA-Z]:\//.test(normalized) || normalized.split('/').some((part) => part === '..')) {
+    throw new Error('文档路径不允许访问生成目录之外的位置')
+  }
+  const safeRelative = normalizeExportDocPath(normalized)
+  if (!safeRelative) throw new Error('文档路径无效')
+  const resolved = path.resolve(SPEC_EXPORT_ROOT, safeRelative)
+  const rootWithSep = SPEC_EXPORT_ROOT.endsWith(path.sep) ? SPEC_EXPORT_ROOT : `${SPEC_EXPORT_ROOT}${path.sep}`
+  if (resolved !== SPEC_EXPORT_ROOT && !resolved.startsWith(rootWithSep)) {
+    throw new Error('文档路径越界')
+  }
+  return { resolved, relative: safeRelative }
+}
+
+function writeSpecFolder(tree: Record<string, PrdNode>) {
+  const nodes = Object.values(tree)
+  const pageNodes = nodes.filter((node) => node.type === 'page' && node.children.length === 0 && node.status === 'done')
+  if (!pageNodes.length) throw new Error('没有找到已确认的页面 spec 节点')
+  mkdirSync(SPEC_EXPORT_ROOT, { recursive: true })
+  const pathByNodeId = new Map<string, string>()
+  const documents: Array<{ nodeId: string; docPath: string }> = []
+  for (const node of pageNodes) {
+    const relativePath = uniqueExportPath(buildNodePath(node.id, tree), Object.fromEntries(documents.map((doc) => [doc.docPath, new Uint8Array()])))
+    const target = resolveGeneratedSpecPath(relativePath)
+    mkdirSync(path.dirname(target.resolved), { recursive: true })
+    writeFileSync(target.resolved, generateMarkdown({ ...node, docPath: target.relative }), 'utf-8')
+    pathByNodeId.set(node.id, target.relative)
+    documents.push({ nodeId: node.id, docPath: target.relative })
+  }
+  writeFileSync(path.join(SPEC_EXPORT_ROOT, '00-INDEX.md'), generateIndexMarkdown(pageNodes, tree, pathByNodeId), 'utf-8')
+  return { exportDir: SPEC_EXPORT_ROOT, documents }
+}
+
 interface ExportZipRequest {
   tree: Record<string, PrdNode>
 }
+
+interface ExportNodeRequest {
+  tree: Record<string, PrdNode>
+  nodeId?: string
+}
+
+app.post('/api/export-node', (req, res) => {
+  const { tree, nodeId } = req.body as ExportNodeRequest
+  if (!tree || typeof tree !== 'object' || !nodeId) {
+    res.status(400).json({ error: '缺少导图树数据或节点 ID' })
+    return
+  }
+  const node = tree[nodeId]
+  if (!node) {
+    res.status(400).json({ error: `导图中找不到节点：${nodeId}` })
+    return
+  }
+  const filename = sanitizeDocPathSegment(`${node.id}-${sanitizeLabel(node.label)}.md`)
+  res.setHeader('Content-Type', 'text/markdown; charset=utf-8')
+  res.setHeader('Content-Disposition', contentDispositionHeader('inline', filename))
+  res.end(generateMarkdown(node))
+})
 
 app.post('/api/export-zip', (req, res) => {
   const { tree } = req.body as ExportZipRequest
@@ -2176,6 +2829,40 @@ app.post('/api/export-zip', (req, res) => {
   res.setHeader('Content-Type', 'application/zip')
   res.setHeader('Content-Disposition', 'attachment; filename="spec-export.zip"')
   res.end(Buffer.from(zipped))
+})
+
+app.post('/api/export-spec-folder', (req, res) => {
+  const { tree } = req.body as ExportZipRequest
+  if (!tree || typeof tree !== 'object') {
+    res.status(400).json({ error: '缺少导图树数据' })
+    return
+  }
+  try {
+    res.json(writeSpecFolder(tree))
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : '导出页面 spec 文件夹失败' })
+  }
+})
+
+app.post('/api/open-doc', (req, res) => {
+  const { docPath } = req.body as { docPath?: string }
+  if (!docPath) {
+    res.status(400).json({ error: '缺少文档路径' })
+    return
+  }
+  try {
+    const { resolved } = resolveGeneratedSpecPath(docPath)
+    if (!existsSync(resolved)) {
+      res.status(404).json({ error: '文档尚未生成，请先导出 spec 文件夹' })
+      return
+    }
+    const command = process.platform === 'win32' ? 'explorer' : process.platform === 'darwin' ? 'open' : 'xdg-open'
+    const child = spawn(command, [resolved], { detached: true, stdio: 'ignore', windowsHide: true })
+    child.unref()
+    res.json({ ok: true })
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : '打开文档失败' })
+  }
 })
 
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

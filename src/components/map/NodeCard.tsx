@@ -9,8 +9,12 @@ interface NodeCardProps {
   onNodeDoubleClick: (id: string) => void
 }
 
+function canForgeNode(node: PrdNode) {
+  return node.type === 'page' && node.needsPolish && node.status !== 'done'
+}
+
 function StatusBadge({ node }: { node: PrdNode }) {
-  if (node.status === 'pending' && node.needsPolish) {
+  if (canForgeNode(node)) {
     return (
       <div className="flex items-center gap-xs bg-[#b22a00]/20 border border-[#ff5429] text-[#ff8b6b] px-2 py-1 rounded-full text-[10px] font-bold tracking-wider">
         <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>auto_awesome</span>
@@ -18,6 +22,7 @@ function StatusBadge({ node }: { node: PrdNode }) {
       </div>
     )
   }
+  if (node.status === 'pending_refine') return null
   if (node.status === 'pending') {
     return (
       <div className="flex items-center gap-xs bg-surface-container-high border border-outline-variant text-on-surface-variant px-2 py-1 rounded-full text-[10px] font-bold tracking-wider">
@@ -64,7 +69,7 @@ export function NodeCard({ node, isSelected, onNodeClick, onNodeDoubleClick }: N
       >
         <div className="flex items-center gap-sm mb-sm text-primary">
           <span className="material-symbols-outlined">folder_special</span>
-          <span className="font-label-md text-label-md">顶层目录</span>
+          <span className="font-label-md text-label-md">原文目录</span>
         </div>
         <h2 className="mb-sm line-clamp-2 font-headline-sm text-headline-sm text-on-surface">{node.label}</h2>
         <div className="min-h-0 flex-1 overflow-hidden rounded border border-outline-variant/60 bg-surface-container-low/70 p-sm">
@@ -95,6 +100,8 @@ export function NodeCard({ node, isSelected, onNodeClick, onNodeDoubleClick }: N
     )
   }
 
+  const canForge = canForgeNode(node)
+
   return (
     <div
       onClick={handleClick}
@@ -103,7 +110,7 @@ export function NodeCard({ node, isSelected, onNodeClick, onNodeDoubleClick }: N
       <div className="mb-sm flex items-start justify-between gap-sm">
         <div className="min-w-0">
           <div className="mb-xs flex items-center gap-xs text-primary">
-            <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>article</span>
+            <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>{node.type === 'page' ? 'web_asset' : 'article'}</span>
             <span className="truncate font-code-sm text-code-sm">{node.docPath ?? node.id}</span>
           </div>
           <h4 className="line-clamp-2 font-headline-sm text-headline-sm text-on-surface">{node.label}</h4>
@@ -116,7 +123,7 @@ export function NodeCard({ node, isSelected, onNodeClick, onNodeDoubleClick }: N
       <div className="mt-sm flex items-center justify-between border-t border-outline-variant pt-sm">
         <span className="font-label-md text-label-md text-on-surface-variant">文档预览</span>
         <span className="font-label-md text-label-md text-primary opacity-0 group-hover:opacity-100 transition-opacity">
-          双击打磨
+        {canForge ? '双击打磨' : '单击查看'}
         </span>
       </div>
     </div>

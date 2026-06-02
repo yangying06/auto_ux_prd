@@ -1,6 +1,6 @@
 import type { ChatMessage, ChatResponse, ContentBlock, ProxyHealth, RagSearchResult } from '../types/chat'
 import type { UXRequirementState } from '../types/uxRequirement'
-import type { PrdNode } from '../types/prdNode'
+import type { MapAdjustmentOperation, PrdNode, PrdNodeOperationSuggestion } from '../types/prdNode'
 
 async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${baseUrl}${path}`, {
@@ -142,23 +142,92 @@ export function sendNodeChatMessage(
   })
 }
 
+export interface MapAdjustmentResponse {
+  reply: string
+  operations: MapAdjustmentOperation[]
+}
+
+export function requestMapAdjustment(
+  baseUrl: string,
+  messages: ChatMessage[],
+  tree: Record<string, PrdNode>
+) {
+  return requestJson<MapAdjustmentResponse>(baseUrl, '/api/map-adjust', {
+    method: 'POST',
+    body: JSON.stringify({ messages, tree }),
+  })
+}
+
+export interface NodeOperationSourceInput {
+  name: string
+  sourceKind: 'user' | 'upload'
+  text: string
+}
+
+export interface NodeOperationSuggestionPayload {
+  tree: Record<string, PrdNode>
+  selectedNodeId: string
+  supplementText?: string
+  sources?: NodeOperationSourceInput[]
+}
+
+export interface NodeOperationSuggestionResponse {
+  reply: string
+  suggestions: PrdNodeOperationSuggestion[]
+}
+
+export function suggestPrdNodeOperations(
+  baseUrl: string,
+  payload: NodeOperationSuggestionPayload,
+) {
+  return requestJson<NodeOperationSuggestionResponse>(baseUrl, '/api/prd-node-suggestions', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 // ── Export Spec API ──────────────────────────────────────────────────────────
 
-export async function exportSpec(
+export interface SpecFolderExportResponse {
+  exportDir: string
+  documents: Array<{ nodeId: string; docPath: string }>
+}
+
+export function exportSpecFolder(
   baseUrl: string,
   tree: Record<string, PrdNode>
-): Promise<Blob> {
-  const response = await fetch(`${baseUrl}/api/export-zip`, {
+) {
+  return requestJson<SpecFolderExportResponse>(baseUrl, '/api/export-spec-folder', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ tree }),
   })
+}
+
+export function openGeneratedDoc(baseUrl: string, docPath: string) {
+  return requestJson<{ ok: true }>(baseUrl, '/api/open-doc', {
+    method: 'POST',
+    body: JSON.stringify({ docPath }),
+  })
+}
+
+export async function exportNodeMarkdown(
+  baseUrl: string,
+  tree: Record<string, PrdNode>,
+  nodeId: string,
+) {
+  const response = await fetch(`${baseUrl}/api/export-node`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tree, nodeId }),
+  })
   if (!response.ok) {
-    let message = `Export failed: ${response.status}`
+    let message = `Request failed: ${response.status}`
     try {
       const data = await response.json() as { error?: string }
       if (data.error) message = data.error
-    } catch { /* ignore parse error, use status message */ }
+    } catch {
+      // Keep status message.
+    }
     throw new Error(message)
   }
   return response.blob()

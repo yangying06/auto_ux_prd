@@ -14,6 +14,7 @@ interface StateCanvasProps {
   isExportingPrompt: boolean
   onGeneratePrototype: (instruction?: string) => void
   onRestorePrototype: (id: string) => void
+  onClearPrototypeHistory: () => void
   onExportPrompt: () => void
   onOpenBolt: () => void
 }
@@ -106,6 +107,7 @@ export function StateCanvas({
   isExportingPrompt,
   onGeneratePrototype,
   onRestorePrototype,
+  onClearPrototypeHistory,
   onExportPrompt,
   onOpenBolt,
 }: StateCanvasProps) {
@@ -259,6 +261,7 @@ export function StateCanvas({
           isLoading={isGeneratingPrototype}
           onIterate={onGeneratePrototype}
           onRestore={onRestorePrototype}
+          onClearHistory={onClearPrototypeHistory}
         />
       </div>
     </main>

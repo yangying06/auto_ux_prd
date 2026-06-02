@@ -1,4 +1,3 @@
-// PrdNode — a single node in the decomposed PRD tree.
 export type PrdNodeAudience =
   | 'overview'
   | 'client'
@@ -8,36 +7,137 @@ export type PrdNodeAudience =
   | 'acceptance'
   | 'appendix'
   | 'mixed'
+  | 'model'
+  | 'ctrl'
+  | 'view'
 
-export interface PrdNode {
-  id: string                              // e.g. "CE-01". Stable unique ID.
-  parentId: string | null                 // null for root-level nodes
-  label: string                           // Short display name (3-8 words)
-  summary: string                         // One sentence summary
-  content: string                         // Full extracted text from PRD
-  type: 'module' | 'feature' | 'ui'      // module=top-level, feature=sub-function, ui=UI interaction
-  status: 'pending' | 'done'             // polishing status
-  level: number                           // depth in tree; root children = 1
-  order: number                           // sort position among siblings (0-indexed)
-  needsPolish: boolean                    // true if node describes a UI interaction needing Deep Forge
-  extractedFrom: string | null            // source text range (null in Phase 1, used in Phase 2+)
-  techNotes: string | null               // optional implementation notes
-  children: string[]                      // child node IDs (populated by normalizer, not Claude)
-  docPath?: string | null                 // export path for a Markdown document packet
-  audience?: PrdNodeAudience | null       // primary downstream consumer / responsibility axis
-  handoffGoal?: string | null             // how an AI agent should use this document
-  qualityGate?: string | null             // checks that prove the document is ready for handoff
+export type PrdNodeType = 'module' | 'feature' | 'ui' | 'page'
+export type PrdNodeStatus = 'pending' | 'pending_refine' | 'done'
+export type PrdNodeSourceKind = 'prd' | 'user' | 'upload'
+
+export interface PrdNodeEvidenceRef {
+  sourceKind: PrdNodeSourceKind
+  sourceLabel: string
+  quote?: string | null
 }
 
-// PrdTree — the flat node map stored in Zustand.
-// Keyed by node ID for O(1) lookup.
+export interface PrdNodeReference {
+  targetNodeId: string | null
+  label: string
+  reason?: string | null
+  sourceNodeId?: string | null
+}
+
+export interface CreatePageNodeInput {
+  title: string
+  parentId?: string | null
+  summary?: string | null
+  content?: string | null
+}
+
+export interface UpdateNodePatch {
+  label?: string
+  summary?: string
+  content?: string
+  docPath?: string | null
+  references?: PrdNodeReference[]
+  techNotes?: string | null
+  status?: PrdNodeStatus
+  type?: PrdNodeType
+  audience?: PrdNodeAudience | null
+  handoffGoal?: string | null
+  qualityGate?: string | null
+  sourceKind?: PrdNodeSourceKind
+  evidenceRefs?: PrdNodeEvidenceRef[]
+}
+
+export type PrdNodeOperationPatch = Partial<Pick<
+  PrdNode,
+  | 'label'
+  | 'summary'
+  | 'content'
+  | 'type'
+  | 'needsPolish'
+  | 'docPath'
+  | 'audience'
+  | 'handoffGoal'
+  | 'qualityGate'
+  | 'techNotes'
+  | 'sourceKind'
+  | 'evidenceRefs'
+>>
+
+export interface PrdNodeOperationSuggestion {
+  id: string
+  operation: 'create' | 'update'
+  targetNodeId?: string | null
+  parentId?: string | null
+  patch: PrdNodeOperationPatch
+  rationale: string
+  confidence: number
+  evidenceRefs: PrdNodeEvidenceRef[]
+  status?: 'pending' | 'applied' | 'dismissed'
+}
+
+export type MapAdjustmentOperation =
+  | {
+      type: 'create_node'
+      title: string
+      parentId?: string | null
+      summary?: string | null
+      content?: string | null
+    }
+  | {
+      type: 'delete_node'
+      nodeId: string
+    }
+  | {
+      type: 'update_node'
+      nodeId: string
+      patch: UpdateNodePatch
+    }
+  | {
+      type: 'move_content'
+      fromNodeId: string
+      toNodeId: string
+      content: string
+    }
+  | {
+      type: 'add_reference'
+      sourceNodeId: string
+      targetNodeId: string
+      label: string
+      reason?: string | null
+    }
+
+export interface PrdNode {
+  id: string
+  parentId: string | null
+  label: string
+  summary: string
+  content: string
+  type: PrdNodeType
+  status: PrdNodeStatus
+  level: number
+  order: number
+  needsPolish: boolean
+  extractedFrom: string | null
+  techNotes: string | null
+  children: string[]
+  docPath?: string | null
+  audience?: PrdNodeAudience | null
+  handoffGoal?: string | null
+  qualityGate?: string | null
+  references?: PrdNodeReference[]
+  sourceKind?: PrdNodeSourceKind
+  evidenceRefs?: PrdNodeEvidenceRef[]
+}
+
 export type PrdTree = Record<string, PrdNode>
 
-// DecompositionStatus — lifecycle of the decomposition process.
 export type DecompositionStatus = 'idle' | 'decomposing' | 'done' | 'error'
 
-// DecompositionStep — one step in the progress display.
 export interface DecompositionStep {
-  label: string                           // e.g. "Decomposing top-level modules" or "Expanding: Pyramid Lottery"
+  label: string
   status: 'pending' | 'active' | 'complete' | 'error'
 }

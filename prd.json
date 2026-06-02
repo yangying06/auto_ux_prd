@@ -17,8 +17,8 @@
         "Typecheck passes"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "已实现页面级 PrdNode 类型、pending_refine 状态、docPath 与跨页面 references；store 支持旧树兼容加载并新增页面节点操作。验证：npm run typecheck:server、npm run typecheck、npm run build 均通过。"
     },
     {
       "id": "US-002",
@@ -35,8 +35,8 @@
         "Verify create, edit, delete, and open-document flows in the browser"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "已在导图页提供新建页面、右侧抽屉编辑/删除/打开文档操作；打开文档通过本地 Express 代理，服务端限制在 generated/specs 目录。验证：npm run typecheck:server、npm run typecheck、npm run build 均通过。"
     },
     {
       "id": "US-003",
@@ -54,8 +54,8 @@
         "Verify the suggestion review and confirm/cancel behavior in the browser"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "已新增左侧 AI 调整对话框和 /api/map-adjust，AI 只返回 create/delete/update/move/add_reference 操作建议；前端必须点击确认应用才会修改导图，取消不改变树。验证：npm run typecheck:server、npm run typecheck、npm run build 均通过。"
     },
     {
       "id": "US-004",
@@ -72,8 +72,8 @@
         "Existing decomposition flow still reaches the map view with page-level nodes"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "已将拆分 prompt 改为页面/界面/弹窗优先，避免按钮字段级展开；normalizeDecompositionNodes 会默认 page/pending_refine/docPath/references，并更新 MOCK_DECOMPOSE 示例。验证：npm run typecheck:server、npm run typecheck、npm run build 均通过。"
     },
     {
       "id": "US-005",
@@ -90,8 +90,8 @@
         "Verify in the browser that one page can be refined while other pages remain 待打磨"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "ForgePage 仍以当前 nodeId 为唯一打磨对象；nodePatch 只更新当前页面，nodeComplete=true 时只将当前页面置为 done，其他 pending_refine 页面保持待打磨。验证：npm run typecheck:server、npm run typecheck、npm run build 均通过。"
     },
     {
       "id": "US-006",
@@ -108,8 +108,8 @@
         "Verify exported files exist and can be opened from their corresponding page nodes"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "已新增 /api/export-spec-folder 写入 generated/specs 页面级 Markdown 文件，并新增 /api/open-doc 安全打开；路径会清洗并限制在 SPEC_EXPORT_ROOT 下，拒绝路径穿越和任意本地路径。验证：npm run typecheck:server、npm run typecheck、npm run build 均通过。"
     }
   ]
 }

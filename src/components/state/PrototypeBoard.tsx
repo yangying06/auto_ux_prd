@@ -8,9 +8,10 @@ interface PrototypeBoardProps {
   isLoading: boolean
   onIterate: (instruction: string) => void
   onRestore: (id: string) => void
+  onClearHistory: () => void
 }
 
-export function PrototypeBoard({ html, history, isLoading, onIterate, onRestore }: PrototypeBoardProps) {
+export function PrototypeBoard({ html, history, isLoading, onIterate, onRestore, onClearHistory }: PrototypeBoardProps) {
   const [draft, setDraft] = useState('')
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const normalizedHtml = useMemo(() => (html ? normalizePrototypeHtml(html) : null), [html])
@@ -46,20 +47,31 @@ export function PrototypeBoard({ html, history, isLoading, onIterate, onRestore 
             {isLoading ? '生成中...' : html ? '原型已就绪' : '等待需求输入'}
           </span>
         </div>
-        <select
-          value=""
-          onChange={(event) => handleRestore(event.target.value)}
-          disabled={history.length === 0 || isLoading}
-          title="恢复历史版本"
-          className="h-8 max-w-[180px] rounded-md border border-outline-variant/40 bg-surface-container-high px-sm font-mono text-[11px] text-on-surface-variant outline-none disabled:opacity-40"
-        >
-          <option value="">历史版本</option>
-          {history.map((version) => (
-            <option key={version.id} value={version.id}>
-              {version.label} · {formatPrototypeVersionTime(version.createdAt)}
-            </option>
-          ))}
-        </select>
+        <div className="flex shrink-0 items-center gap-xs">
+          <select
+            value=""
+            onChange={(event) => handleRestore(event.target.value)}
+            disabled={history.length === 0 || isLoading}
+            title="恢复历史版本"
+            className="h-8 max-w-[180px] rounded-md border border-outline-variant/40 bg-surface-container-high px-sm font-mono text-[11px] text-on-surface-variant outline-none disabled:opacity-40"
+          >
+            <option value="">历史版本</option>
+            {history.map((version) => (
+              <option key={version.id} value={version.id}>
+                {version.label} · {formatPrototypeVersionTime(version.createdAt)}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={onClearHistory}
+            disabled={history.length === 0 || isLoading}
+            title="清空历史版本"
+            className="h-8 rounded-md border border-outline-variant/40 bg-surface-container-high px-sm font-mono text-[11px] text-on-surface-variant transition-colors hover:border-error hover:text-error disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            清空历史
+          </button>
+        </div>
       </div>
 
       <div className="relative z-0 flex min-h-0 flex-1 items-center justify-center overflow-hidden p-md">
