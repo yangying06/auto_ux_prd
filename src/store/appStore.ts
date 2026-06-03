@@ -32,6 +32,13 @@ export interface PrototypeVersion {
   note: string | null
 }
 
+export interface NodePrototypeState {
+  prototypeHtml: string | null
+  prototypeHistory: PrototypeVersion[]
+  prototypeVariants: PrototypeVariant[]
+  selectedVariantIndex: number
+}
+
 interface PrototypeVersionMeta {
   mode?: PrototypeVersion['mode']
   note?: string | null
@@ -223,6 +230,28 @@ function makePrototypeVersion(
   }
 }
 
+function emptyNodePrototypeState(): NodePrototypeState {
+  return {
+    prototypeHtml: null,
+    prototypeHistory: [],
+    prototypeVariants: [],
+    selectedVariantIndex: -1,
+  }
+}
+
+function getNodePrototypeState(state: AppStoreState, nodeId: string): NodePrototypeState {
+  return state.nodePrototypeStates[nodeId] ?? emptyNodePrototypeState()
+}
+
+function setNodePrototypeState(state: AppStoreState, nodeId: string, nodeState: NodePrototypeState) {
+  return {
+    nodePrototypeStates: {
+      ...state.nodePrototypeStates,
+      [nodeId]: nodeState,
+    },
+  }
+}
+
 interface AppStoreState {
   requirement: UXRequirementState
   messages: ChatMessage[]
@@ -231,6 +260,7 @@ interface AppStoreState {
   prototypeHistory: PrototypeVersion[]
   prototypeVariants: PrototypeVariant[]
   selectedVariantIndex: number
+  nodePrototypeStates: Record<string, NodePrototypeState>
   settings: AppSettings
   prdTree: PrdTree | null
   selectedNodeId: string | null
@@ -262,6 +292,14 @@ interface AppStoreState {
   updatePrototypeVariant: (index: number, patch: Partial<PrototypeVariant>) => void
   selectPrototypeVariant: (index: number) => void
   clearPrototypeVariants: () => void
+  setNodePrototypeHtml: (nodeId: string, html: string | null, meta?: PrototypeVersionMeta) => void
+  recordNodePrototypeHistory: (nodeId: string, html: string, meta?: PrototypeVersionMeta) => void
+  restoreNodePrototypeVersion: (nodeId: string, id: string) => void
+  clearNodePrototypeHistory: (nodeId: string) => void
+  setNodePrototypeVariants: (nodeId: string, variants: PrototypeVariant[]) => void
+  updateNodePrototypeVariant: (nodeId: string, index: number, patch: Partial<PrototypeVariant>) => void
+  selectNodePrototypeVariant: (nodeId: string, index: number) => void
+  clearNodePrototypeVariants: (nodeId: string) => void
   updateSettings: (settings: AppSettings) => void
   resetSession: () => void
   resetRequirement: () => void
@@ -284,6 +322,7 @@ export const useAppStore = create<AppStoreState>()(
       prototypeHistory: [],
       prototypeVariants: [],
       selectedVariantIndex: -1,
+      nodePrototypeStates: {},
       settings: defaultSettings,
       prdTree: null,
       selectedNodeId: null,
@@ -607,6 +646,75 @@ export const useAppStore = create<AppStoreState>()(
           }
         }),
       clearPrototypeVariants: () => set({ prototypeVariants: [], selectedVariantIndex: -1 }),
+      setNodePrototypeHtml: (nodeId, prototypeHtml, meta) =>
+        set((state) => {
+          const current = getNodePrototypeState(state, nodeId)
+          if (!prototypeHtml) {
+            return setNodePrototypeState(state, nodeId, {
+              ...current,
+              prototypeHtml: null,
+              prototypeHistory: [],
+            })
+          }
+          const version = makePrototypeVersion(prototypeHtml, current.prototypeHistory, meta)
+          return setNodePrototypeState(state, nodeId, {
+            ...current,
+            prototypeHtml,
+            prototypeHistory: [version, ...current.prototypeHistory].slice(0, PROTOTYPE_HISTORY_LIMIT),
+          })
+        }),
+      recordNodePrototypeHistory: (nodeId, html, meta) =>
+        set((state) => {
+          const current = getNodePrototypeState(state, nodeId)
+          const version = makePrototypeVersion(html, current.prototypeHistory, meta)
+          return setNodePrototypeState(state, nodeId, {
+            ...current,
+            prototypeHistory: [version, ...current.prototypeHistory].slice(0, PROTOTYPE_HISTORY_LIMIT),
+          })
+        }),
+      restoreNodePrototypeVersion: (nodeId, id) =>
+        set((state) => {
+          const current = getNodePrototypeState(state, nodeId)
+          const version = current.prototypeHistory.find((item) => item.id === id)
+          if (!version) return state
+          return setNodePrototypeState(state, nodeId, { ...current, prototypeHtml: version.html })
+        }),
+      clearNodePrototypeHistory: (nodeId) =>
+        set((state) => {
+          const current = getNodePrototypeState(state, nodeId)
+          return setNodePrototypeState(state, nodeId, { ...current, prototypeHistory: [] })
+        }),
+      setNodePrototypeVariants: (nodeId, variants) =>
+        set((state) => {
+          const current = getNodePrototypeState(state, nodeId)
+          return setNodePrototypeState(state, nodeId, { ...current, prototypeVariants: variants, selectedVariantIndex: -1 })
+        }),
+      updateNodePrototypeVariant: (nodeId, index, patch) =>
+        set((state) => {
+          const current = getNodePrototypeState(state, nodeId)
+          return setNodePrototypeState(state, nodeId, {
+            ...current,
+            prototypeVariants: current.prototypeVariants.map((variant) =>
+              variant.index === index ? { ...variant, ...patch } : variant,
+            ),
+          })
+        }),
+      selectNodePrototypeVariant: (nodeId, index) =>
+        set((state) => {
+          const current = getNodePrototypeState(state, nodeId)
+          const variant = current.prototypeVariants.find((item) => item.index === index)
+          if (!variant) return state
+          return setNodePrototypeState(state, nodeId, {
+            ...current,
+            selectedVariantIndex: index,
+            prototypeHtml: variant.html ?? current.prototypeHtml,
+          })
+        }),
+      clearNodePrototypeVariants: (nodeId) =>
+        set((state) => {
+          const current = getNodePrototypeState(state, nodeId)
+          return setNodePrototypeState(state, nodeId, { ...current, prototypeVariants: [], selectedVariantIndex: -1 })
+        }),
       updateSettings: (settings) => set({ settings }),
       resetSession: () => set({ messages: initialMessages, latestRag: null, prototypeHtml: null, prototypeHistory: [], prototypeVariants: [], selectedVariantIndex: -1 }),
       resetRequirement: () => set({ requirement: emptyRequirement, latestRag: null, prototypeHtml: null, prototypeHistory: [], prototypeVariants: [], selectedVariantIndex: -1 }),
@@ -624,13 +732,13 @@ export const useAppStore = create<AppStoreState>()(
       mergePartialTree: (nodes) =>
         set((state) => ({ prdTree: rebuildPrdTreeLinks({ ...(state.prdTree ?? {}), ...nodes }) })),
       resetDecomposition: () =>
-        set({ prdTree: null, selectedNodeId: null, decompositionStatus: 'idle', decompositionSteps: [], nodeChats: {}, nodeOperationSuggestions: {} }),
+        set({ prdTree: null, selectedNodeId: null, decompositionStatus: 'idle', decompositionSteps: [], nodeChats: {}, nodeOperationSuggestions: {}, nodePrototypeStates: {} }),
     }),
     {
       name: STORAGE_KEY,
       version: STORAGE_VERSION,
       migrate: (persistedState: unknown, version: number): unknown => {
-        if (version === 3 || version === 4 || version === 5 || version === 6) {
+        if (version === 3 || version === 4 || version === 5 || version === 6 || version === 7 || version === 8) {
           const previous = persistedState as {
             requirement?: unknown
             messages?: unknown
@@ -641,6 +749,7 @@ export const useAppStore = create<AppStoreState>()(
             prototypeHtml?: unknown
             prototypeHistory?: unknown
             nodeChats?: unknown
+            nodePrototypeStates?: unknown
           }
           const prdTree = normalizePersistedPrdTree(previous.prdTree)
           return {
@@ -653,6 +762,7 @@ export const useAppStore = create<AppStoreState>()(
             prototypeHtml: typeof previous.prototypeHtml === 'string' ? previous.prototypeHtml : null,
             prototypeHistory: Array.isArray(previous.prototypeHistory) ? previous.prototypeHistory.slice(0, PROTOTYPE_HISTORY_LIMIT) : [],
             nodeChats: prdTree && previous.nodeChats && typeof previous.nodeChats === 'object' ? previous.nodeChats : {},
+            nodePrototypeStates: prdTree && previous.nodePrototypeStates && typeof previous.nodePrototypeStates === 'object' ? previous.nodePrototypeStates : {},
           }
         }
         // Unknown version — safe reset
@@ -666,6 +776,7 @@ export const useAppStore = create<AppStoreState>()(
           prototypeHtml: null,
           prototypeHistory: [],
           nodeChats: {},
+          nodePrototypeStates: {},
         }
       },
       partialize: (state) => ({
@@ -678,6 +789,7 @@ export const useAppStore = create<AppStoreState>()(
         prdTree: state.prdTree as PrdTree | null,
         selectedNodeId: state.selectedNodeId,
         nodeChats: persistableNodeChats(state.nodeChats),
+        nodePrototypeStates: state.nodePrototypeStates,
         // decompositionStatus: intentionally NOT persisted (session-only)
         // decompositionSteps: intentionally NOT persisted (session-only)
       }),

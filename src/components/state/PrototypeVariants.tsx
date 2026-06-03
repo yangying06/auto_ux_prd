@@ -80,7 +80,7 @@ export function PrototypeVariants({ variants, selectedIndex, onSelect, onRetry }
               ) : null}
             </div>
 
-            <div className="relative flex aspect-[750/1624] min-h-0 w-full items-center justify-center overflow-hidden bg-black">
+            <div className="relative flex aspect-[375/812] min-h-0 w-full items-center justify-center overflow-hidden bg-black">
               {variant.status === 'complete' && variant.html ? (
                 <VariantThumbnail html={variant.html} />
               ) : variant.status === 'streaming' && variant.html ? (

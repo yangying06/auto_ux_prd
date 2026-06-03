@@ -6,12 +6,23 @@ interface PrototypeBoardProps {
   html: string | null
   history: PrototypeVersion[]
   isLoading: boolean
+  singlePrototypeOnly?: boolean
+  onSinglePrototypeOnlyChange?: (checked: boolean) => void
   onIterate: (instruction: string) => void
   onRestore: (id: string) => void
   onClearHistory: () => void
 }
 
-export function PrototypeBoard({ html, history, isLoading, onIterate, onRestore, onClearHistory }: PrototypeBoardProps) {
+export function PrototypeBoard({
+  html,
+  history,
+  isLoading,
+  singlePrototypeOnly,
+  onSinglePrototypeOnlyChange,
+  onIterate,
+  onRestore,
+  onClearHistory,
+}: PrototypeBoardProps) {
   const [draft, setDraft] = useState('')
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const normalizedHtml = useMemo(() => (html ? normalizePrototypeHtml(html) : null), [html])
@@ -42,7 +53,7 @@ export function PrototypeBoard({ html, history, isLoading, onIterate, onRestore,
       <div className="blueprint-grid pointer-events-none absolute inset-0 opacity-40" />
       <div className="z-10 flex items-center justify-between border-b border-outline-variant/20 bg-zinc-900/80 p-sm backdrop-blur-sm">
         <div className="flex min-w-0 items-center gap-sm">
-          <span className="font-mono text-code-sm text-on-surface-variant">Sandbox 预览 · 750 × 1624</span>
+          <span className="font-mono text-code-sm text-on-surface-variant">Sandbox 预览 · 375 × 812</span>
           <span className="rounded-full bg-outline-variant/10 px-sm py-xs font-mono text-[10px] uppercase text-on-surface-variant">
             {isLoading ? '生成中...' : html ? '原型已就绪' : '等待需求输入'}
           </span>
@@ -62,6 +73,16 @@ export function PrototypeBoard({ html, history, isLoading, onIterate, onRestore,
               </option>
             ))}
           </select>
+          <label className="flex h-8 items-center gap-xs rounded-md border border-outline-variant/40 bg-surface-container-high px-sm font-mono text-[11px] text-on-surface-variant">
+            <input
+              type="checkbox"
+              checked={singlePrototypeOnly ?? false}
+              onChange={(event) => onSinglePrototypeOnlyChange?.(event.target.checked)}
+              disabled={isLoading || !onSinglePrototypeOnlyChange}
+              className="h-3.5 w-3.5 accent-secondary"
+            />
+            只生成一个
+          </label>
           <button
             type="button"
             onClick={onClearHistory}
@@ -75,7 +96,7 @@ export function PrototypeBoard({ html, history, isLoading, onIterate, onRestore,
       </div>
 
       <div className="relative z-0 flex min-h-0 flex-1 items-center justify-center overflow-hidden p-md">
-        <div className="flex h-full max-h-full aspect-[750/1624] flex-col overflow-hidden rounded-[2rem] border-[10px] border-zinc-800 bg-black shadow-2xl ring-1 ring-white/10">
+        <div className="flex h-full max-h-full aspect-[375/812] flex-col overflow-hidden rounded-[2rem] border-[10px] border-zinc-800 bg-black shadow-2xl ring-1 ring-white/10">
           <div className="mx-auto mt-2 h-1.5 w-16 shrink-0 rounded-full bg-zinc-700" />
           <div className="m-2 min-h-0 flex-1 overflow-hidden rounded-[1.25rem] bg-zinc-950">
             {normalizedHtml ? (
@@ -103,7 +124,7 @@ export function PrototypeBoard({ html, history, isLoading, onIterate, onRestore,
                     <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-outline-variant/30 bg-surface-container font-mono text-2xl text-on-surface-variant">
                       ◻
                     </div>
-                    <p className="font-mono text-code-sm text-on-surface-variant">750 × 1624 手机预览将在此生成。</p>
+                    <p className="font-mono text-code-sm text-on-surface-variant">375 × 812 手机预览将在此生成。</p>
                   </div>
                 )}
               </div>

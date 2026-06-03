@@ -175,16 +175,17 @@ export function ForgePage() {
   const dismissNodeOperationSuggestion = useAppStore((s) => s.dismissNodeOperationSuggestion)
   const applyNodePolish = useAppStore((s) => s.applyNodePolish)
   const updateNodeStatus = useAppStore((s) => s.updateNodeStatus)
-  const prototypeHtml = useAppStore((s) => s.prototypeHtml)
-  const prototypeHistory = useAppStore((s) => s.prototypeHistory)
-  const recordPrototypeHistory = useAppStore((s) => s.recordPrototypeHistory)
-  const restorePrototypeVersion = useAppStore((s) => s.restorePrototypeVersion)
-  const clearPrototypeHistory = useAppStore((s) => s.clearPrototypeHistory)
-  const setPrototypeVariants = useAppStore((s) => s.setPrototypeVariants)
-  const updatePrototypeVariant = useAppStore((s) => s.updatePrototypeVariant)
-  const selectPrototypeVariant = useAppStore((s) => s.selectPrototypeVariant)
-  const prototypeVariants = useAppStore((s) => s.prototypeVariants)
-  const selectedVariantIndex = useAppStore((s) => s.selectedVariantIndex)
+  const nodePrototypeState = useAppStore((s) => nodeId ? s.nodePrototypeStates[nodeId] : undefined)
+  const prototypeHtml = nodePrototypeState?.prototypeHtml ?? null
+  const prototypeHistory = nodePrototypeState?.prototypeHistory ?? []
+  const prototypeVariants = nodePrototypeState?.prototypeVariants ?? []
+  const selectedVariantIndex = nodePrototypeState?.selectedVariantIndex ?? -1
+  const recordNodePrototypeHistory = useAppStore((s) => s.recordNodePrototypeHistory)
+  const restoreNodePrototypeVersion = useAppStore((s) => s.restoreNodePrototypeVersion)
+  const clearNodePrototypeHistory = useAppStore((s) => s.clearNodePrototypeHistory)
+  const setNodePrototypeVariants = useAppStore((s) => s.setNodePrototypeVariants)
+  const updateNodePrototypeVariant = useAppStore((s) => s.updateNodePrototypeVariant)
+  const selectNodePrototypeVariant = useAppStore((s) => s.selectNodePrototypeVariant)
 
   const [nodeComplete, setNodeComplete] = useState(false)
   const [isGeneratingPrototype, setIsGeneratingPrototype] = useState(false)
@@ -255,7 +256,7 @@ export function ForgePage() {
     })
   }
 
-  async function handleGeneratePrototype(instruction?: string) {
+  async function handleGeneratePrototype(instruction?: string, options?: { singlePrototypeOnly?: boolean }) {
     if (!node) return
     const trimmedInstruction = instruction?.trim() ?? ''
     const currentMessages = nodeId ? (useAppStore.getState().nodeChats[nodeId] ?? messages) : messages
@@ -263,14 +264,15 @@ export function ForgePage() {
     const referenceImages = collectPrototypeImages(currentMessages)
     const currentStore = useAppStore.getState()
     const requirementState = buildNodePrototypeRequirement(currentNode, currentMessages, currentStore.prdTree)
-    const selectedVariant = currentStore.prototypeVariants.find((variant) => variant.index === currentStore.selectedVariantIndex)
+    const selectedVariant = currentStore.nodePrototypeStates[nodeId ?? '']?.prototypeVariants.find((variant) => variant.index === currentStore.nodePrototypeStates[nodeId ?? '']?.selectedVariantIndex)
     const isUpdate = Boolean(trimmedInstruction && selectedVariant?.html)
+    const createVariantCount = options?.singlePrototypeOnly ? 1 : 2
 
     setIsGeneratingPrototype(true)
     try {
       if (isUpdate && selectedVariant?.html) {
-        recordPrototypeHistory(selectedVariant.html, { mode: 'update', note: `修改前：${trimmedInstruction}` })
-        updatePrototypeVariant(selectedVariant.index, { status: 'streaming' })
+        recordNodePrototypeHistory(nodeId, selectedVariant.html, { mode: 'update', note: `修改前：${trimmedInstruction}` })
+        updateNodePrototypeVariant(nodeId, selectedVariant.index, { status: 'streaming' })
         await streamPrototype(
           settings.proxyBaseUrl,
           requirementState,
@@ -284,55 +286,55 @@ export function ForgePage() {
           },
           (event) => {
             if (event.type === 'setCode') {
-              updatePrototypeVariant(event.variantIndex, {
+              updateNodePrototypeVariant(nodeId, event.variantIndex, {
                 html: event.html,
                 status: 'streaming',
                 focus: event.focus,
                 history: event.history,
               })
-              if (event.variantIndex === selectedVariant.index && event.html) selectPrototypeVariant(event.variantIndex)
+              if (event.variantIndex === selectedVariant.index && event.html) selectNodePrototypeVariant(nodeId, event.variantIndex)
             } else if (event.type === 'variantComplete') {
-              updatePrototypeVariant(event.variantIndex, {
+              updateNodePrototypeVariant(nodeId, event.variantIndex, {
                 html: event.html,
                 status: 'complete',
                 focus: event.focus,
                 history: event.history,
               })
-              if (event.variantIndex === selectedVariant.index && event.html) selectPrototypeVariant(event.variantIndex)
+              if (event.variantIndex === selectedVariant.index && event.html) selectNodePrototypeVariant(nodeId, event.variantIndex)
             } else if (event.type === 'variantError') {
-              updatePrototypeVariant(event.variantIndex, { status: 'error', focus: event.focus })
+              updateNodePrototypeVariant(nodeId, event.variantIndex, { status: 'error', focus: event.focus })
             }
           },
         )
-        selectPrototypeVariant(selectedVariant.index)
+        selectNodePrototypeVariant(nodeId, selectedVariant.index)
         return
       }
 
-      setPrototypeVariants(Array.from({ length: 4 }, (_, index) => ({ index, html: null, status: 'streaming' as const })))
+      setNodePrototypeVariants(nodeId, Array.from({ length: createVariantCount }, (_, index) => ({ index, html: null, status: 'streaming' as const })))
       await streamPrototype(
         settings.proxyBaseUrl,
         requirementState,
-        { images: referenceImages, numVariants: 4 },
+        { images: referenceImages, numVariants: createVariantCount },
         (event) => {
           if (event.type === 'setCode') {
-            updatePrototypeVariant(event.variantIndex, {
+            updateNodePrototypeVariant(nodeId, event.variantIndex, {
               html: event.html,
               status: 'streaming',
               focus: event.focus,
               history: event.history,
             })
           } else if (event.type === 'variantComplete') {
-            updatePrototypeVariant(event.variantIndex, {
+            updateNodePrototypeVariant(nodeId, event.variantIndex, {
               html: event.html,
               status: 'complete',
               focus: event.focus,
               history: event.history,
             })
-            if (event.html && useAppStore.getState().selectedVariantIndex === -1) {
-              selectPrototypeVariant(event.variantIndex)
+            if (event.html && useAppStore.getState().nodePrototypeStates[nodeId]?.selectedVariantIndex === -1) {
+              selectNodePrototypeVariant(nodeId, event.variantIndex)
             }
           } else if (event.type === 'variantError') {
-            updatePrototypeVariant(event.variantIndex, { status: 'error', focus: event.focus })
+            updateNodePrototypeVariant(nodeId, event.variantIndex, { status: 'error', focus: event.focus })
           }
         },
       )
@@ -344,7 +346,7 @@ export function ForgePage() {
           currentHtml: isUpdate ? selectedVariant?.html : null,
           instruction: trimmedInstruction || undefined,
           images: referenceImages,
-          numVariants: isUpdate ? 1 : 4,
+          numVariants: isUpdate ? 1 : createVariantCount,
           variantIndex: isUpdate ? selectedVariant?.index : undefined,
           history: isUpdate ? selectedVariant?.history : undefined,
         },
@@ -353,16 +355,16 @@ export function ForgePage() {
       if (isUpdate && selectedVariant) {
         const chosen = result.variants.find((variant) => variant.status === 'complete' && variant.html) ?? result.variants[0]
         if (chosen?.html) {
-          updatePrototypeVariant(selectedVariant.index, {
+          updateNodePrototypeVariant(nodeId, selectedVariant.index, {
             html: chosen.html,
             status: 'complete',
             focus: chosen.focus,
             history: chosen.history,
           })
-          selectPrototypeVariant(selectedVariant.index)
+          selectNodePrototypeVariant(nodeId, selectedVariant.index)
         }
       } else {
-        setPrototypeVariants(result.variants.map((variant) => ({
+        setNodePrototypeVariants(nodeId, result.variants.map((variant) => ({
           index: variant.index,
           html: variant.html,
           status: variant.status,
@@ -371,7 +373,7 @@ export function ForgePage() {
         })))
         const chosen = result.variants.find((variant) => variant.status === 'complete' && variant.html)
         if (chosen?.html) {
-          selectPrototypeVariant(chosen.index)
+          selectNodePrototypeVariant(nodeId, chosen.index)
         }
       }
     } finally {
@@ -455,9 +457,9 @@ export function ForgePage() {
           onConfirm={handleConfirm}
           onBack={() => navigate('/')}
           onGeneratePrototype={handleGeneratePrototype}
-          onRestorePrototype={restorePrototypeVersion}
-          onClearPrototypeHistory={clearPrototypeHistory}
-          onSelectVariant={selectPrototypeVariant}
+          onRestorePrototype={(id) => restoreNodePrototypeVersion(nodeId, id)}
+          onClearPrototypeHistory={() => clearNodePrototypeHistory(nodeId)}
+          onSelectVariant={(index) => selectNodePrototypeVariant(nodeId, index)}
           onClearChat={() => clearNodeChat(nodeId)}
         />
       </main>

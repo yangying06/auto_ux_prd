@@ -25,7 +25,7 @@ interface ForgeChatProps {
   onDismissNodeOperationSuggestion: (suggestionId: string) => void
   onConfirm: () => void
   onBack: () => void
-  onGeneratePrototype: (instruction?: string) => void | Promise<void>
+  onGeneratePrototype: (instruction?: string, options?: { singlePrototypeOnly?: boolean }) => void | Promise<void>
   onRestorePrototype: (id: string) => void
   onClearPrototypeHistory: () => void
   onSelectVariant: (index: number) => void
@@ -320,10 +320,10 @@ function PhonePrototypeFrame({ html, label = '原型预览' }: { html: string | 
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-outline-variant/40 bg-zinc-950">
       <div className="flex items-center justify-between border-b border-outline-variant/20 px-sm py-xs">
         <span className="font-mono text-[10px] uppercase text-on-surface-variant">{label}</span>
-        <span className="font-mono text-[10px] text-on-surface-variant">750×1624</span>
+        <span className="font-mono text-[10px] text-on-surface-variant">375×812</span>
       </div>
       <div className="flex min-h-0 flex-1 items-center justify-center p-sm">
-        <div className="flex h-full max-h-full aspect-[750/1624] flex-col overflow-hidden rounded-[1.35rem] border-[7px] border-zinc-800 bg-black shadow-xl">
+        <div className="flex h-full max-h-full aspect-[375/812] flex-col overflow-hidden rounded-[1.35rem] border-[7px] border-zinc-800 bg-black shadow-xl">
           <div className="mx-auto mt-1.5 h-1 w-12 shrink-0 rounded-full bg-zinc-700" />
           <div className="m-1.5 min-h-0 flex-1 overflow-hidden rounded-[0.9rem] bg-zinc-950">
             {normalizedHtml ? (
@@ -378,8 +378,10 @@ export function ForgeChat({
   const [isSuggesting, setIsSuggesting] = useState(false)
   const [visualTab, setVisualTab] = useState<VisualTab>('prototype')
   const [variantView, setVariantView] = useState<'grid' | 'single'>('single')
+  const [singlePrototypeOnly, setSinglePrototypeOnly] = useState(false)
 
   const hasMultipleVariants = prototypeVariants.length > 1
+  const selectedPrototypeHtml = prototypeVariants.find((variant) => variant.index === selectedVariantIndex)?.html ?? prototypeHtml
 
   // Whenever a fresh batch of variants arrives, default back to the comparison grid so the
   // user can choose; collapse to single preview when there is at most one variant.
@@ -551,7 +553,7 @@ export function ForgeChat({
 
   async function handleGeneratePrototype(instruction?: string) {
     setVisualTab('prototype')
-    await onGeneratePrototype(instruction)
+    await onGeneratePrototype(instruction, { singlePrototypeOnly: !instruction && singlePrototypeOnly })
   }
 
   function handleClearChat() {
@@ -901,9 +903,11 @@ export function ForgeChat({
                   </button>
                 ) : null}
                 <PrototypeBoard
-                  html={prototypeHtml}
+                  html={selectedPrototypeHtml}
                   history={prototypeHistory}
                   isLoading={isGeneratingPrototype}
+                  singlePrototypeOnly={singlePrototypeOnly}
+                  onSinglePrototypeOnlyChange={setSinglePrototypeOnly}
                   onIterate={(instruction) => void handleGeneratePrototype(instruction)}
                   onRestore={onRestorePrototype}
                   onClearHistory={onClearPrototypeHistory}
@@ -930,7 +934,7 @@ export function ForgeChat({
                   </div>
                 )}
               </div>
-              <PhonePrototypeFrame html={prototypeHtml} label="生成原型" />
+              <PhonePrototypeFrame html={selectedPrototypeHtml} label="生成原型" />
             </div>
             <div className="rounded-lg border border-outline-variant bg-surface p-sm">
               <div className="mb-xs font-mono text-[10px] uppercase text-on-surface-variant">对比指令</div>

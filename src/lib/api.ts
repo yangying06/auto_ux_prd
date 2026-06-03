@@ -3,13 +3,21 @@ import type { UXRequirementState } from '../types/uxRequirement'
 import type { MapAdjustmentOperation, PrdNode, PrdNodeOperationSuggestion } from '../types/prdNode'
 
 async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${baseUrl}${path}`, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...init?.headers,
-    },
-  })
+  let response: Response
+  try {
+    response = await fetch(`${baseUrl}${path}`, {
+      ...init,
+      headers: {
+        'Content-Type': 'application/json',
+        ...init?.headers,
+      },
+    })
+  } catch (err) {
+    if (err instanceof TypeError) {
+      throw new Error(`无法连接本地代理服务（${baseUrl}）。请确认后端服务正在运行后重试。`)
+    }
+    throw err
+  }
 
   const text = await response.text()
   let data: unknown = null

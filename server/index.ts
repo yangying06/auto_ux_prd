@@ -27,6 +27,7 @@ const SESSION_CLEANUP_DELAY_MS = 5 * 60 * 1000
 const MAX_TOOL_ITERATIONS = 4
 const DECOMPOSITION_HEARTBEAT_MS = 8000
 const DECOMPOSITION_CALL_TIMEOUT_MS = Number.parseInt(process.env.DECOMPOSITION_CALL_TIMEOUT_MS ?? '180000', 10)
+const DECOMPOSITION_BRANCH_CONCURRENCY = 2
 const LARGE_PRD_DECOMPOSE_THRESHOLD = 30 * 1024
 const LARGE_PRD_SLICE_TARGET_LENGTH = 12 * 1024
 const SOURCE_OUTLINE_ROOT_ID = 'SOURCE_OUTLINE_ROOT'
@@ -35,6 +36,12 @@ const SPEC_EXPORT_ROOT = path.resolve(process.cwd(), 'generated', 'specs')
 const anthropic = process.env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL })
   : null
+const prototypeProviderOverride = (process.env.AI_PROVIDER ?? process.env.LLM_PROVIDER ?? '').toLowerCase()
+const usesOpenAiPrototypeProvider = model.toLowerCase().startsWith('gpt-')
+  || prototypeProviderOverride === 'openai'
+  || prototypeProviderOverride === 'gpt'
+const openAiApiKey = process.env.OPENAI_API_KEY ?? process.env.ANTHROPIC_API_KEY
+const openAiBaseUrl = (process.env.OPENAI_BASE_URL ?? process.env.ANTHROPIC_BASE_URL ?? 'https://api.openai.com/v1').replace(/\/+$/, '')
 
 // In-memory decomposition session store.
 // Single-user desktop app — no persistence needed between server restarts.
@@ -43,6 +50,7 @@ interface DecompositionSession {
   nodes: PrdNode[]
   currentStep: string
   error?: string
+  branchErrors?: string[]
   cleanupTimer?: NodeJS.Timeout
 }
 
@@ -1428,6 +1436,32 @@ function mergeSessionNodes(session: DecompositionSession, nodes: PrdNode[]) {
   session.nodes = rebuildNodeChildren([...merged.values()])
 }
 
+function appendBranchErrorNote(session: DecompositionSession, pageNode: PrdNode, errorMessage: string) {
+  const warning = `「${pageNode.label}」MVC 子节点展开失败：${errorMessage}`
+  session.branchErrors = [...(session.branchErrors ?? []), warning]
+  session.error = `部分 MVC 子节点展开失败，但已保留可用导图：${session.branchErrors.join('；')}`
+
+  const pageWarning = `\n\n## 自动拆解提示\n${warning}\n已保留页面级节点，可稍后在导图中手动补充或重新打磨该分支。`
+  mergeSessionNodes(session, [{
+    ...pageNode,
+    content: pageNode.content.includes(warning) ? pageNode.content : `${pageNode.content}${pageWarning}`,
+    techNotes: [pageNode.techNotes, warning].filter(Boolean).join('\n'),
+  }])
+}
+
+async function runWithConcurrency<T>(items: T[], limit: number, task: (item: T) => Promise<void>) {
+  let nextIndex = 0
+  const workerCount = Math.min(limit, items.length)
+
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const item = items[nextIndex]
+      nextIndex += 1
+      await task(item)
+    }
+  }))
+}
+
 function waitSecondsFromStep(step: string, label: string) {
   if (!step.startsWith(label)) return 0
   const match = /已等待\s+(\d+)\s+秒/.exec(step)
@@ -1676,13 +1710,20 @@ async function runDecompositionJob(sessionId: string, mdText: string): Promise<v
   }
   mergeSessionNodes(activeSession, pageNodes)
 
-  for (const pageNode of pageNodes) {
-    const mvcNodes = await decomposeBranch(mdText, pageNode, activeSession)
-    if (mvcNodes.length > 0) mergeSessionNodes(activeSession, mvcNodes)
-  }
+  await runWithConcurrency(pageNodes, DECOMPOSITION_BRANCH_CONCURRENCY, async (pageNode) => {
+    try {
+      const mvcNodes = await decomposeBranch(mdText, pageNode, activeSession)
+      if (mvcNodes.length > 0) mergeSessionNodes(activeSession, mvcNodes)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      appendBranchErrorNote(activeSession, pageNode, message)
+    }
+  })
 
   activeSession.status = 'done'
-  activeSession.currentStep = '分析完成'
+  activeSession.currentStep = activeSession.branchErrors?.length
+    ? `分析完成（${activeSession.branchErrors.length} 个分支需手动补充）`
+    : '分析完成'
   scheduleSessionCleanup(sessionId)
 }
 
@@ -1712,9 +1753,10 @@ app.get('/api/health', (_req, res) => {
   res.json({
     ok: true,
     claude: {
-      provider: 'Anthropic Claude',
+      provider: usesOpenAiPrototypeProvider ? 'OpenAI-compatible GPT' : 'Anthropic Claude',
       model,
-      apiKeyPresent: Boolean(process.env.ANTHROPIC_API_KEY),
+      apiKeyPresent: usesOpenAiPrototypeProvider ? Boolean(openAiApiKey) : Boolean(process.env.ANTHROPIC_API_KEY),
+      baseUrl: usesOpenAiPrototypeProvider ? openAiBaseUrl : process.env.ANTHROPIC_BASE_URL,
     },
     cocosRag: {
       mode: 'mcp-sse-proxy',
@@ -2195,9 +2237,11 @@ function buildCreatePrototypePrompt(requirementState: UXRequirementState, hasIma
 ${buildPrototypeSpec(requirementState)}
 ${hasImages ? `\n${buildScreenshotFidelitySection()}` : ''}${focusSection}
 ## 尺寸契约
-- 预览沙盒提供的设计画布固定为 750×1624 CSS px。
-- 原型根节点应适配 100vw × 100vh，不需要页面级纵向或横向滚动。
-- 不要额外绘制手机壳、浏览器壳或外层设备框，应用预览已提供外框。
+- 预览沙盒按参考项目的手机适配方式提供 375×812 CSS px 的固定 iframe 画布，并由外层手机框等比缩放显示。
+- html、body 和唯一主根容器必须铺满画布：width: 100vw; height: 100vh; min-width: 375px; min-height: 812px; overflow: hidden。
+- 主界面内容必须按 375×812 CSS px 手机画布设计并铺满宽高，不要生成额外的 750px 设计稿容器。
+- 禁止使用 max-width、mx-auto、scale()、zoom 或居中 phone/container 把界面缩成中间一条。
+- 不要额外绘制手机壳、浏览器壳、设备边框或外层预览框，应用预览已提供外框。
 
 ## 输出约束
 1. 只输出单个完整 HTML 文件；可以用 \`\`\`html 包裹，但不要解释。
@@ -2231,8 +2275,9 @@ ${currentHtml}
 3. 如果需要多处修改，可以调用多次 edit_prototype。
 4. 如果无法安全定位精确片段，直接输出修改后的完整 HTML 文件。
 5. 保持单文件可运行、Tailwind CDN 可用、无构建步骤、无本地资源依赖。
-6. 保持 750×1624 CSS px 尺寸契约：根节点适配 100vw × 100vh，不引入 body/page 滚动，也不新增手机壳、浏览器壳或外层设备框。
-7. 所有用户可见界面文字、按钮文案、状态提示、组件标注、注释说明必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。`
+6. 预览 iframe 是 375×812 CSS px 固定手机画布；html、body 和唯一主根容器必须铺满 width:100vw; height:100vh; min-width:375px; min-height:812px; overflow:hidden。
+7. 禁止生成额外的 750px 设计稿容器，禁止 max-width/mx-auto/scale()/zoom 让界面缩在中间，也不要新增手机壳、浏览器壳或外层设备框。
+8. 所有用户可见界面文字、按钮文案、状态提示、组件标注、注释说明必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。`
 }
 
 function applyPrototypeToolUses(currentHtml: string, content: Anthropic.Messages.ContentBlock[]) {
@@ -2276,6 +2321,157 @@ function buildContentWithImages(prompt: string, imageBlocks: Anthropic.ImageBloc
   return imageBlocks.length > 0 ? [...imageBlocks, { type: 'text', text: prompt }] : prompt
 }
 
+type OpenAiContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
+
+type OpenAiMessageContent = string | OpenAiContentBlock[] | null | undefined
+
+interface OpenAiChatCompletionResponse {
+  choices?: Array<{
+    message?: {
+      content?: OpenAiMessageContent
+    }
+  }>
+}
+
+interface OpenAiChatCompletionChunk {
+  choices?: Array<{
+    delta?: {
+      content?: string | null
+    }
+  }>
+}
+
+function buildOpenAiContentWithImages(prompt: string, imageBlocks: Anthropic.ImageBlockParam[]): string | OpenAiContentBlock[] {
+  if (!imageBlocks.length) return prompt
+  return [
+    ...imageBlocks.map((block): OpenAiContentBlock => {
+      const source = block.source as Anthropic.Base64ImageSource
+      return {
+        type: 'image_url',
+        image_url: { url: `data:${source.media_type};base64,${source.data}` },
+      }
+    }),
+    { type: 'text', text: prompt },
+  ]
+}
+
+function extractOpenAiText(content: OpenAiMessageContent): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n')
+  }
+  return ''
+}
+
+async function createOpenAiChatCompletionText(prompt: string, imageBlocks: Anthropic.ImageBlockParam[], temperature?: number): Promise<string> {
+  if (!openAiApiKey) throw new Error('未配置可用的 GPT API Key。请在 server/.env 中设置 ANTHROPIC_API_KEY，或设置 OPENAI_API_KEY。')
+
+  const response = await fetch(`${openAiBaseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${openAiApiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 8192,
+      messages: [{ role: 'user', content: buildOpenAiContentWithImages(prompt, imageBlocks) }],
+      temperature: temperature === 1 ? undefined : temperature,
+    }),
+  })
+
+  if (!response.ok) {
+    const body = await response.text()
+    throw new Error(`GPT 原型生成请求失败：HTTP ${response.status}${body ? `，${body}` : ''}`)
+  }
+
+  const data = await response.json() as OpenAiChatCompletionResponse
+  const text = extractOpenAiText(data.choices?.[0]?.message?.content).trim()
+  if (!text) throw new Error('GPT 原型生成未返回文本内容。')
+  return text
+}
+
+async function streamOpenAiChatCompletionText(
+  prompt: string,
+  imageBlocks: Anthropic.ImageBlockParam[],
+  temperature: number,
+  onDelta: (delta: string) => void,
+): Promise<string> {
+  if (!openAiApiKey) throw new Error('未配置可用的 GPT API Key。请在 server/.env 中设置 ANTHROPIC_API_KEY，或设置 OPENAI_API_KEY。')
+
+  const response = await fetch(`${openAiBaseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${openAiApiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: buildOpenAiContentWithImages(prompt, imageBlocks) }],
+      temperature: temperature === 1 ? undefined : temperature,
+      stream: true,
+    }),
+  })
+
+  if (!response.ok) {
+    const body = await response.text()
+    throw new Error(`GPT 原型流式生成请求失败：HTTP ${response.status}${body ? `，${body}` : ''}`)
+  }
+  if (!response.body) throw new Error('GPT 原型流式生成未返回响应流。')
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let accumulated = ''
+
+  function handleLine(line: string) {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith('data:')) return
+    const payload = trimmed.slice('data:'.length).trim()
+    if (!payload || payload === '[DONE]') return
+    const chunk = JSON.parse(payload) as OpenAiChatCompletionChunk
+    const delta = chunk.choices?.[0]?.delta?.content ?? ''
+    if (!delta) return
+    accumulated += delta
+    onDelta(delta)
+  }
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split(/\r?\n/)
+    buffer = lines.pop() ?? ''
+    for (const line of lines) handleLine(line)
+  }
+
+  buffer += decoder.decode()
+  if (buffer) handleLine(buffer)
+  if (!accumulated.trim()) throw new Error('GPT 原型流式生成未返回文本内容。')
+  return accumulated
+}
+
+function ensurePrototypeProviderConfigured(res: express.Response) {
+  if (usesOpenAiPrototypeProvider) {
+    if (!openAiApiKey) {
+      res.status(400).json({ error: '未配置可用的 GPT API Key。请在 server/.env 中设置 ANTHROPIC_API_KEY，或设置 OPENAI_API_KEY。' })
+      return false
+    }
+    return true
+  }
+
+  if (!anthropic) {
+    res.status(400).json({ error: '未配置 ANTHROPIC_API_KEY。' })
+    return false
+  }
+  return true
+}
+
 async function generateUpdateVariant(
   requirementState: UXRequirementState,
   currentHtml: string,
@@ -2285,6 +2481,19 @@ async function generateUpdateVariant(
   history: string[],
 ): Promise<PrototypeVariantPayload> {
   const prompt = buildUpdatePrototypePrompt(requirementState, currentHtml, instruction, history, cfg.focus)
+  if (usesOpenAiPrototypeProvider) {
+    const raw = await createOpenAiChatCompletionText(prompt, imageBlocks, cfg.temperature)
+    return {
+      index: cfg.index,
+      html: normalizePrototypeHtml(raw),
+      mode: 'rewrite',
+      status: 'complete',
+      focus: cfg.focus,
+      appliedEdits: 0,
+      history: [...history, instruction],
+    }
+  }
+
   const response = await anthropic!.messages.create({
     model,
     max_tokens: 8192,
@@ -2324,6 +2533,18 @@ async function generateCreateVariant(
   cfg: { index: number; focus: string; temperature: number },
 ): Promise<PrototypeVariantPayload> {
   const prompt = buildCreatePrototypePrompt(requirementState, imageBlocks.length > 0, cfg.focus)
+  if (usesOpenAiPrototypeProvider) {
+    return {
+      index: cfg.index,
+      html: normalizePrototypeHtml(await createOpenAiChatCompletionText(prompt, imageBlocks, cfg.temperature)),
+      mode: 'create',
+      status: 'complete',
+      focus: cfg.focus,
+      appliedEdits: 0,
+      history: [],
+    }
+  }
+
   const response = await anthropic!.messages.create({
     model,
     max_tokens: 8192,
@@ -2348,10 +2569,7 @@ function writePrototypeEvent(res: express.Response, event: unknown) {
 async function streamPrototype(req: express.Request, res: express.Response) {
   const { requirementState, currentHtml, instruction, images, numVariants, variantIndex, history } = parsePrototypeRequest(req)
 
-  if (!anthropic) {
-    res.status(400).json({ error: '未配置 ANTHROPIC_API_KEY。' })
-    return
-  }
+  if (!ensurePrototypeProviderConfigured(res)) return
 
   if (!requirementState) {
     res.status(400).json({ error: '缺少需求状态' })
@@ -2384,6 +2602,14 @@ async function streamPrototype(req: express.Request, res: express.Response) {
       }
 
       const prompt = buildCreatePrototypePrompt(requirementState, imageBlocks.length > 0, cfg.focus)
+      if (usesOpenAiPrototypeProvider) {
+        html = await streamOpenAiChatCompletionText(prompt, imageBlocks, cfg.temperature, () => undefined)
+        const normalized = normalizePrototypeHtml(html)
+        writePrototypeEvent(res, { type: 'setCode', variantIndex: cfg.index, html: normalized, focus: cfg.focus })
+        writePrototypeEvent(res, { type: 'variantComplete', variantIndex: cfg.index, html: normalized, focus: cfg.focus, mode: 'create', appliedEdits: 0, history: [] })
+        return
+      }
+
       const stream = anthropic!.messages.stream({
         model,
         max_tokens: 8192,
@@ -2414,10 +2640,7 @@ app.post('/api/prototype/stream', streamPrototype)
 app.post('/api/prototype', async (req, res) => {
   const { requirementState, currentHtml, instruction, images } = parsePrototypeRequest(req)
 
-  if (!anthropic) {
-    res.status(400).json({ error: '未配置 ANTHROPIC_API_KEY。' })
-    return
-  }
+  if (!ensurePrototypeProviderConfigured(res)) return
 
   if (!requirementState) {
     res.status(400).json({ error: '缺少需求状态' })
