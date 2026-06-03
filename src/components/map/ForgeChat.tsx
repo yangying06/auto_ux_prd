@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
-import { normalizePrototypeHtml } from '../../lib/prototypeUtils'
 import type { PrototypeVersion } from '../../store/appStore'
 import type { ChatMessage, ContentBlock, ImageBlock } from '../../types/chat'
 import type { PrototypeVariant } from '../../types/prototypeVariant'
 import type { PrdNodeOperationSuggestion } from '../../types/prdNode'
 import { NodeOperationReview } from './NodeOperationReview'
 import { PrototypeBoard } from '../state/PrototypeBoard'
+import { PrototypePreviewSurface } from '../state/PrototypeSandboxPreview'
 import { PrototypeVariants } from '../state/PrototypeVariants'
 
 interface ForgeChatProps {
@@ -303,50 +303,6 @@ function extractSentImages(messages: ChatMessage[]): VisualImage[] {
   return images
 }
 
-function PhonePrototypeFrame({ html, label = '原型预览' }: { html: string | null; label?: string }) {
-  const iframeRef = useRef<HTMLIFrameElement>(null)
-  const normalizedHtml = useMemo(() => (html ? normalizePrototypeHtml(html) : null), [html])
-
-  function hydrateSandbox() {
-    if (!normalizedHtml) return
-    iframeRef.current?.contentWindow?.postMessage({ action: 'hydrate', html: normalizedHtml }, '*')
-  }
-
-  useEffect(() => {
-    hydrateSandbox()
-  }, [normalizedHtml])
-
-  return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-outline-variant/40 bg-zinc-950">
-      <div className="flex items-center justify-between border-b border-outline-variant/20 px-sm py-xs">
-        <span className="font-mono text-[10px] uppercase text-on-surface-variant">{label}</span>
-        <span className="font-mono text-[10px] text-on-surface-variant">375×812</span>
-      </div>
-      <div className="flex min-h-0 flex-1 items-center justify-center p-sm">
-        <div className="flex h-full max-h-full aspect-[375/812] flex-col overflow-hidden rounded-[1.35rem] border-[7px] border-zinc-800 bg-black shadow-xl">
-          <div className="mx-auto mt-1.5 h-1 w-12 shrink-0 rounded-full bg-zinc-700" />
-          <div className="m-1.5 min-h-0 flex-1 overflow-hidden rounded-[0.9rem] bg-zinc-950">
-            {normalizedHtml ? (
-              <iframe
-                ref={iframeRef}
-                src="/sandbox.html"
-                className="h-full w-full border-none"
-                sandbox={import.meta.env.DEV ? 'allow-scripts allow-same-origin' : 'allow-scripts'}
-                onLoad={hydrateSandbox}
-                title={label}
-              />
-            ) : (
-              <div className="flex h-full items-center justify-center p-sm text-center font-mono text-[11px] text-on-surface-variant">
-                生成后在这里显示手机长屏原型。
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 export function ForgeChat({
   nodeId: _nodeId,
   messages,
@@ -567,7 +523,12 @@ export function ForgeChat({
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      void handleSend()
+      if (visualTab === 'prototype' && prototypeHtml && draft.trim()) {
+        void handleGeneratePrototype(draft.trim())
+        setDraft('')
+      } else {
+        void handleSend()
+      }
     }
   }
 
@@ -760,6 +721,21 @@ export function ForgeChat({
                   <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>send</span>
                   发送
                 </button>
+                {visualTab === 'prototype' && prototypeHtml ? (
+                  <button
+                    onClick={() => {
+                      const instruction = draft.trim()
+                      if (!instruction) return
+                      setDraft('')
+                      void handleGeneratePrototype(instruction)
+                    }}
+                    disabled={!draft.trim() || isGeneratingPrototype}
+                    className="flex min-h-[36px] items-center gap-xs rounded-lg border border-secondary/40 bg-secondary/10 px-md py-sm text-label-md font-medium text-secondary transition-opacity hover:opacity-90 disabled:opacity-40"
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>edit</span>
+                    修改原型
+                  </button>
+                ) : null}
               </div>
             </div>
           </div>
@@ -908,7 +884,6 @@ export function ForgeChat({
                   isLoading={isGeneratingPrototype}
                   singlePrototypeOnly={singlePrototypeOnly}
                   onSinglePrototypeOnlyChange={setSinglePrototypeOnly}
-                  onIterate={(instruction) => void handleGeneratePrototype(instruction)}
                   onRestore={onRestorePrototype}
                   onClearHistory={onClearPrototypeHistory}
                 />
@@ -918,7 +893,7 @@ export function ForgeChat({
         ) : null}
 
         {visualTab === 'compare' ? (
-          <div className="flex min-h-0 flex-1 flex-col gap-sm overflow-hidden p-md">
+          <div className="flex min-h-0 flex-1 overflow-hidden p-md">
             <div className="grid min-h-0 flex-1 grid-cols-2 gap-sm">
               <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface">
                 <div className="border-b border-outline-variant px-sm py-xs font-mono text-[10px] uppercase text-on-surface-variant">
@@ -934,24 +909,23 @@ export function ForgeChat({
                   </div>
                 )}
               </div>
-              <PhonePrototypeFrame html={selectedPrototypeHtml} label="生成原型" />
-            </div>
-            <div className="rounded-lg border border-outline-variant bg-surface p-sm">
-              <div className="mb-xs font-mono text-[10px] uppercase text-on-surface-variant">对比指令</div>
-              <div className="flex flex-wrap gap-xs">
-                {[
-                  '比较参考图和原型的按钮尺寸、间距和层级。',
-                  '指出原型中缺失的状态反馈。',
-                  '按参考图优化右侧原型布局。',
-                ].map((prompt) => (
-                  <button
-                    key={prompt}
-                    onClick={() => setDraft((current) => current || prompt)}
-                    className="rounded border border-outline-variant px-sm py-xs text-left text-body-sm text-on-surface-variant hover:border-secondary hover:text-on-surface"
-                  >
-                    {prompt}
-                  </button>
-                ))}
+              <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface">
+                <div className="border-b border-outline-variant px-sm py-xs font-mono text-[10px] uppercase text-on-surface-variant">
+                  生成原型
+                </div>
+                <div className="flex min-h-0 flex-1 overflow-hidden bg-black/30">
+                  <PrototypePreviewSurface
+                    html={selectedPrototypeHtml}
+                    title="生成原型"
+                    interactive
+                    fit="pane"
+                    fallback={(
+                      <div className="flex h-full w-full items-center justify-center p-sm text-center font-mono text-[11px] text-on-surface-variant">
+                        生成后在这里显示原型。
+                      </div>
+                    )}
+                  />
+                </div>
               </div>
             </div>
           </div>

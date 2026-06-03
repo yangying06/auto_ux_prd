@@ -2237,9 +2237,9 @@ function buildCreatePrototypePrompt(requirementState: UXRequirementState, hasIma
 ${buildPrototypeSpec(requirementState)}
 ${hasImages ? `\n${buildScreenshotFidelitySection()}` : ''}${focusSection}
 ## 尺寸契约
-- 预览沙盒按参考项目的手机适配方式提供 375×812 CSS px 的固定 iframe 画布，并由外层手机框等比缩放显示。
-- html、body 和唯一主根容器必须铺满画布：width: 100vw; height: 100vh; min-width: 375px; min-height: 812px; overflow: hidden。
-- 主界面内容必须按 375×812 CSS px 手机画布设计并铺满宽高，不要生成额外的 750px 设计稿容器。
+- 预览沙盒按参考项目的手机适配方式提供 375px CSS 固定宽度；高度由预览面板决定，不是固定 812px。
+- html、body 和唯一主根容器必须按移动端视口组织：width: 100vw; min-width: 375px; min-height: 100vh; overflow-x: hidden; overflow-y: auto。
+- 主界面内容必须按 375px CSS 宽度设计并控制横向尺寸；内容超过当前预览高度时允许纵向滚动，不要生成额外的 750px 设计稿容器。
 - 禁止使用 max-width、mx-auto、scale()、zoom 或居中 phone/container 把界面缩成中间一条。
 - 不要额外绘制手机壳、浏览器壳、设备边框或外层预览框，应用预览已提供外框。
 
@@ -2275,8 +2275,8 @@ ${currentHtml}
 3. 如果需要多处修改，可以调用多次 edit_prototype。
 4. 如果无法安全定位精确片段，直接输出修改后的完整 HTML 文件。
 5. 保持单文件可运行、Tailwind CDN 可用、无构建步骤、无本地资源依赖。
-6. 预览 iframe 是 375×812 CSS px 固定手机画布；html、body 和唯一主根容器必须铺满 width:100vw; height:100vh; min-width:375px; min-height:812px; overflow:hidden。
-7. 禁止生成额外的 750px 设计稿容器，禁止 max-width/mx-auto/scale()/zoom 让界面缩在中间，也不要新增手机壳、浏览器壳或外层设备框。
+6. 预览 iframe 是 375px CSS 固定宽度，实际高度由当前预览面板决定；html、body 和唯一主根容器必须使用 width:100vw; min-width:375px; min-height:100vh; overflow-x:hidden; overflow-y:auto。
+7. 禁止生成额外的 750px 设计稿容器，禁止 max-width/mx-auto/scale()/zoom 让界面缩在中间，也不要新增手机壳、浏览器壳或外层设备框；内容过长时使用纵向滚动，不要横向溢出。
 8. 所有用户可见界面文字、按钮文案、状态提示、组件标注、注释说明必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。`
 }
 

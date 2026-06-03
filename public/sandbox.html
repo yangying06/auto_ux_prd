@@ -18,24 +18,24 @@
         display: flex;
         width: 100vw;
         height: 100vh;
-        align-items: center;
+        align-items: flex-start;
         justify-content: center;
         overflow: hidden;
       }
 
       #canvas {
         width: 375px;
-        height: 812px;
+        height: 100vh;
         overflow: hidden;
-        transform-origin: center center;
+        transform-origin: top center;
       }
 
       #preview {
         display: block;
         width: 375px;
-        height: 812px;
+        height: 100vh;
         border: 0;
-        overflow: hidden;
+        overflow: auto;
         background: #05070d;
       }
     </style>
@@ -48,13 +48,49 @@
     </div>
     <script>
       const DESIGN_WIDTH = 375;
-      const DESIGN_HEIGHT = 812;
       const canvas = document.getElementById('canvas');
       const preview = document.getElementById('preview');
+      let previewMode = 'viewport';
+      let contentWidth = DESIGN_WIDTH;
+      let contentHeight = window.innerHeight;
+
+      function withSizeReporter(html) {
+        const reporter = `<script>
+          (() => {
+            const report = () => {
+              const root = document.documentElement;
+              const body = document.body;
+              parent.postMessage({
+                action: 'prototype-size',
+                width: Math.max(root.scrollWidth, body ? body.scrollWidth : 0, root.clientWidth),
+                height: Math.max(root.scrollHeight, body ? body.scrollHeight : 0, root.clientHeight)
+              }, '*');
+            };
+            window.addEventListener('load', report);
+            window.addEventListener('resize', report);
+            requestAnimationFrame(report);
+            setTimeout(report, 120);
+            setTimeout(report, 500);
+          })();
+        <\/script>`;
+        if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, `${reporter}</body>`);
+        return `${html}${reporter}`;
+      }
 
       function resizeCanvas() {
-        const scale = Math.max(0.01, Math.min(window.innerWidth / DESIGN_WIDTH, window.innerHeight / DESIGN_HEIGHT));
+        const targetWidth = previewMode === 'thumbnail' ? Math.max(DESIGN_WIDTH, contentWidth) : DESIGN_WIDTH;
+        const targetHeight = previewMode === 'thumbnail'
+          ? Math.max(1, contentHeight)
+          : window.innerHeight;
+        const scale = previewMode === 'thumbnail'
+          ? Math.max(0.01, Math.min(1, window.innerWidth / targetWidth, window.innerHeight / targetHeight))
+          : Math.max(0.01, Math.min(1, window.innerWidth / DESIGN_WIDTH));
+
+        canvas.style.width = `${targetWidth}px`;
+        canvas.style.height = `${targetHeight}px`;
         canvas.style.transform = `scale(${scale})`;
+        preview.style.width = `${targetWidth}px`;
+        preview.style.height = `${targetHeight}px`;
       }
 
       window.addEventListener('resize', resizeCanvas);
@@ -62,8 +98,19 @@
 
       window.addEventListener('message', (event) => {
         const data = event.data;
-        if (!data || data.action !== 'hydrate' || typeof data.html !== 'string') return;
-        preview.srcdoc = data.html;
+        if (!data) return;
+        if (data.action === 'prototype-size' && event.source === preview.contentWindow) {
+          contentWidth = Number.isFinite(data.width) ? data.width : DESIGN_WIDTH;
+          contentHeight = Number.isFinite(data.height) ? data.height : window.innerHeight;
+          resizeCanvas();
+          return;
+        }
+        if (data.action !== 'hydrate' || typeof data.html !== 'string') return;
+        previewMode = data.mode === 'thumbnail' ? 'thumbnail' : 'viewport';
+        contentWidth = DESIGN_WIDTH;
+        contentHeight = window.innerHeight;
+        resizeCanvas();
+        preview.srcdoc = withSizeReporter(data.html);
       });
     </script>
   </body>

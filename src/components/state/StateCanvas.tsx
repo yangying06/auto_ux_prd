@@ -259,7 +259,6 @@ export function StateCanvas({
           html={prototypeHtml}
           history={prototypeHistory}
           isLoading={isGeneratingPrototype}
-          onIterate={onGeneratePrototype}
           onRestore={onRestorePrototype}
           onClearHistory={onClearPrototypeHistory}
         />

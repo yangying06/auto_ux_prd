@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef } from 'react'
-import { normalizePrototypeHtml } from '../../lib/prototypeUtils'
+import { useEffect } from 'react'
 import type { PrototypeVariant } from '../../types/prototypeVariant'
+import { PrototypePreviewSurface } from './PrototypeSandboxPreview'
 
 interface PrototypeVariantsProps {
   variants: PrototypeVariant[]
@@ -10,28 +10,7 @@ interface PrototypeVariantsProps {
 }
 
 function VariantThumbnail({ html }: { html: string }) {
-  const iframeRef = useRef<HTMLIFrameElement>(null)
-  const normalized = useMemo(() => normalizePrototypeHtml(html), [html])
-
-  function hydrate() {
-    iframeRef.current?.contentWindow?.postMessage({ action: 'hydrate', html: normalized }, '*')
-  }
-
-  useEffect(() => {
-    hydrate()
-  }, [normalized])
-
-  return (
-    <iframe
-      ref={iframeRef}
-      src="/sandbox.html"
-      // pointer-events-none so a click selects the card instead of interacting with the preview
-      className="pointer-events-none h-full w-full border-none"
-      sandbox={import.meta.env.DEV ? 'allow-scripts allow-same-origin' : 'allow-scripts'}
-      onLoad={hydrate}
-      title="变体预览"
-    />
-  )
+  return <PrototypePreviewSurface html={html} title="Variant preview" />
 }
 
 export function PrototypeVariants({ variants, selectedIndex, onSelect, onRetry }: PrototypeVariantsProps) {
@@ -53,8 +32,9 @@ export function PrototypeVariants({ variants, selectedIndex, onSelect, onRetry }
   if (variants.length === 0) return null
 
   return (
-    <div className="grid grid-cols-2 gap-sm overflow-y-auto p-xs">
-      {variants.map((variant, position) => {
+    <div className="flex h-full min-h-0 items-center justify-center overflow-y-auto p-xs">
+      <div className="grid grid-cols-2 gap-sm">
+        {variants.map((variant, position) => {
         const isSelected = variant.index === selectedIndex
         return (
           <button
@@ -80,7 +60,7 @@ export function PrototypeVariants({ variants, selectedIndex, onSelect, onRetry }
               ) : null}
             </div>
 
-            <div className="relative flex aspect-[375/812] min-h-0 w-full items-center justify-center overflow-hidden bg-black">
+            <div>
               {variant.status === 'complete' && variant.html ? (
                 <VariantThumbnail html={variant.html} />
               ) : variant.status === 'streaming' && variant.html ? (
@@ -138,6 +118,7 @@ export function PrototypeVariants({ variants, selectedIndex, onSelect, onRetry }
           </button>
         )
       })}
+      </div>
     </div>
   )
 }
