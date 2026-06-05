@@ -25,6 +25,7 @@ export function MapAdjustmentPanel({ baseUrl, tree, onApply }: MapAdjustmentPane
   const [pendingOperations, setPendingOperations] = useState<MapAdjustmentOperation[]>([])
   const [isSending, setIsSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [isCollapsed, setIsCollapsed] = useState(false)
 
   async function handleSend() {
     const text = draft.trim()
@@ -51,14 +52,38 @@ export function MapAdjustmentPanel({ baseUrl, tree, onApply }: MapAdjustmentPane
     setPendingOperations([])
   }
 
+  if (isCollapsed) {
+    return (
+      <aside className="flex w-12 shrink-0 flex-col items-center border-r border-outline-variant bg-surface-container-low py-md">
+        <button
+          onClick={() => setIsCollapsed(false)}
+          title="展开 AI 调整拆分"
+          aria-label="展开 AI 调整拆分"
+          className="rounded p-xs text-on-surface-variant transition-colors hover:bg-surface-variant hover:text-primary"
+        >
+          <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>chevron_right</span>
+        </button>
+        <span className="material-symbols-outlined mt-sm text-primary" style={{ fontSize: '20px' }}>auto_awesome</span>
+      </aside>
+    )
+  }
+
   return (
     <aside className="flex w-[320px] shrink-0 flex-col border-r border-outline-variant bg-surface-container-low">
-      <div className="border-b border-outline-variant p-md">
+      <div className="relative border-b border-outline-variant p-md pr-12">
         <div className="flex items-center gap-sm text-primary">
           <span className="material-symbols-outlined">auto_awesome</span>
           <h2 className="font-headline-sm text-headline-sm text-on-surface">AI 调整拆分</h2>
         </div>
         <p className="mt-xs text-body-sm text-on-surface-variant">先预览操作，再确认应用。</p>
+        <button
+          onClick={() => setIsCollapsed(true)}
+          title="收缩 AI 调整拆分"
+          aria-label="收缩 AI 调整拆分"
+          className="absolute right-sm top-sm rounded p-xs text-on-surface-variant transition-colors hover:bg-surface-variant hover:text-primary"
+        >
+          <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>chevron_left</span>
+        </button>
       </div>
 
       <div className="custom-scrollbar flex-1 space-y-sm overflow-y-auto p-md">

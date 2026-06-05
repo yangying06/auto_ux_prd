@@ -581,7 +581,7 @@ export const useAppStore = create<AppStoreState>()(
               [nodeId]: {
                 ...node,
                 status,
-                needsPolish: status === 'done' ? false : node.needsPolish,
+                needsPolish: status === 'pending_refine' ? true : node.needsPolish,
               },
             },
           }

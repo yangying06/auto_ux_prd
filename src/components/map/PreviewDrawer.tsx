@@ -14,13 +14,15 @@ interface PreviewDrawerProps {
 export function PreviewDrawer({ node, onClose, onDelete, onOpenDoc, onUpdateContent }: PreviewDrawerProps) {
   const [, navigate] = useLocation()
   const isOpen = node !== null
-  const canForge = Boolean(node && node.type === 'page' && node.needsPolish && node.status !== 'done')
+  const canForge = Boolean(node && node.type === 'page' && (node.needsPolish || node.status === 'done'))
   const [isEditing, setIsEditing] = useState(false)
   const [draftContent, setDraftContent] = useState('')
+  const [isCollapsed, setIsCollapsed] = useState(false)
 
   useEffect(() => {
     setIsEditing(false)
     setDraftContent(node?.content ?? '')
+    setIsCollapsed(false)
   }, [node?.id, node?.content])
 
   const saveContent = () => {
@@ -33,23 +35,59 @@ export function PreviewDrawer({ node, onClose, onDelete, onOpenDoc, onUpdateCont
     <aside
       className="bg-surface-container border-l border-outline-variant shadow-[-8px_0_24px_rgba(0,0,0,0.5)] flex flex-col z-20 shrink-0 overflow-hidden"
       style={{
-        width: isOpen ? '38%' : '0',
-        minWidth: isOpen ? '440px' : '0',
+        width: isOpen ? (isCollapsed ? '48px' : '38%') : '0',
+        minWidth: isOpen ? (isCollapsed ? '48px' : '440px') : '0',
         transition: 'width 300ms ease, min-width 300ms ease',
       }}
     >
+      {node && isCollapsed && (
+        <div className="flex h-full flex-col items-center border-l border-outline-variant bg-surface py-md">
+          <button
+            onClick={() => setIsCollapsed(false)}
+            title="展开详情"
+            aria-label="展开详情"
+            className="rounded p-xs text-on-surface-variant transition-colors hover:bg-surface-variant hover:text-primary"
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>chevron_left</span>
+          </button>
+          <span className="material-symbols-outlined mt-sm text-primary" style={{ fontSize: '20px' }}>description</span>
+          <button
+            onClick={onClose}
+            title="关闭详情"
+            aria-label="关闭详情"
+            className="mt-auto rounded p-xs text-on-surface-variant transition-colors hover:bg-surface-variant hover:text-primary"
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>close</span>
+          </button>
+        </div>
+      )}
+
+      {node && !isCollapsed && (
+        <>
       {/* Header */}
       <div className="flex justify-between items-center p-md border-b border-outline-variant shrink-0 bg-surface">
         <div className="flex items-center gap-sm">
-          <span className="material-symbols-outlined text-primary">data_object</span>
+          <span className="material-symbols-outlined text-primary">description</span>
           <h2 className="font-headline-sm text-headline-sm text-on-surface truncate">{node?.label}</h2>
         </div>
-        <button
-          onClick={onClose}
-          className="text-on-surface-variant hover:text-primary transition-colors cursor-pointer p-xs rounded hover:bg-surface-variant"
-        >
-          <span className="material-symbols-outlined">close</span>
-        </button>
+        <div className="flex items-center gap-xs">
+          <button
+            onClick={() => setIsCollapsed(true)}
+            title="收缩详情"
+            aria-label="收缩详情"
+            className="cursor-pointer rounded p-xs text-on-surface-variant transition-colors hover:bg-surface-variant hover:text-primary"
+          >
+            <span className="material-symbols-outlined">chevron_right</span>
+          </button>
+          <button
+            onClick={onClose}
+            title="关闭详情"
+            aria-label="关闭详情"
+            className="cursor-pointer rounded p-xs text-on-surface-variant transition-colors hover:bg-surface-variant hover:text-primary"
+          >
+            <span className="material-symbols-outlined">close</span>
+          </button>
+        </div>
       </div>
 
       {/* Content — only render internals when node is available to avoid layout artifacts */}
@@ -119,6 +157,8 @@ export function PreviewDrawer({ node, onClose, onDelete, onOpenDoc, onUpdateCont
             </button>
           )}
         </div>
+      )}
+        </>
       )}
     </aside>
   )

@@ -415,13 +415,18 @@ export function ForgePage() {
 
   function handleConfirm() {
     if (!nodeId || !node) return
+    if (node.status === 'done') {
+      updateNodeStatus(nodeId, 'pending_refine')
+      setNodeComplete(false)
+      return
+    }
     const currentState = useAppStore.getState()
     const currentNode = currentState.prdTree?.[nodeId] ?? node
     if (!POLISH_SECTION_RE.test(currentNode.content)) {
       applyNodePolish(nodeId, buildFallbackPolish(currentNode, currentState.nodeChats[nodeId] ?? []))
     }
     updateNodeStatus(nodeId, 'done')
-    navigate('/')
+    setNodeComplete(true)
   }
 
   if (!node || !nodeId) return null
@@ -450,11 +455,12 @@ export function ForgePage() {
 
         <button
           onClick={handleConfirm}
+          aria-pressed={nodeComplete}
           className={[
             'flex min-h-[44px] items-center gap-xs rounded-lg border px-md py-sm text-label-md font-medium transition-all',
             nodeComplete
               ? 'border-tertiary bg-tertiary-container text-on-tertiary-container active-glow'
-              : 'border-outline-variant bg-secondary-container text-on-secondary-container opacity-60',
+              : 'border-outline-variant bg-secondary-container text-on-secondary-container',
           ].join(' ')}
         >
           <span
@@ -464,9 +470,9 @@ export function ForgePage() {
               fontVariationSettings: nodeComplete ? "'FILL' 1" : "'FILL' 0",
             }}
           >
-            check_circle
+            {nodeComplete ? 'check_circle' : 'auto_awesome'}
           </span>
-          确认完成
+          {nodeComplete ? '已完成' : '待打磨'}
         </button>
       </header>
 

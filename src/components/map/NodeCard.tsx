@@ -10,10 +10,18 @@ interface NodeCardProps {
 }
 
 function canForgeNode(node: PrdNode) {
-  return node.type === 'page' && node.needsPolish && node.status !== 'done'
+  return node.type === 'page' && (node.needsPolish || node.status === 'done')
 }
 
 function StatusBadge({ node }: { node: PrdNode }) {
+  if (node.status === 'done') {
+    return (
+      <div className="flex items-center gap-xs bg-tertiary-container/40 border border-on-tertiary-container text-tertiary px-2 py-1 rounded-full text-[10px] font-bold tracking-wider">
+        <span className="material-symbols-outlined" style={{ fontSize: '12px', fontVariationSettings: "'FILL' 1" }}>check_circle</span>
+        已确认
+      </div>
+    )
+  }
   if (canForgeNode(node)) {
     return (
       <div className="flex items-center gap-xs bg-[#b22a00]/20 border border-[#ff5429] text-[#ff8b6b] px-2 py-1 rounded-full text-[10px] font-bold tracking-wider">
@@ -31,12 +39,7 @@ function StatusBadge({ node }: { node: PrdNode }) {
       </div>
     )
   }
-  return (
-    <div className="flex items-center gap-xs bg-tertiary-container/40 border border-on-tertiary-container text-tertiary px-2 py-1 rounded-full text-[10px] font-bold tracking-wider">
-      <span className="material-symbols-outlined" style={{ fontSize: '12px', fontVariationSettings: "'FILL' 1" }}>check_circle</span>
-      已确认
-    </div>
-  )
+  return null
 }
 
 export function NodeCard({ node, isSelected, onNodeClick, onNodeDoubleClick }: NodeCardProps) {

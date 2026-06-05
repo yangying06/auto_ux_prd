@@ -59,7 +59,7 @@ export function TopAppBar({
           <button
             onClick={onValidatePrototype}
             disabled={!canValidatePrototype}
-            title={canValidatePrototype ? '在 bolt.new 中验证可运行原型' : '导图加载后可验证'}
+            title={canValidatePrototype ? '在 bolt.new 中验证可运行原型' : '所有叶子文档包标记为已完成后才能验证'}
             className={[
               'flex items-center gap-sm rounded-lg px-md py-sm font-label-md text-label-md border transition-colors',
               canValidatePrototype

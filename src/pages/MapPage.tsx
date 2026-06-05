@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'wouter'
 import { startDecomposition, pollDecomposition, exportSpecFolder, exportNodeMarkdown } from '../lib/api'
 import { MapAdjustmentPanel } from '../components/map/MapAdjustmentPanel'
-import type { PrdNode } from '../types/prdNode'
+import type { PrdNode, PrdTree } from '../types/prdNode'
 import { openBoltWithPrompt, prdTreeToBoltPrompt } from '../lib/specPrompt'
 import { useAppStore } from '../store/appStore'
 import { UploadCard } from '../components/upload/UploadCard'
@@ -33,7 +33,18 @@ function normalizeStepPhase(label: string) {
 }
 
 function canForgeNode(node: PrdNode | null) {
-  return Boolean(node && node.type === 'page' && node.needsPolish && node.status !== 'done')
+  return Boolean(node && node.type === 'page' && (node.needsPolish || node.status === 'done'))
+}
+
+function completionGateNodes(tree: PrdTree) {
+  const nodes = Object.values(tree)
+  const leaves = nodes.filter((node) => node.children.length === 0)
+  return leaves.length ? leaves : nodes
+}
+
+function allCompletionGateNodesDone(tree: PrdTree) {
+  const targets = completionGateNodes(tree)
+  return targets.length > 0 && targets.every((node) => node.status === 'done')
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -206,10 +217,7 @@ export function MapPage() {
   if (stage === 'map' && prdTree) {
     const selectedNode = selectedNodeId ? (prdTree[selectedNodeId] ?? null) : null
 
-    const canExport = Object.values(prdTree).length > 0
-      && Object.values(prdTree)
-          .filter(n => n.children.length === 0)
-          .every(n => n.status === 'done')
+    const canExport = allCompletionGateNodesDone(prdTree)
 
     const handleExport = async () => {
       setIsExporting(true)
@@ -256,6 +264,10 @@ export function MapPage() {
     }
 
     const handleValidatePrototype = () => {
+      if (!canExport) {
+        setExportError('所有叶子文档包标记为已完成后才能 Bolt 验证')
+        return
+      }
       openBoltWithPrompt(prdTreeToBoltPrompt(prdTree))
     }
 
@@ -272,7 +284,7 @@ export function MapPage() {
           onExport={handleExport}
           isExporting={isExporting}
           onValidatePrototype={handleValidatePrototype}
-          canValidatePrototype={Object.values(prdTree).length > 0}
+          canValidatePrototype={canExport}
         />
         {exportError && (
           <div className="bg-error/10 border-b border-error/30 px-lg py-sm text-error font-label-md text-label-md flex items-center gap-sm">
