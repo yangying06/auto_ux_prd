@@ -1,12 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import type { PrototypeVersion } from '../../store/appStore'
-import type { ChatMessage, ContentBlock, ImageBlock } from '../../types/chat'
+import type {
+  ChatMessage,
+  ContentBlock,
+  ImageBlock,
+  ReferenceImageClassificationRequest,
+  ReferenceImageClassificationResponse,
+  ReferenceImageRole,
+} from '../../types/chat'
 import type { PrototypeVariant } from '../../types/prototypeVariant'
 import type { PrdNodeOperationSuggestion } from '../../types/prdNode'
 import { NodeOperationReview } from './NodeOperationReview'
 import { PrototypeBoard } from '../state/PrototypeBoard'
-import { PrototypePreviewSurface } from '../state/PrototypeSandboxPreview'
 import { PrototypeVariants } from '../state/PrototypeVariants'
 
 interface ForgeChatProps {
@@ -21,24 +27,29 @@ interface ForgeChatProps {
   nodeOperationSuggestions: PrdNodeOperationSuggestion[]
   onSend: (content: ChatMessage['content']) => void | Promise<void>
   onSuggestNodeOperations: (input: { supplementText: string; sources: SupplementSource[] }) => void | Promise<void>
+  onClassifyImageAttachment: (input: ReferenceImageClassificationRequest) => Promise<ReferenceImageClassificationResponse>
   onApplyNodeOperationSuggestion: (suggestionId: string) => void
   onDismissNodeOperationSuggestion: (suggestionId: string) => void
-  onConfirm: () => void
-  onBack: () => void
-  onGeneratePrototype: (instruction?: string, options?: { singlePrototypeOnly?: boolean }) => void | Promise<void>
+  onGeneratePrototype: (instruction?: string, options?: { singlePrototypeOnly?: boolean; recordInstruction?: boolean }) => void | Promise<void>
   onRestorePrototype: (id: string) => void
   onClearPrototypeHistory: () => void
   onSelectVariant: (index: number) => void
   onClearChat: () => void
 }
 
-type ReferenceRole = 'reference' | 'asset' | 'state' | 'anti'
-type VisualTab = 'references' | 'prototype' | 'compare'
+type PromptSkill = {
+  id: string
+  label: string
+  hint: string
+  detail: string
+  keywords: string[]
+}
 
 interface ImageAttachment {
   id: string
   name: string
-  role: ReferenceRole
+  role: ReferenceImageRole
+  reason: string
   mediaType: ImageBlock['source']['media_type']
   data: string
   previewUrl: string
@@ -51,49 +62,108 @@ interface SupplementSource {
   text: string
 }
 
-interface VisualImage {
-  id: string
-  name: string
-  role: ReferenceRole
-  mediaType: ImageBlock['source']['media_type']
-  data: string
-  previewUrl: string
-  source: 'pending' | 'sent'
-}
-
-const QUICK_PROMPTS = [
-  '补齐原文位置、职责边界、依赖字段和需澄清点。',
-  '把这篇文档整理成后续 AI 可直接执行的任务上下文。',
-  '列出可独立测试的验收项和质量门槛。',
+const PROMPT_SKILLS: PromptSkill[] = [
+  {
+    id: 'source',
+    label: '原文定位',
+    hint: '位置、引用、缺口',
+    detail: '请补齐当前文档包的原文定位：列出涉及的 PRD 标题、段落、字段名、截图位置，标注哪些结论来自原文、哪些是推断，并指出仍缺失或需要业务确认的证据。',
+    keywords: ['原文', '位置', '证据', '引用'],
+  },
+  {
+    id: 'boundary',
+    label: '职责边界',
+    hint: '负责/不负责',
+    detail: '请梳理当前交互节点的职责边界：说明它负责什么、不负责什么、与父页面、子模块、后端、客户端表现的交接点，以及超出边界时应该转交给哪个节点。',
+    keywords: ['职责', '边界', '范围', '交接'],
+  },
+  {
+    id: 'fields',
+    label: '依赖字段',
+    hint: '字段、默认值、降级',
+    detail: '请补齐依赖字段和数据条件：列出每个 UI 状态、按钮、弹窗、动效或跳转依赖的数据字段、默认值、空值/异常值处理，以及字段缺失时的降级表现。',
+    keywords: ['字段', '依赖', '数据', '默认值'],
+  },
+  {
+    id: 'acceptance',
+    label: '验收门槛',
+    hint: '步骤、期望、判定',
+    detail: '请把当前节点拆成可验收条目：每条包含触发前置条件、操作步骤、期望 UI/数据结果、失败状态和可自动化或人工验证的判定标准。',
+    keywords: ['验收', '测试', '质量', '门槛'],
+  },
+  {
+    id: 'state-flow',
+    label: '状态流转',
+    hint: '加载、失败、保持',
+    detail: '请梳理完整状态流转：覆盖默认、加载中、成功、失败、空数据、禁用、重复点击、网络恢复和返回/关闭后的状态保持规则。',
+    keywords: ['状态', '流转', 'loading', '失败'],
+  },
+  {
+    id: 'fallback',
+    label: '异常兜底',
+    hint: '超时、失败、回滚',
+    detail: '请补齐异常与兜底策略：列出超时、接口失败、资源缺失、权限不足、并发操作、离线/弱网、用户取消时的提示、重试和状态回滚规则。',
+    keywords: ['异常', '兜底', '错误', '弱网'],
+  },
+  {
+    id: 'tracking',
+    label: '埋点指标',
+    hint: '事件、属性、边界',
+    detail: '请整理埋点与度量需求：列出关键曝光、点击、失败、完成、停留时长事件，给出事件名建议、触发时机、属性字段和不应重复上报的边界。',
+    keywords: ['埋点', '指标', '事件', '数据'],
+  },
+  {
+    id: 'handoff',
+    label: '交付上下文',
+    hint: '目标、规则、下一步',
+    detail: '请整理成后续 AI 或开发可直接执行的交付上下文：包含目标、范围、已确认规则、未确认问题、依赖资源、验收门槛和建议的下一步任务顺序。',
+    keywords: ['交付', '上下文', 'AI', '开发'],
+  },
+  {
+    id: 'split',
+    label: '节点拆分',
+    hint: '新增/更新建议',
+    detail: '请判断当前文档包是否需要拆分节点：指出过大、跨职责或证据混杂的部分，建议新增或更新的节点名称、父子关系、摘要和迁移的原文依据。',
+    keywords: ['拆分', '节点', '导图', '结构'],
+  },
+  {
+    id: 'visual',
+    label: 'UI证据',
+    hint: '布局、状态、反例',
+    detail: '请基于已上传参考图补齐 UI 证据：逐项描述布局、层级、控件状态、动效、视觉差异和反例约束，并明确哪些结论不能仅凭图片确认。',
+    keywords: ['UI', '截图', '参考图', '视觉'],
+  },
 ]
 const MAX_ATTACHMENTS = 6
 const MAX_IMAGE_SIZE = 4 * 1024 * 1024
 
-const VISUAL_TABS: Array<{ id: VisualTab; label: string; icon: string }> = [
-  { id: 'prototype', label: '原型', icon: 'phone_iphone' },
-  { id: 'references', label: '参考图', icon: 'image_search' },
-  { id: 'compare', label: '对比', icon: 'compare' },
-]
 
-function roleLabel(role: ReferenceRole) {
-  if (role === 'asset') return '素材复用'
-  if (role === 'state') return '状态截图'
-  if (role === 'anti') return '反例参考'
+
+function roleLabel(role: ReferenceImageRole) {
+  if (role === 'asset_reuse') return '素材复用'
+  if (role === 'state_screenshot') return '状态截图'
+  if (role === 'negative_reference') return '反例参考'
   return '布局参考'
 }
 
-function roleTone(role: ReferenceRole) {
-  if (role === 'asset') return 'border-tertiary/40 bg-tertiary-container/20 text-tertiary'
-  if (role === 'state') return 'border-secondary/40 bg-secondary/10 text-secondary'
-  if (role === 'anti') return 'border-error/40 bg-error/10 text-error'
+function roleTone(role: ReferenceImageRole) {
+  if (role === 'asset_reuse') return 'border-tertiary/40 bg-tertiary-container/20 text-tertiary'
+  if (role === 'state_screenshot') return 'border-secondary/40 bg-secondary/10 text-secondary'
+  if (role === 'negative_reference') return 'border-error/40 bg-error/10 text-error'
   return 'border-primary/40 bg-primary/10 text-primary'
 }
 
-function detectRoleFromText(text: string): ReferenceRole {
-  if (/素材|复用|asset/iu.test(text)) return 'asset'
-  if (/状态|冷却|pressed|disabled|loading|截图/iu.test(text)) return 'state'
-  if (/反例|避免|不要|anti/iu.test(text)) return 'anti'
-  return 'reference'
+function getSlashQuery(text: string) {
+  const match = /(?:^|\s)\/([^\s/]*)$/u.exec(text)
+  return match ? match[1] : null
+}
+
+function skillMatchesQuery(skill: PromptSkill, query: string) {
+  const normalized = query.trim().toLowerCase()
+  if (!normalized) return true
+  return [skill.id, skill.label, skill.hint, ...skill.keywords].some((item) => (
+    item.toLowerCase().includes(normalized)
+  ))
 }
 
 function renderInlineMarkdown(text: string) {
@@ -277,30 +347,33 @@ function ErrorBanner({ error, onDismiss }: { error: string; onDismiss: () => voi
   )
 }
 
-function extractSentImages(messages: ChatMessage[]): VisualImage[] {
-  const images: VisualImage[] = []
-  messages.forEach((message, messageIndex) => {
-    if (typeof message.content === 'string') return
-    const text = message.content
-      .filter((block): block is ContentBlock & { type: 'text' } => block.type === 'text')
-      .map((block) => block.text)
-      .join('\n')
-    const role = detectRoleFromText(text)
-    message.content
-      .filter((block): block is ImageBlock => block.type === 'image')
-      .forEach((block, imageIndex) => {
-        images.push({
-          id: `sent-${messageIndex}-${imageIndex}`,
-          name: `${roleLabel(role)} ${images.length + 1}`,
-          role,
-          mediaType: block.source.media_type,
-          data: block.source.data,
-          previewUrl: `data:${block.source.media_type};base64,${block.source.data}`,
-          source: 'sent',
-        })
-      })
+function countMessageImages(messages: ChatMessage[]) {
+  return messages.reduce((count, message) => {
+    if (typeof message.content === 'string') return count
+    return count + message.content.filter((block) => block.type === 'image').length
+  }, 0)
+}
+
+function readFileAsText(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = (event) => resolve(String(event.target?.result ?? '').trim())
+    reader.onerror = () => reject(new Error(`读取 ${file.name} 失败。`))
+    reader.readAsText(file)
   })
-  return images
+}
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = (event) => resolve(String(event.target?.result ?? ''))
+    reader.onerror = () => reject(new Error(`读取 ${file.name} 失败。`))
+    reader.readAsDataURL(file)
+  })
+}
+
+function isSupportedImageMediaType(type: string): type is ImageBlock['source']['media_type'] {
+  return type === 'image/jpeg' || type === 'image/png' || type === 'image/gif' || type === 'image/webp'
 }
 
 export function ForgeChat({
@@ -315,10 +388,9 @@ export function ForgeChat({
   nodeOperationSuggestions,
   onSend,
   onSuggestNodeOperations,
+  onClassifyImageAttachment,
   onApplyNodeOperationSuggestion,
   onDismissNodeOperationSuggestion,
-  onConfirm,
-  onBack,
   onGeneratePrototype,
   onRestorePrototype,
   onClearPrototypeHistory,
@@ -328,11 +400,9 @@ export function ForgeChat({
   const [draft, setDraft] = useState('')
   const [isSending, setIsSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [referenceRole, setReferenceRole] = useState<ReferenceRole>('reference')
   const [attachments, setAttachments] = useState<ImageAttachment[]>([])
-  const [supplementSources, setSupplementSources] = useState<SupplementSource[]>([])
   const [isSuggesting, setIsSuggesting] = useState(false)
-  const [visualTab, setVisualTab] = useState<VisualTab>('prototype')
+  const [isClassifying, setIsClassifying] = useState(false)
   const [variantView, setVariantView] = useState<'grid' | 'single'>('single')
   const [singlePrototypeOnly, setSinglePrototypeOnly] = useState(false)
 
@@ -345,111 +415,131 @@ export function ForgeChat({
     setVariantView(prototypeVariants.length > 1 ? 'grid' : 'single')
   }, [prototypeVariants])
 
+
   function handleSelectVariant(index: number) {
     onSelectVariant(index)
     setVariantView('single')
   }
-  const [selectedImageId, setSelectedImageId] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const supplementInputRef = useRef<HTMLInputElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  const sentImages = useMemo(() => extractSentImages(messages), [messages])
-  const visualImages = useMemo<VisualImage[]>(() => [
-    ...attachments.map((item) => ({ ...item, source: 'pending' as const })),
-    ...sentImages,
-  ], [attachments, sentImages])
-  const selectedImage = visualImages.find((item) => item.id === selectedImageId) ?? visualImages[0] ?? null
+  const imageEvidenceCount = useMemo(() => attachments.length + countMessageImages(messages), [attachments.length, messages])
+  const slashQuery = getSlashQuery(draft)
+  const promptSkills = useMemo(() => (
+    slashQuery === null
+      ? []
+      : PROMPT_SKILLS.filter((skill) => skillMatchesQuery(skill, slashQuery)).slice(0, 8)
+  ), [slashQuery])
+  const [highlightedSkillIndex, setHighlightedSkillIndex] = useState(0)
+  const showPromptSkills = slashQuery !== null && promptSkills.length > 0
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
   useEffect(() => {
-    if (!selectedImageId && visualImages.length > 0) setSelectedImageId(visualImages[0].id)
-    if (selectedImageId && !visualImages.some((item) => item.id === selectedImageId)) {
-      setSelectedImageId(visualImages[0]?.id ?? null)
-    }
-  }, [selectedImageId, visualImages])
+    setHighlightedSkillIndex(0)
+  }, [slashQuery])
 
   function removeAttachment(id: string) {
     setAttachments((current) => current.filter((item) => item.id !== id))
   }
 
-  function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+  async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const availableSlots = Math.max(0, MAX_ATTACHMENTS - attachments.length)
     const selectedFiles = Array.from(event.target.files ?? [])
     const files = selectedFiles.slice(0, availableSlots)
+    event.target.value = ''
     if (selectedFiles.length > availableSlots) {
       setError(`一次最多保留 ${MAX_ATTACHMENTS} 张参考图。`)
     }
     if (!files.length) return
 
-    files.forEach((file) => {
-      if (!file.type.startsWith('image/')) {
-        setError('只支持上传图片作为打磨参考。')
-        return
-      }
-      if (file.size > MAX_IMAGE_SIZE) {
-        setError('单张参考图不能超过 4MB。')
-        return
-      }
+    setError(null)
+    setIsClassifying(true)
+    try {
+      for (const file of files) {
+        const mediaType = file.type
+        if (!isSupportedImageMediaType(mediaType)) {
+          setError('只支持上传 png、jpg、webp 或 gif 图片。')
+          continue
+        }
+        if (file.size > MAX_IMAGE_SIZE) {
+          setError('单张参考图不能超过 4MB。')
+          continue
+        }
 
-      const reader = new FileReader()
-      reader.onload = (e) => {
-        const dataUrl = String(e.target?.result ?? '')
+        const dataUrl = await readFileAsDataUrl(file)
         const base64 = dataUrl.split(',')[1]
-        if (!base64) return
+        if (!base64) continue
+        const classification = await onClassifyImageAttachment({
+          name: file.name,
+          mediaType,
+          data: base64,
+        })
+
         setAttachments((current) => [
           ...current,
           {
             id: `pending-${Date.now()}-${file.name}-${current.length}`,
             name: file.name,
-            role: referenceRole,
-            mediaType: file.type as ImageBlock['source']['media_type'],
+            role: classification.role,
+            reason: classification.reason,
+            mediaType,
             data: base64,
             previewUrl: dataUrl,
           },
         ])
-        setVisualTab('references')
       }
-      reader.readAsDataURL(file)
-    })
-
-    event.target.value = ''
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '图片识别失败，请重试')
+    } finally {
+      setIsClassifying(false)
+    }
   }
 
-  function handleSupplementFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+  async function handleSupplementFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files ?? [])
-    files.forEach((file) => {
-      if (!/\.(md|txt|json)$/iu.test(file.name)) {
-        setError('补充节点资料只支持 .md、.txt、.json。')
+    event.target.value = ''
+    if (!files.length || isSuggesting) return
+
+    const validFiles = files.filter((file) => {
+      if (/\.(md|txt|json)$/iu.test(file.name)) return true
+      setError('补充节点资料只支持 .md、.txt、.json。')
+      return false
+    })
+    if (!validFiles.length) return
+
+    setError(null)
+    setIsSuggesting(true)
+    try {
+      const sources = (await Promise.all(validFiles.map(async (file, index): Promise<SupplementSource | null> => {
+        const text = await readFileAsText(file)
+        if (!text) return null
+        return { id: `supplement-${Date.now()}-${file.name}-${index}`, name: file.name, sourceKind: 'upload', text }
+      }))).filter((source): source is SupplementSource => source !== null)
+
+      if (!sources.length) {
+        setError('上传资料没有可读取的文本内容。')
         return
       }
-      const reader = new FileReader()
-      reader.onload = (e) => {
-        const text = String(e.target?.result ?? '').trim()
-        if (!text) return
-        setSupplementSources((current) => [
-          ...current,
-          { id: `supplement-${Date.now()}-${file.name}-${current.length}`, name: file.name, sourceKind: 'upload', text },
-        ])
-      }
-      reader.readAsText(file)
-    })
-    event.target.value = ''
-  }
 
-  function removeSupplementSource(id: string) {
-    setSupplementSources((current) => current.filter((source) => source.id !== id))
+      await onSuggestNodeOperations({ supplementText: '', sources })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '资料分析失败，请重试')
+    } finally {
+      setIsSuggesting(false)
+    }
   }
 
   function buildMessageContent(text: string): ChatMessage['content'] {
     if (attachments.length === 0) return text
 
-    const fallbackText = text || '请根据这批参考图补齐文档中的布局层级、控件状态、视觉差异和交互细节。'
+    const fallbackText = text || '请根据这批图片证据补齐文档中的布局层级、控件状态、视觉差异、素材复用和反例约束。'
     const attachmentLines = attachments.map((item, index) => (
-      `${index + 1}. ${roleLabel(item.role)}：${item.name}`
+      `${index + 1}. ${item.role}（${roleLabel(item.role)}）：${item.name}${item.reason ? `\n   分类理由：${item.reason}` : ''}`
     ))
 
     return [
@@ -470,17 +560,17 @@ export function ForgeChat({
 
   async function handleSend() {
     const text = draft.trim()
-    if ((!text && attachments.length === 0) || isSending) return
+    if (isSending || isClassifying) return
+
+    if (!text && attachments.length === 0) return
 
     const content = buildMessageContent(text)
-    const hadImages = attachments.length > 0
     setDraft('')
     setAttachments([])
     setError(null)
     setIsSending(true)
     try {
       await onSend(content)
-      if (hadImages) setVisualTab('references')
     } catch (err) {
       setError(err instanceof Error ? err.message : '发送失败，请重试')
     } finally {
@@ -488,49 +578,76 @@ export function ForgeChat({
     }
   }
 
-  async function handleSuggestNodeOperations() {
-    const text = draft.trim()
-    if ((!text && supplementSources.length === 0) || isSuggesting) return
-    setError(null)
-    setIsSuggesting(true)
-    try {
-      await onSuggestNodeOperations({
-        supplementText: text,
-        sources: supplementSources,
-      })
-      setDraft('')
-      setSupplementSources([])
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '生成节点建议失败，请重试')
-    } finally {
-      setIsSuggesting(false)
-    }
-  }
-
-  async function handleGeneratePrototype(instruction?: string) {
-    setVisualTab('prototype')
-    await onGeneratePrototype(instruction, { singlePrototypeOnly: !instruction && singlePrototypeOnly })
+  async function handleGeneratePrototype(instruction?: string, options?: { recordInstruction?: boolean }) {
+    await onGeneratePrototype(instruction, {
+      singlePrototypeOnly: !instruction && singlePrototypeOnly,
+      recordInstruction: options?.recordInstruction,
+    })
   }
 
   function handleClearChat() {
     if (isSending) return
     setAttachments([])
-    setSelectedImageId(null)
     setError(null)
     onClearChat()
   }
 
+  function insertPromptSkill(skill: PromptSkill) {
+    setDraft((current) => {
+      const match = /(?:^|\s)\/([^\s/]*)$/u.exec(current)
+      if (!match) {
+        const prefix = current.trimEnd()
+        return prefix ? `${prefix}\n\n${skill.detail}` : skill.detail
+      }
+
+      const slashStart = match.index + match[0].lastIndexOf('/')
+      const prefix = current.slice(0, slashStart).trimEnd()
+      return prefix ? `${prefix}\n\n${skill.detail}` : skill.detail
+    })
+    window.requestAnimationFrame(() => textareaRef.current?.focus())
+  }
+
+  function removeSlashQuery() {
+    setDraft((current) => {
+      const match = /(?:^|\s)\/([^\s/]*)$/u.exec(current)
+      if (!match) return current
+      const slashStart = match.index + match[0].lastIndexOf('/')
+      return current.slice(0, slashStart).trimEnd()
+    })
+  }
+
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      if (visualTab === 'prototype' && prototypeHtml && draft.trim()) {
-        void handleGeneratePrototype(draft.trim())
-        setDraft('')
-      } else {
-        void handleSend()
+    if (showPromptSkills) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setHighlightedSkillIndex((current) => (current + 1) % promptSkills.length)
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setHighlightedSkillIndex((current) => (current - 1 + promptSkills.length) % promptSkills.length)
+        return
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault()
+        insertPromptSkill(promptSkills[highlightedSkillIndex] ?? promptSkills[0])
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        removeSlashQuery()
+        return
       }
     }
+
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      void handleSend()
+    }
   }
+
+  const canSubmitDraft = Boolean(draft.trim() || attachments.length > 0)
+  const composePlaceholder = '输入你想补充/修改的内容，可同时要求打磨文档、更新原型或分析参考图...'
 
   return (
     <div className="flex min-w-0 flex-1 bg-background blueprint-grid">
@@ -540,7 +657,7 @@ export function ForgeChat({
             {[
               { label: '来源/边界', done: messages.length > 1 },
               { label: '质量门槛', done: nodeComplete },
-              { label: '参考证据', done: visualImages.length > 0 },
+              { label: '参考证据', done: imageEvidenceCount > 0 },
               { label: '原型预览', done: Boolean(prototypeHtml) },
             ].map((item) => (
               <span
@@ -593,8 +710,10 @@ export function ForgeChat({
                 <div key={item.id} className="flex w-[172px] shrink-0 items-center gap-xs rounded bg-surface-container p-xs">
                   <img src={item.previewUrl} alt={item.name} className="h-12 w-12 rounded object-cover" />
                   <div className="min-w-0 flex-1">
-                    <div className="truncate font-mono text-[10px] text-secondary">{roleLabel(item.role)}</div>
-                    <div className="truncate font-mono text-[10px] text-on-surface-variant">{item.name}</div>
+                    <div className={`inline-flex max-w-full rounded border px-xs py-[1px] font-mono text-[10px] ${roleTone(item.role)}`}>
+                      <span className="truncate">{roleLabel(item.role)}</span>
+                    </div>
+                    <div className="truncate font-mono text-[10px] text-on-surface-variant" title={item.reason}>{item.name}</div>
                   </div>
                   <button
                     onClick={() => removeAttachment(item.id)}
@@ -608,64 +727,47 @@ export function ForgeChat({
             </div>
           ) : null}
 
-          {supplementSources.length > 0 ? (
-            <div className="mb-sm flex gap-xs overflow-x-auto rounded-lg border border-primary/30 bg-primary/10 p-xs">
-              {supplementSources.map((source) => (
-                <div key={source.id} className="flex max-w-[220px] shrink-0 items-center gap-xs rounded bg-surface-container p-xs">
-                  <span className="material-symbols-outlined text-primary" style={{ fontSize: '16px' }}>description</span>
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate font-mono text-[10px] text-primary">上传资料</div>
-                    <div className="truncate font-mono text-[10px] text-on-surface-variant">{source.name}</div>
-                  </div>
-                  <button
-                    onClick={() => removeSupplementSource(source.id)}
-                    className="rounded px-xs font-mono text-code-sm text-on-surface-variant hover:bg-surface-container-high hover:text-error"
-                    title="移除资料"
-                  >
-                    ×
-                  </button>
-                </div>
-              ))}
-            </div>
-          ) : null}
-
           <div className="flex flex-col gap-sm">
+            {showPromptSkills ? (
+              <div className="rounded-lg border border-secondary/40 bg-surface-container-high p-xs shadow-sm">
+                <div className="grid max-h-44 grid-cols-2 gap-xs overflow-y-auto">
+                  {promptSkills.map((skill, index) => (
+                    <button
+                      key={skill.id}
+                      type="button"
+                      onMouseEnter={() => setHighlightedSkillIndex(index)}
+                      onClick={() => insertPromptSkill(skill)}
+                      className={[
+                        'flex min-h-[44px] min-w-0 items-center gap-xs rounded-md border px-sm py-xs text-left transition-colors',
+                        index === highlightedSkillIndex
+                          ? 'border-secondary bg-secondary-container text-on-secondary-container'
+                          : 'border-outline-variant/50 bg-surface text-on-surface-variant hover:border-secondary hover:text-on-surface',
+                      ].join(' ')}
+                    >
+                      <span className="material-symbols-outlined shrink-0" style={{ fontSize: '16px' }}>bolt</span>
+                      <span className="min-w-0">
+                        <span className="block truncate text-label-md">/{skill.label}</span>
+                        <span className="block truncate font-mono text-[10px]">{skill.hint}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
             <textarea
+              ref={textareaRef}
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder={
-                visualTab === 'prototype'
-                  ? '描述要如何修改右侧原型...'
-                  : visualTab === 'compare'
-                    ? '指出参考图和原型哪里不一致...'
-                    : '补充这篇文档的原文依据、依赖关系、验收标准，或上传参考图...'
-              }
+              placeholder={composePlaceholder}
               disabled={isSending}
               rows={3}
               className="w-full resize-none rounded-lg border border-outline-variant bg-surface-container px-md py-sm text-body-md text-on-surface placeholder:text-on-surface-variant focus:border-secondary focus:outline-none disabled:opacity-50 transition-colors"
             />
 
-            <div className="flex items-center justify-between gap-md">
-              <button
-                onClick={onBack}
-                className="flex min-h-[36px] items-center gap-xs text-label-md text-on-surface-variant transition-colors hover:text-on-surface"
-              >
-                <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>arrow_back</span>
-                返回导图
-              </button>
-
+            <div className="flex items-center justify-end gap-md">
               <div className="flex min-w-0 flex-wrap items-center justify-end gap-sm">
-                {QUICK_PROMPTS.map((prompt) => (
-                  <button
-                    key={prompt}
-                    onClick={() => setDraft((current) => current || prompt)}
-                    className="max-w-[168px] truncate rounded-lg border border-outline-variant bg-surface px-sm py-xs text-left text-body-sm text-on-surface-variant transition-colors hover:border-secondary hover:text-on-surface"
-                    title={prompt}
-                  >
-                    {prompt}
-                  </button>
-                ))}
                 <input
                   ref={supplementInputRef}
                   type="file"
@@ -676,66 +778,43 @@ export function ForgeChat({
                 />
                 <button
                   onClick={() => supplementInputRef.current?.click()}
+                  disabled={isSuggesting}
                   className="flex min-h-[36px] items-center gap-xs rounded-lg border border-outline-variant bg-surface px-md py-sm text-label-md text-on-surface-variant transition-colors hover:border-primary hover:text-primary"
-                  title="上传补充资料生成节点建议"
-                >
-                  <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>attach_file</span>
-                  资料
-                </button>
-                <button
-                  onClick={() => void handleSuggestNodeOperations()}
-                  disabled={(!draft.trim() && supplementSources.length === 0) || isSuggesting}
-                  className="flex min-h-[36px] items-center gap-xs rounded-lg border border-primary bg-primary-container px-md py-sm text-label-md font-medium text-on-primary-container transition-opacity hover:opacity-90 disabled:opacity-40"
+                  title="上传补充资料"
                 >
                   <span className={['material-symbols-outlined', isSuggesting ? 'animate-spin' : ''].join(' ')} style={{ fontSize: '16px' }}>
-                    {isSuggesting ? 'sync' : 'add_node'}
+                    {isSuggesting ? 'sync' : 'attach_file'}
                   </span>
-                  生成节点建议
+                  资料
                 </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/gif"
+                  multiple
+                  className="hidden"
+                  onChange={(event) => void handleFileChange(event)}
+                />
                 <button
-                  onClick={onConfirm}
-                  className={[
-                    'flex min-h-[36px] items-center gap-xs rounded-lg border px-md py-sm text-label-md font-medium transition-all',
-                    nodeComplete
-                      ? 'border-tertiary bg-tertiary-container text-on-tertiary-container active-glow'
-                      : 'border-outline-variant bg-secondary-container text-on-secondary-container opacity-60',
-                  ].join(' ')}
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isClassifying || attachments.length >= MAX_ATTACHMENTS}
+                  className="flex min-h-[36px] items-center gap-xs rounded-lg border border-outline-variant bg-surface px-md py-sm text-label-md text-on-surface-variant transition-colors hover:border-secondary hover:text-secondary disabled:opacity-40"
+                  title="上传图片"
                 >
-                  <span
-                    className="material-symbols-outlined"
-                    style={{
-                      fontSize: '16px',
-                      fontVariationSettings: nodeComplete ? "'FILL' 1" : "'FILL' 0",
-                    }}
-                  >
-                    check_circle
+                  <span className={['material-symbols-outlined', isClassifying ? 'animate-spin' : ''].join(' ')} style={{ fontSize: '16px' }}>
+                    {isClassifying ? 'sync' : 'add_photo_alternate'}
                   </span>
-                  确认完成
+                  图片
                 </button>
 
                 <button
                   onClick={() => void handleSend()}
-                  disabled={(!draft.trim() && attachments.length === 0) || isSending}
+                  disabled={!canSubmitDraft || isSending || isClassifying}
                   className="flex min-h-[36px] items-center gap-xs rounded-lg border border-secondary bg-secondary-container px-md py-sm text-label-md font-medium text-on-secondary-container transition-opacity hover:opacity-90 disabled:opacity-40"
                 >
                   <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>send</span>
-                  发送
+                  发送给 AI
                 </button>
-                {visualTab === 'prototype' && prototypeHtml ? (
-                  <button
-                    onClick={() => {
-                      const instruction = draft.trim()
-                      if (!instruction) return
-                      setDraft('')
-                      void handleGeneratePrototype(instruction)
-                    }}
-                    disabled={!draft.trim() || isGeneratingPrototype}
-                    className="flex min-h-[36px] items-center gap-xs rounded-lg border border-secondary/40 bg-secondary/10 px-md py-sm text-label-md font-medium text-secondary transition-opacity hover:opacity-90 disabled:opacity-40"
-                  >
-                    <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>edit</span>
-                    修改原型
-                  </button>
-                ) : null}
               </div>
             </div>
           </div>
@@ -760,97 +839,9 @@ export function ForgeChat({
               {prototypeHtml ? '更新原型' : '生成原型'}
             </button>
           </div>
-          <div className="grid grid-cols-3 gap-xs rounded-lg border border-outline-variant bg-surface p-xs">
-            {VISUAL_TABS.map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => setVisualTab(tab.id)}
-                className={[
-                  'flex items-center justify-center gap-xs rounded px-sm py-xs font-mono text-[11px] transition-colors',
-                  visualTab === tab.id
-                    ? 'bg-primary-container text-on-primary-container'
-                    : 'text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface',
-                ].join(' ')}
-              >
-                <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>{tab.icon}</span>
-                {tab.label}
-              </button>
-            ))}
-          </div>
         </div>
 
-        {visualTab === 'references' ? (
-          <div className="flex min-h-0 flex-1 flex-col gap-md overflow-y-auto p-md">
-            <div className="grid grid-cols-4 gap-xs rounded-lg border border-outline-variant bg-surface p-xs">
-              {(['reference', 'asset', 'state', 'anti'] as ReferenceRole[]).map((role) => (
-                <button
-                  key={role}
-                  onClick={() => setReferenceRole(role)}
-                  className={[
-                    'rounded px-xs py-xs font-mono text-[10px] transition-colors',
-                    referenceRole === role
-                      ? roleTone(role)
-                      : 'text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface',
-                  ].join(' ')}
-                >
-                  {roleLabel(role)}
-                </button>
-              ))}
-            </div>
-
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/png,image/jpeg,image/webp,image/gif"
-              multiple
-              className="hidden"
-              onChange={handleFileChange}
-            />
-
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="flex min-h-[108px] flex-col items-center justify-center gap-sm rounded-lg border border-dashed border-outline-variant bg-surface/70 px-md py-lg text-center transition-colors hover:border-secondary hover:bg-secondary/10"
-            >
-              <span className="material-symbols-outlined text-secondary" style={{ fontSize: '28px' }}>
-                add_photo_alternate
-              </span>
-              <span className="font-mono text-label-md uppercase text-secondary">上传到视觉舱</span>
-            </button>
-
-            {visualImages.length > 0 ? (
-              <div className="grid grid-cols-2 gap-sm">
-                {visualImages.map((item) => (
-                  <button
-                    key={item.id}
-                    onClick={() => setSelectedImageId(item.id)}
-                    className={[
-                      'overflow-hidden rounded-lg border bg-surface text-left transition-colors',
-                      selectedImage?.id === item.id ? 'border-primary active-glow' : 'border-outline-variant hover:border-secondary',
-                    ].join(' ')}
-                  >
-                    <img src={item.previewUrl} alt={item.name} className="h-36 w-full object-cover" />
-                    <div className="p-xs">
-                      <div className={`inline-flex rounded border px-xs py-[2px] font-mono text-[10px] ${roleTone(item.role)}`}>
-                        {roleLabel(item.role)}
-                      </div>
-                      <div className="mt-xs truncate font-mono text-[10px] text-on-surface-variant">
-                        {item.source === 'pending' ? '待发送 · ' : '已进入对话 · '}
-                        {item.name}
-                      </div>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <div className="rounded-lg border border-outline-variant/60 bg-surface/60 p-md font-mono text-[11px] leading-relaxed text-on-surface-variant">
-                上传 UI 截图、竞品参考、状态图或反例图。图片会作为 AI 对话证据进入文档包打磨流程。
-              </div>
-            )}
-          </div>
-        ) : null}
-
-        {visualTab === 'prototype' ? (
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-sm">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-sm">
             {hasMultipleVariants && variantView === 'grid' ? (
               <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-outline-variant/30 bg-zinc-950">
                 <div className="flex items-center justify-between border-b border-outline-variant/20 bg-zinc-900/80 px-sm py-xs">
@@ -890,46 +881,6 @@ export function ForgeChat({
               </div>
             )}
           </div>
-        ) : null}
-
-        {visualTab === 'compare' ? (
-          <div className="flex min-h-0 flex-1 overflow-hidden p-md">
-            <div className="grid min-h-0 flex-1 grid-cols-2 gap-sm">
-              <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface">
-                <div className="border-b border-outline-variant px-sm py-xs font-mono text-[10px] uppercase text-on-surface-variant">
-                  参考图
-                </div>
-                {selectedImage ? (
-                  <div className="flex min-h-0 flex-1 items-center justify-center bg-black/30 p-sm">
-                    <img src={selectedImage.previewUrl} alt={selectedImage.name} className="max-h-full max-w-full rounded object-contain" />
-                  </div>
-                ) : (
-                  <div className="flex flex-1 items-center justify-center p-md text-center font-mono text-[11px] text-on-surface-variant">
-                    先上传或选择一张参考图。
-                  </div>
-                )}
-              </div>
-              <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface">
-                <div className="border-b border-outline-variant px-sm py-xs font-mono text-[10px] uppercase text-on-surface-variant">
-                  生成原型
-                </div>
-                <div className="flex min-h-0 flex-1 overflow-hidden bg-black/30">
-                  <PrototypePreviewSurface
-                    html={selectedPrototypeHtml}
-                    title="生成原型"
-                    interactive
-                    fit="pane"
-                    fallback={(
-                      <div className="flex h-full w-full items-center justify-center p-sm text-center font-mono text-[11px] text-on-surface-variant">
-                        生成后在这里显示原型。
-                      </div>
-                    )}
-                  />
-                </div>
-              </div>
-            </div>
-          </div>
-        ) : null}
       </aside>
     </div>
   )

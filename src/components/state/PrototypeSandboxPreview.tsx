@@ -5,13 +5,13 @@ interface PrototypeSandboxPreviewProps {
   html: string | null
   title?: string
   interactive?: boolean
-  mode?: 'viewport' | 'thumbnail'
+  mode?: 'viewport' | 'aspect' | 'thumbnail' | 'full-page' | 'actual'
   className?: string
   fallback?: ReactNode
 }
 
 interface PrototypePreviewSurfaceProps extends PrototypeSandboxPreviewProps {
-  fit?: 'aspect' | 'pane' | 'thumbnail'
+  fit?: 'aspect' | 'pane' | 'thumbnail' | 'fullPage' | 'actual'
   surfaceClassName?: string
   style?: CSSProperties
   children?: ReactNode
@@ -72,10 +72,16 @@ export function PrototypePreviewSurface({
 }: PrototypePreviewSurfaceProps) {
   const fitClassName = {
     aspect: 'aspect-[375/812] w-full',
-    pane: 'h-full w-full',
+    pane: 'mx-auto h-full w-full max-w-[375px]',
     thumbnail: 'h-[320px] w-full',
+    fullPage: 'h-full w-full',
+    actual: 'h-full w-full',
   }[fit]
-  const sandboxMode = fit === 'thumbnail' ? 'thumbnail' : 'viewport'
+  const sandboxMode = fit === 'fullPage'
+    ? 'full-page'
+    : fit === 'pane'
+      ? 'viewport'
+      : fit
 
   return (
     <div

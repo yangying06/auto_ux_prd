@@ -1,6 +1,15 @@
+import { useState } from 'react'
 import { formatPrototypeVersionTime } from '../../lib/prototypeUtils'
 import type { PrototypeVersion } from '../../store/appStore'
 import { PrototypePreviewSurface } from './PrototypeSandboxPreview'
+
+type PreviewMode = 'fit' | 'viewport' | 'actual'
+
+const PREVIEW_MODES: Array<{ id: PreviewMode; label: string; icon: string }> = [
+  { id: 'fit', label: '适屏全貌', icon: 'fit_screen' },
+  { id: 'viewport', label: '真机交互', icon: 'phone_iphone' },
+  { id: 'actual', label: '100%', icon: 'zoom_in' },
+]
 
 interface PrototypeBoardProps {
   html: string | null
@@ -21,6 +30,9 @@ export function PrototypeBoard({
   onRestore,
   onClearHistory,
 }: PrototypeBoardProps) {
+  const [previewMode, setPreviewMode] = useState<PreviewMode>('fit')
+  const previewFit = previewMode === 'fit' ? 'fullPage' : previewMode === 'actual' ? 'actual' : 'pane'
+
   function handleRestore(id: string) {
     if (!id) return
     onRestore(id)
@@ -29,14 +41,33 @@ export function PrototypeBoard({
   return (
     <section className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-outline-variant/30 bg-zinc-950 shadow-inner">
       <div className="blueprint-grid pointer-events-none absolute inset-0 opacity-40" />
-      <div className="z-10 flex items-center justify-between border-b border-outline-variant/20 bg-zinc-900/80 p-sm backdrop-blur-sm">
+      <div className="z-10 flex flex-wrap items-center justify-between gap-sm border-b border-outline-variant/20 bg-zinc-900/80 p-sm backdrop-blur-sm">
         <div className="flex min-w-0 items-center gap-sm">
           <span className="font-mono text-code-sm text-on-surface-variant">Sandbox 预览</span>
           <span className="rounded-full bg-outline-variant/10 px-sm py-xs font-mono text-[10px] uppercase text-on-surface-variant">
             {isLoading ? '生成中...' : html ? '原型已就绪' : '等待需求输入'}
           </span>
         </div>
-        <div className="flex shrink-0 items-center gap-xs">
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-xs">
+          <div className="flex h-8 rounded-md border border-outline-variant/40 bg-surface-container-high p-[2px]">
+            {PREVIEW_MODES.map((mode) => (
+              <button
+                key={mode.id}
+                type="button"
+                onClick={() => setPreviewMode(mode.id)}
+                className={[
+                  'flex items-center gap-xs rounded px-sm font-mono text-[11px] transition-colors',
+                  previewMode === mode.id
+                    ? 'bg-secondary-container text-on-secondary-container'
+                    : 'text-on-surface-variant hover:bg-surface-container-highest hover:text-on-surface',
+                ].join(' ')}
+                title={mode.label}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>{mode.icon}</span>
+                {mode.label}
+              </button>
+            ))}
+          </div>
           <select
             value=""
             onChange={(event) => handleRestore(event.target.value)}
@@ -77,8 +108,8 @@ export function PrototypeBoard({
         <PrototypePreviewSurface
           html={html}
           title="UX prototype preview"
-          interactive
-          fit="pane"
+          interactive={previewMode !== 'fit'}
+          fit={previewFit}
           fallback={(
               <div className="flex h-full items-center justify-center p-md">
                 {isLoading ? (

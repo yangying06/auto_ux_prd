@@ -16,18 +16,52 @@ function extractFencedCode(input: string) {
   return null
 }
 
-function extractHtmlDocument(input: string) {
-  const docStart = input.search(/<!doctype\s+html|<html[\s>]/iu)
+function extractFileContent(input: string) {
+  const file = input.match(/<file\s+path=["'][^"']+["']>\s*([\s\S]*?)\s*<\/file>/iu)
+  return file?.[1]?.trim() ?? null
+}
+
+export function extractPrototypeHtmlContent(input: string): string | null {
+  const stripped = stripFrontmatter(input)
+  const fileContent = extractFileContent(stripped)
+  if (fileContent) {
+    const extractedFromFile = extractPrototypeHtmlContent(fileContent)
+    if (extractedFromFile) return extractedFromFile
+  }
+
+  const fenced = extractFencedCode(stripped)
+  const candidates = [fileContent, fenced, stripped].filter((item): item is string => Boolean(item))
+
+  for (const candidate of candidates) {
+    const withoutOuterFence = candidate
+      .replace(/^```html?\s*\n?/imu, '')
+      .replace(/\n?```\s*$/imu, '')
+      .trim()
+
+    const matchWithDoctype = withoutOuterFence.match(/(<!doctype\s+html[^>]*>\s*<html[\s\S]*?<\/html>)/iu)
+    if (matchWithDoctype?.[1]) return matchWithDoctype[1].trim()
+
+    const match = withoutOuterFence.match(/(<html[\s\S]*?<\/html>)/iu)
+    if (match?.[1]) return match[1].trim()
+  }
+
+  return null
+}
+
+function extractHtmlFragmentOrText(input: string) {
+  const fileContent = extractFileContent(input)
+  const candidate = fileContent ?? input
+  const docStart = candidate.search(/<!doctype\s+html|<html[\s>]/iu)
   if (docStart >= 0) {
-    const doc = input.slice(docStart)
+    const doc = candidate.slice(docStart)
     const docEnd = doc.search(/<\/html>/iu)
     return docEnd >= 0 ? doc.slice(0, docEnd + '</html>'.length).trim() : doc.trim()
   }
 
-  const bodyLikeStart = input.search(/<(body|main|section|div|canvas|script|style|head)[\s>]/iu)
-  if (bodyLikeStart >= 0) return input.slice(bodyLikeStart).trim()
+  const bodyLikeStart = candidate.search(/<(body|main|section|div|canvas|script|style|head)[\s>]/iu)
+  if (bodyLikeStart >= 0) return candidate.slice(bodyLikeStart).trim()
 
-  return input.trim()
+  return candidate.trim()
 }
 
 function hasTailwind(html: string) {
@@ -50,8 +84,16 @@ function injectIntoHead(html: string, snippet: string) {
 
 export function parsePrototypeMarkdown(raw: string) {
   const stripped = stripFrontmatter(raw)
+  const completeHtml = extractPrototypeHtmlContent(stripped)
+  if (completeHtml) return completeHtml
+
   const fenced = extractFencedCode(stripped)
-  return extractHtmlDocument(fenced ?? stripped)
+  return extractHtmlFragmentOrText(fenced ?? stripped)
+}
+
+export function normalizeGeneratedPrototypeHtml(raw: string) {
+  const completeHtml = extractPrototypeHtmlContent(raw)
+  return completeHtml ? normalizePrototypeHtml(completeHtml) : null
 }
 
 export function normalizePrototypeHtml(raw: string) {
@@ -84,9 +126,11 @@ export function normalizePrototypeHtml(raw: string) {
   })();
 </script>`
   const baseStyle = `<style>
-  :root { --prototype-design-width: 375px; --prototype-design-height: 812px; }
+  :root { --prototype-design-width: 375px; }
   html, body { margin: 0; width: 100%; min-width: var(--prototype-design-width); min-height: 100vh; overflow-x: hidden; overflow-y: auto; background: #05070d; color: #f7f7fb; }
   body { display: block !important; position: relative; }
+  *, html, body { scrollbar-width: none; -ms-overflow-style: none; }
+  *::-webkit-scrollbar, html::-webkit-scrollbar, body::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }
   body > :not(script):not(style):not(link):not(meta),
   #root,
   #app,
@@ -154,7 +198,7 @@ export function normalizePrototypeHtml(raw: string) {
   #root > .prototype-root,
   #app > main,
   #app > .prototype-root {
-    min-height: max(100vh, var(--prototype-design-height)) !important;
+    min-height: 100vh !important;
     margin-left: 0 !important;
     margin-right: 0 !important;
   }

@@ -1,4 +1,12 @@
-import type { ChatMessage, ChatResponse, ContentBlock, ProxyHealth, RagSearchResult } from '../types/chat'
+import type {
+  ChatMessage,
+  ChatResponse,
+  ContentBlock,
+  ProxyHealth,
+  RagSearchResult,
+  ReferenceImageClassificationRequest,
+  ReferenceImageClassificationResponse,
+} from '../types/chat'
 import type { UXRequirementState } from '../types/uxRequirement'
 import type { MapAdjustmentOperation, PrdNode, PrdNodeOperationSuggestion } from '../types/prdNode'
 
@@ -128,6 +136,8 @@ export function pollDecomposition(baseUrl: string, sessionId: string) {
 
 // ── Node Chat API ─────────────────────────────────────────────────────────────
 
+export type NodeChatIntent = 'document_polish' | 'prototype_update' | 'reference_feedback'
+
 export interface NodeChatResponse {
   reply: string
   nodeComplete: boolean
@@ -136,6 +146,8 @@ export interface NodeChatResponse {
     content?: string | null
     techNotes?: string | null
   } | null
+  intents?: NodeChatIntent[]
+  prototypeInstruction?: string | null
 }
 
 export function sendNodeChatMessage(
@@ -147,6 +159,16 @@ export function sendNodeChatMessage(
   return requestJson<NodeChatResponse>(baseUrl, '/api/node-chat', {
     method: 'POST',
     body: JSON.stringify({ nodeId, messages, tree }),
+  })
+}
+
+export function classifyReferenceImage(
+  baseUrl: string,
+  payload: ReferenceImageClassificationRequest,
+) {
+  return requestJson<ReferenceImageClassificationResponse>(baseUrl, '/api/reference-image-classification', {
+    method: 'POST',
+    body: JSON.stringify(payload),
   })
 }
 

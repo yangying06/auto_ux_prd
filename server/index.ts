@@ -6,10 +6,12 @@ import { zipSync } from 'fflate'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { applyPrototypeEdit, normalizePrototypeHtml } from '../src/lib/prototypeUtils'
+import { applyPrototypeEdit, normalizeGeneratedPrototypeHtml, normalizePrototypeHtml } from '../src/lib/prototypeUtils'
 import type { UXRequirementState } from '../src/types/uxRequirement'
 import type { MapAdjustmentOperation, PrdNode, PrdNodeAudience, PrdNodeEvidenceRef, PrdNodeOperationPatch, PrdNodeOperationSuggestion, PrdNodeReference, PrdNodeSourceKind, PrdNodeStatus } from '../src/types/prdNode'
+import type { ReferenceImageClassificationRequest, ReferenceImageClassificationResponse, ReferenceImageRole } from '../src/types/chat'
 import { contentDispositionHeader } from './exportHeaders'
+import { extractNodeChatSuffix } from './nodeChatResponse'
 import { buildVariantConfigs, clampVariantCount, DEFAULT_CREATE_VARIANTS, DEFAULT_UPDATE_VARIANTS } from './prototypePrompts'
 
 dotenv.config()
@@ -162,17 +164,6 @@ interface PrdNodeSuggestionRequest {
   sources?: NodeOperationSourceInput[]
 }
 
-interface NodePolishPatch {
-  summary?: string | null
-  content?: string | null
-  techNotes?: string | null
-}
-
-interface NodeChatSuffix {
-  nodeComplete?: boolean
-  nodePatch?: NodePolishPatch
-}
-
 interface RagSearchRequest {
   query: string
 }
@@ -323,41 +314,6 @@ function normalizeNullableString(value: unknown) {
   if (typeof value !== 'string') return null
   const trimmed = value.trim()
   return trimmed.length ? trimmed : null
-}
-
-function normalizeNodePolishPatch(value: unknown): NodePolishPatch | null {
-  if (!value || typeof value !== 'object') return null
-  const candidate = value as Record<string, unknown>
-  const patch: NodePolishPatch = {}
-
-  if ('summary' in candidate) patch.summary = normalizeNullableString(candidate.summary)
-  if ('content' in candidate) patch.content = normalizeNullableString(candidate.content)
-  if ('techNotes' in candidate) patch.techNotes = normalizeNullableString(candidate.techNotes)
-  if (!patch.techNotes && 'tech_notes' in candidate) patch.techNotes = normalizeNullableString(candidate.tech_notes)
-
-  return Object.keys(patch).length ? patch : null
-}
-
-function extractNodeChatSuffix(rawText: string): { reply: string; nodeComplete: boolean; nodePatch: NodePolishPatch | null } {
-  const lastBrace = rawText.lastIndexOf('}')
-  if (lastBrace === -1) return { reply: rawText, nodeComplete: false, nodePatch: null }
-
-  for (let index = lastBrace; index >= 0; index -= 1) {
-    if (rawText[index] !== '{') continue
-    try {
-      const suffix = JSON.parse(rawText.slice(index, lastBrace + 1)) as NodeChatSuffix
-      if (!suffix || typeof suffix !== 'object' || !('nodeComplete' in suffix)) continue
-      return {
-        reply: rawText.slice(0, index).trim() || rawText,
-        nodeComplete: suffix.nodeComplete === true,
-        nodePatch: normalizeNodePolishPatch(suffix.nodePatch),
-      }
-    } catch {
-      // Try the previous opening brace. JSON suffixes may contain nested objects.
-    }
-  }
-
-  return { reply: rawText, nodeComplete: false, nodePatch: null }
 }
 
 function normalizeAssetDependency(value: unknown) {
@@ -2095,6 +2051,113 @@ MVC 分类必须按证据维度：model=领域事实/数据/配置/状态/规则
   })
 })
 
+const REFERENCE_IMAGE_ROLES = [
+  'layout_reference',
+  'asset_reuse',
+  'state_screenshot',
+  'negative_reference',
+] as const satisfies readonly ReferenceImageRole[]
+
+type ReferenceImageMediaType = ReferenceImageClassificationRequest['mediaType']
+
+const SUPPORTED_REFERENCE_IMAGE_MEDIA_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+]) as ReadonlySet<ReferenceImageMediaType>
+
+function normalizeReferenceImageRole(value: unknown): ReferenceImageRole | null {
+  const text = normalizeTextValue(value)?.toLowerCase()
+  return REFERENCE_IMAGE_ROLES.find((role) => role === text) ?? null
+}
+
+function normalizeReferenceImageMediaType(value: unknown): ReferenceImageMediaType | null {
+  const text = normalizeTextValue(value)
+  return text && SUPPORTED_REFERENCE_IMAGE_MEDIA_TYPES.has(text as ReferenceImageMediaType)
+    ? text as ReferenceImageMediaType
+    : null
+}
+
+function safeParseReferenceImageClassificationJson(text: string): { role: ReferenceImageRole | null; reason: string | null } | null {
+  const trimmed = text.trim()
+  const firstBrace = trimmed.indexOf('{')
+  const lastBrace = trimmed.lastIndexOf('}')
+  const candidate = firstBrace !== -1 && lastBrace > firstBrace ? trimmed.slice(firstBrace, lastBrace + 1) : trimmed
+  try {
+    const parsed = JSON.parse(candidate) as Record<string, unknown>
+    return {
+      role: normalizeReferenceImageRole(parsed.role),
+      reason: normalizeTextValue(parsed.reason),
+    }
+  } catch {
+    return null
+  }
+}
+
+function isLikelyBase64ImageData(value: string) {
+  return value.length > 0 && value.length <= 8 * 1024 * 1024 && /^[A-Za-z0-9+/]+={0,2}$/u.test(value)
+}
+
+app.post('/api/reference-image-classification', async (req, res) => {
+  const { name, mediaType, data } = req.body as ReferenceImageClassificationRequest
+  const imageName = normalizeTextValue(name) ?? '未命名图片'
+  const normalizedMediaType = normalizeReferenceImageMediaType(mediaType)
+  const normalizedData = normalizeTextValue(data)
+
+  if (!normalizedMediaType) {
+    res.status(400).json({ error: '图片类型不受支持。请上传 png、jpg、webp 或 gif。' })
+    return
+  }
+
+  if (!normalizedData || !isLikelyBase64ImageData(normalizedData)) {
+    res.status(400).json({ error: '图片数据无效。' })
+    return
+  }
+
+  if (!anthropic) {
+    res.status(400).json({ error: '未配置 ANTHROPIC_API_KEY。' })
+    return
+  }
+
+  const response = await anthropic.messages.create({
+    model,
+    max_tokens: 800,
+    system: `你是 GameUX PromptForge 的图片证据分类器。你必须只根据图片内容和文件名，把图片归入且只归入一个类别：
+- layout_reference：布局参考，重点是界面结构、层级、排版、控件分组、间距或信息架构。
+- asset_reuse：素材复用，重点是可复用的图标、角色、道具、背景、纹理、视觉素材。
+- state_screenshot：状态截图，重点是同一界面的特定状态、弹窗、加载、禁用、选中、错误、奖励领取等状态。
+- negative_reference：反例参考，重点是用户希望避免、不要复用或作为错误示范的画面。
+
+必须返回 JSON：{"role":"layout_reference|asset_reuse|state_screenshot|negative_reference","reason":"中文短句"}。不要输出 Markdown、解释或额外字段。`,
+    messages: [{
+      role: 'user',
+      content: [
+        {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: normalizedMediaType,
+            data: normalizedData,
+          },
+        },
+        {
+          type: 'text',
+          text: `文件名：${imageName}\n请分类这张图片在 PRD 节点打磨中的用途。`,
+        },
+      ],
+    }],
+  })
+
+  const parsed = safeParseReferenceImageClassificationJson(textFromClaudeContent(response.content))
+  if (!parsed?.role || !parsed.reason) {
+    res.status(502).json({ error: '图片分类模型返回格式无效。' })
+    return
+  }
+
+  res.json({ role: parsed.role, reason: parsed.reason } satisfies ReferenceImageClassificationResponse)
+})
+
 app.post('/api/node-chat', async (req, res) => {
   const { nodeId, messages, tree } = req.body as NodeChatRequest
 
@@ -2154,13 +2217,19 @@ ${nodeContext}
 - 回复正文只写给用户看的简短 Markdown 总结，不要输出整篇重写文档；可用标题、列表、加粗或行内代码，最多8行
 - 如果文档还不完整，只问一个最关键的问题
 - 优先补齐：原文位置、职责边界、核心规则、依赖字段/配置、跨文档关系、边界条件、需澄清点、可测试验收标准、AI 接力说明
+- 你必须自己从用户最新一轮输入中识别一个或多个意图，不要要求用户选择模式
+- document_polish：用户补充、确认、修正文档内容时，更新 nodePatch
+- reference_feedback：用户上传图片、提到参考图/截图/视觉对比时，把图片或视觉评论作为文档证据；通常也要更新 UI/client 文档的 nodePatch
+- prototype_update：用户要求生成、修改、对齐、对比或修复右侧原型时，写出可直接传给原型生成器的简短中文 prototypeInstruction
+- 一轮输入可以同时包含 document_polish、reference_feedback、prototype_update
 - 当用户上传参考图或界面截图时，仅对 client/UI 类文档像 screenshot-to-code 一样提取布局层级、控件分组、间距、对齐、视觉权重、可交互元素、状态反馈和素材/参考图边界，并转化为文档内容
 - 本轮是否包含图片参考：${hasReferenceImages ? '是' : '否'}
-- 当用户补充或确认的内容应合并进当前文档时，即使文档尚未完成，也要在回复末尾附加 JSON：{"nodeComplete": false, "nodePatch": {"summary": "中文一句话总结当前文档用途或 null", "content": "中文 Markdown 文档正文或本轮已采纳后的当前文档段落", "techNotes": "中文实现/接力注意事项或 null"}}
+- 当用户补充或确认的内容应合并进当前文档时，即使文档尚未完成，也要在回复末尾附加 JSON：{"nodeComplete": false, "intents": ["document_polish"], "prototypeInstruction": null, "nodePatch": {"summary": "中文一句话总结当前文档用途或 null", "content": "中文 Markdown 文档正文或本轮已采纳后的当前文档段落", "techNotes": "中文实现/接力注意事项或 null"}}
+- 当同一轮还要求更新右侧原型时，把 prototype_update 加入 intents，并填写中文 prototypeInstruction；如果没有原型相关要求，prototypeInstruction 必须为 null
 - 当你判断该文档已经足够交给后续 AI 执行时，把同一个 JSON 的 nodeComplete 设为 true，并让 nodePatch 包含最终文档内容
 - JSON 只能放在回复末尾；回复正文不能包含 JSON、大括号、schema 说明或原始回包
 - nodePatch.content 必须整合当前节点原始内容、用户补充和图片观察结论，写成可导出的当前文档正文；不要只写本轮摘要，也不要重复堆叠旧的 Deep Forge 段落
-- nodePatch.summary、nodePatch.content、nodePatch.techNotes 以及 content 内部 Markdown 标题必须使用中文；只有代码标识、文件路径、接口字段名、库/API 名称、枚举值和专有产品名可以保留英文
+- nodePatch.summary、nodePatch.content、nodePatch.techNotes、prototypeInstruction 以及 content 内部 Markdown 标题必须使用中文；只有代码标识、文件路径、接口字段名、库/API 名称、枚举值和专有产品名可以保留英文
 - 保持专业、简洁、直接的语气`
 
   const response = await anthropic.messages.create({
@@ -2177,6 +2246,8 @@ ${nodeContext}
     reply: parsedSuffix.reply || rawText,
     nodeComplete: parsedSuffix.nodeComplete,
     nodePatch: parsedSuffix.nodePatch,
+    intents: parsedSuffix.intents,
+    prototypeInstruction: parsedSuffix.prototypeInstruction,
   })
 })
 
@@ -2237,9 +2308,11 @@ function buildCreatePrototypePrompt(requirementState: UXRequirementState, hasIma
 ${buildPrototypeSpec(requirementState)}
 ${hasImages ? `\n${buildScreenshotFidelitySection()}` : ''}${focusSection}
 ## 尺寸契约
-- 预览沙盒按参考项目的手机适配方式提供 375px CSS 固定宽度；高度由预览面板决定，不是固定 812px。
+- 预览沙盒按参考项目的手机适配方式提供 375px CSS 固定宽度；默认验收视口按 375x812 设计。
 - html、body 和唯一主根容器必须按移动端视口组织：width: 100vw; min-width: 375px; min-height: 100vh; overflow-x: hidden; overflow-y: auto。
-- 主界面内容必须按 375px CSS 宽度设计并控制横向尺寸；内容超过当前预览高度时允许纵向滚动，不要生成额外的 750px 设计稿容器。
+- 主界面内容必须按 375px CSS 宽度设计并优先在 812px 首屏内形成完整可验收画面；不要把所有状态和说明纵向堆成长页。
+- 如信息量超过首屏，优先使用弹层、抽屉、折叠区、标签页或状态切换承载次级内容，而不是直接拉长主页面。
+- 内容确实超出时允许纵向滚动，但必须保证核心界面、主要按钮和关键状态在首屏可见；不要生成额外的 750px 设计稿容器。
 - 禁止使用 max-width、mx-auto、scale()、zoom 或居中 phone/container 把界面缩成中间一条。
 - 不要额外绘制手机壳、浏览器壳、设备边框或外层预览框，应用预览已提供外框。
 
@@ -2275,9 +2348,10 @@ ${currentHtml}
 3. 如果需要多处修改，可以调用多次 edit_prototype。
 4. 如果无法安全定位精确片段，直接输出修改后的完整 HTML 文件。
 5. 保持单文件可运行、Tailwind CDN 可用、无构建步骤、无本地资源依赖。
-6. 预览 iframe 是 375px CSS 固定宽度，实际高度由当前预览面板决定；html、body 和唯一主根容器必须使用 width:100vw; min-width:375px; min-height:100vh; overflow-x:hidden; overflow-y:auto。
-7. 禁止生成额外的 750px 设计稿容器，禁止 max-width/mx-auto/scale()/zoom 让界面缩在中间，也不要新增手机壳、浏览器壳或外层设备框；内容过长时使用纵向滚动，不要横向溢出。
-8. 所有用户可见界面文字、按钮文案、状态提示、组件标注、注释说明必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。`
+6. 预览 iframe 是 375px CSS 固定宽度；默认验收视口按 375x812 设计，html、body 和唯一主根容器必须使用 width:100vw; min-width:375px; min-height:100vh; overflow-x:hidden; overflow-y:auto。
+7. 修改时优先保持核心界面、主要按钮和关键状态在首屏可见；新增内容超过首屏时，用弹层、抽屉、折叠区、标签页或状态切换承载，不要直接把主页面继续拉长。
+8. 禁止生成额外的 750px 设计稿容器，禁止 max-width/mx-auto/scale()/zoom 让界面缩在中间，也不要新增手机壳、浏览器壳或外层设备框；内容过长时允许纵向滚动，不要横向溢出。
+9. 所有用户可见界面文字、按钮文案、状态提示、组件标注、注释说明必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。`
 }
 
 function applyPrototypeToolUses(currentHtml: string, content: Anthropic.Messages.ContentBlock[]) {
@@ -2472,6 +2546,12 @@ function ensurePrototypeProviderConfigured(res: express.Response) {
   return true
 }
 
+function normalizePrototypeModelResponse(raw: string, label: string) {
+  const html = normalizeGeneratedPrototypeHtml(raw)
+  if (!html) throw new Error(`${label} 未返回完整 HTML 文档。请重试。`)
+  return html
+}
+
 async function generateUpdateVariant(
   requirementState: UXRequirementState,
   currentHtml: string,
@@ -2485,7 +2565,7 @@ async function generateUpdateVariant(
     const raw = await createOpenAiChatCompletionText(prompt, imageBlocks, cfg.temperature)
     return {
       index: cfg.index,
-      html: normalizePrototypeHtml(raw),
+      html: normalizePrototypeModelResponse(raw, 'GPT 原型更新'),
       mode: 'rewrite',
       status: 'complete',
       focus: cfg.focus,
@@ -2516,10 +2596,11 @@ async function generateUpdateVariant(
   }
 
   const raw = textFromClaudeContent(response.content)
+  const normalizedRaw = normalizePrototypeModelResponse(raw, 'Claude 原型更新')
   return {
     index: cfg.index,
-    html: raw.trim() ? normalizePrototypeHtml(raw) : currentHtml,
-    mode: raw.trim() ? 'rewrite' : 'update',
+    html: normalizedRaw,
+    mode: 'rewrite',
     status: 'complete',
     focus: cfg.focus,
     appliedEdits: 0,
@@ -2534,9 +2615,10 @@ async function generateCreateVariant(
 ): Promise<PrototypeVariantPayload> {
   const prompt = buildCreatePrototypePrompt(requirementState, imageBlocks.length > 0, cfg.focus)
   if (usesOpenAiPrototypeProvider) {
+    const raw = await createOpenAiChatCompletionText(prompt, imageBlocks, cfg.temperature)
     return {
       index: cfg.index,
-      html: normalizePrototypeHtml(await createOpenAiChatCompletionText(prompt, imageBlocks, cfg.temperature)),
+      html: normalizePrototypeModelResponse(raw, 'GPT 原型生成'),
       mode: 'create',
       status: 'complete',
       focus: cfg.focus,
@@ -2551,9 +2633,10 @@ async function generateCreateVariant(
     temperature: cfg.temperature === 1 ? undefined : cfg.temperature,
     messages: [{ role: 'user', content: buildContentWithImages(prompt, imageBlocks) }],
   })
+  const raw = textFromClaudeContent(response.content)
   return {
     index: cfg.index,
-    html: normalizePrototypeHtml(textFromClaudeContent(response.content)),
+    html: normalizePrototypeModelResponse(raw, 'Claude 原型生成'),
     mode: 'create',
     status: 'complete',
     focus: cfg.focus,
@@ -2593,6 +2676,7 @@ async function streamPrototype(req: express.Request, res: express.Response) {
 
   await Promise.allSettled(configs.map(async (cfg) => {
     let html = ''
+    let lastPreviewHtml = ''
     try {
       if (isUpdate) {
         const variant = await generateUpdateVariant(requirementState, normalizedCurrentHtml!, updateInstruction, imageBlocks, cfg, updateHistory)
@@ -2604,7 +2688,7 @@ async function streamPrototype(req: express.Request, res: express.Response) {
       const prompt = buildCreatePrototypePrompt(requirementState, imageBlocks.length > 0, cfg.focus)
       if (usesOpenAiPrototypeProvider) {
         html = await streamOpenAiChatCompletionText(prompt, imageBlocks, cfg.temperature, () => undefined)
-        const normalized = normalizePrototypeHtml(html)
+        const normalized = normalizePrototypeModelResponse(html, 'GPT 原型生成')
         writePrototypeEvent(res, { type: 'setCode', variantIndex: cfg.index, html: normalized, focus: cfg.focus })
         writePrototypeEvent(res, { type: 'variantComplete', variantIndex: cfg.index, html: normalized, focus: cfg.focus, mode: 'create', appliedEdits: 0, history: [] })
         return
@@ -2620,10 +2704,14 @@ async function streamPrototype(req: express.Request, res: express.Response) {
       for await (const event of stream) {
         if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
           html += event.delta.text
-          writePrototypeEvent(res, { type: 'setCode', variantIndex: cfg.index, html: normalizePrototypeHtml(html), focus: cfg.focus })
+          const previewHtml = normalizeGeneratedPrototypeHtml(html)
+          if (previewHtml && previewHtml !== lastPreviewHtml) {
+            lastPreviewHtml = previewHtml
+            writePrototypeEvent(res, { type: 'setCode', variantIndex: cfg.index, html: previewHtml, focus: cfg.focus })
+          }
         }
       }
-      const normalized = normalizePrototypeHtml(html)
+      const normalized = normalizePrototypeModelResponse(html, 'Claude 原型生成')
       writePrototypeEvent(res, { type: 'variantComplete', variantIndex: cfg.index, html: normalized, focus: cfg.focus, mode: 'create', appliedEdits: 0, history: [] })
     } catch (err) {
       console.error(`[prototype] stream variant ${cfg.index} failed:`, err)

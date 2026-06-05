@@ -16,6 +16,23 @@ export interface ImageBlock {
 
 export type ContentBlock = TextBlock | ImageBlock
 
+export type ReferenceImageRole =
+  | 'layout_reference'
+  | 'asset_reuse'
+  | 'state_screenshot'
+  | 'negative_reference'
+
+export interface ReferenceImageClassificationRequest {
+  name: string
+  mediaType: ImageBlock['source']['media_type']
+  data: string
+}
+
+export interface ReferenceImageClassificationResponse {
+  role: ReferenceImageRole
+  reason: string
+}
+
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string | ContentBlock[]

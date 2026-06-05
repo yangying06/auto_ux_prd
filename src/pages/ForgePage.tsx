@@ -2,10 +2,10 @@ import { useEffect, useState } from 'react'
 import { useLocation, useParams } from 'wouter'
 import { ForgeChat } from '../components/map/ForgeChat'
 import { ForgeNodePanel } from '../components/map/ForgeNodePanel'
-import { generatePrototype, sendNodeChatMessage, suggestPrdNodeOperations } from '../lib/api'
+import { classifyReferenceImage, generatePrototype, sendNodeChatMessage, suggestPrdNodeOperations } from '../lib/api'
 import { streamPrototype } from '../lib/prototypeStream'
 import { useAppStore } from '../store/appStore'
-import type { ChatMessage, ContentBlock } from '../types/chat'
+import type { ChatMessage, ContentBlock, ReferenceImageClassificationRequest } from '../types/chat'
 import type { PrdNode } from '../types/prdNode'
 import type { UXRequirementState } from '../types/uxRequirement'
 
@@ -67,7 +67,7 @@ function countImageBlocks(messages: ChatMessage[]) {
 // "1. 布局参考：name". We parse those lines to map each image (same order) to its role
 // so reference images can be prioritized for prototype generation.
 function isReferenceRoleLine(line: string) {
-  return line.includes('布局参考')
+  return line.includes('layout_reference') || line.includes('布局参考')
 }
 
 function collectPrototypeImages(messages: ChatMessage[]): ContentBlock[] {
@@ -232,6 +232,16 @@ export function ForgePage() {
         setNodeComplete(true)
         updateNodeStatus(nodeId, 'done')
       }
+      const prototypeInstruction = response.prototypeInstruction?.trim()
+      if (prototypeInstruction) {
+        try {
+          await handleGeneratePrototype(prototypeInstruction, { recordInstruction: false, singlePrototypeOnly: true })
+          appendNodeMessage(nodeId, { role: 'assistant', content: '已根据同一轮输入同步更新右侧原型预览。' })
+        } catch (err) {
+          const message = err instanceof Error ? err.message : '原型更新失败'
+          appendNodeMessage(nodeId, { role: 'assistant', content: `文档打磨已完成，但右侧原型同步更新失败：${message}` })
+        }
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : '发送失败'
       appendNodeMessage(nodeId, { role: 'assistant', content: `请求失败：${message}` })
@@ -252,13 +262,22 @@ export function ForgePage() {
       role: 'assistant',
       content: response.suggestions.length
         ? `${response.reply}\n\n已生成 ${response.suggestions.length} 条待确认节点建议，请在输入框上方逐条应用或忽略。`
-        : response.reply,
+      : response.reply,
     })
   }
 
-  async function handleGeneratePrototype(instruction?: string, options?: { singlePrototypeOnly?: boolean }) {
+  function handleClassifyImageAttachment(input: ReferenceImageClassificationRequest) {
+    return classifyReferenceImage(settings.proxyBaseUrl, input)
+  }
+
+  async function handleGeneratePrototype(instruction?: string, options?: { singlePrototypeOnly?: boolean; recordInstruction?: boolean }) {
     if (!node) return
     const trimmedInstruction = instruction?.trim() ?? ''
+    const shouldRecordInstruction = Boolean(options?.recordInstruction && trimmedInstruction && nodeId)
+    let prototypeCompleted = false
+    if (shouldRecordInstruction) {
+      appendNodeMessage(nodeId, { role: 'user', content: `原型修改：${trimmedInstruction}` })
+    }
     const currentMessages = nodeId ? (useAppStore.getState().nodeChats[nodeId] ?? messages) : messages
     const currentNode = nodeId ? (useAppStore.getState().prdTree?.[nodeId] ?? node) : node
     const referenceImages = collectPrototypeImages(currentMessages)
@@ -273,6 +292,7 @@ export function ForgePage() {
       if (isUpdate && selectedVariant?.html) {
         recordNodePrototypeHistory(nodeId, selectedVariant.html, { mode: 'update', note: `修改前：${trimmedInstruction}` })
         updateNodePrototypeVariant(nodeId, selectedVariant.index, { status: 'streaming' })
+        let didReceivePrototypeHtml = false
         await streamPrototype(
           settings.proxyBaseUrl,
           requirementState,
@@ -286,6 +306,7 @@ export function ForgePage() {
           },
           (event) => {
             if (event.type === 'setCode') {
+              if (event.html) didReceivePrototypeHtml = true
               updateNodePrototypeVariant(nodeId, event.variantIndex, {
                 html: event.html,
                 status: 'streaming',
@@ -294,6 +315,7 @@ export function ForgePage() {
               })
               if (event.variantIndex === selectedVariant.index && event.html) selectNodePrototypeVariant(nodeId, event.variantIndex)
             } else if (event.type === 'variantComplete') {
+              if (event.html) didReceivePrototypeHtml = true
               updateNodePrototypeVariant(nodeId, event.variantIndex, {
                 html: event.html,
                 status: 'complete',
@@ -307,16 +329,19 @@ export function ForgePage() {
           },
         )
         selectNodePrototypeVariant(nodeId, selectedVariant.index)
+        prototypeCompleted = didReceivePrototypeHtml
         return
       }
 
       setNodePrototypeVariants(nodeId, Array.from({ length: createVariantCount }, (_, index) => ({ index, html: null, status: 'streaming' as const })))
+      let didReceivePrototypeHtml = false
       await streamPrototype(
         settings.proxyBaseUrl,
         requirementState,
         { images: referenceImages, numVariants: createVariantCount },
         (event) => {
           if (event.type === 'setCode') {
+            if (event.html) didReceivePrototypeHtml = true
             updateNodePrototypeVariant(nodeId, event.variantIndex, {
               html: event.html,
               status: 'streaming',
@@ -324,6 +349,7 @@ export function ForgePage() {
               history: event.history,
             })
           } else if (event.type === 'variantComplete') {
+            if (event.html) didReceivePrototypeHtml = true
             updateNodePrototypeVariant(nodeId, event.variantIndex, {
               html: event.html,
               status: 'complete',
@@ -338,6 +364,7 @@ export function ForgePage() {
           }
         },
       )
+      prototypeCompleted = didReceivePrototypeHtml
     } catch {
       const result = await generatePrototype(
         settings.proxyBaseUrl,
@@ -362,6 +389,7 @@ export function ForgePage() {
             history: chosen.history,
           })
           selectNodePrototypeVariant(nodeId, selectedVariant.index)
+          prototypeCompleted = true
         }
       } else {
         setNodePrototypeVariants(nodeId, result.variants.map((variant) => ({
@@ -374,9 +402,13 @@ export function ForgePage() {
         const chosen = result.variants.find((variant) => variant.status === 'complete' && variant.html)
         if (chosen?.html) {
           selectNodePrototypeVariant(nodeId, chosen.index)
+          prototypeCompleted = true
         }
       }
     } finally {
+      if (shouldRecordInstruction && prototypeCompleted) {
+        appendNodeMessage(nodeId, { role: 'assistant', content: '已更新右侧原型预览。' })
+      }
       setIsGeneratingPrototype(false)
     }
   }
@@ -452,10 +484,9 @@ export function ForgePage() {
           nodeOperationSuggestions={nodeOperationSuggestions[nodeId] ?? []}
           onSend={handleSend}
           onSuggestNodeOperations={handleSuggestNodeOperations}
+          onClassifyImageAttachment={handleClassifyImageAttachment}
           onApplyNodeOperationSuggestion={(suggestionId) => applyNodeOperationSuggestion(nodeId, suggestionId)}
           onDismissNodeOperationSuggestion={(suggestionId) => dismissNodeOperationSuggestion(nodeId, suggestionId)}
-          onConfirm={handleConfirm}
-          onBack={() => navigate('/')}
           onGeneratePrototype={handleGeneratePrototype}
           onRestorePrototype={(id) => restoreNodePrototypeVersion(nodeId, id)}
           onClearPrototypeHistory={() => clearNodePrototypeHistory(nodeId)}

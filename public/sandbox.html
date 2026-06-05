@@ -24,6 +24,7 @@
       }
 
       #canvas {
+        flex: 0 0 auto;
         width: 375px;
         height: 100vh;
         overflow: hidden;
@@ -48,11 +49,13 @@
     </div>
     <script>
       const DESIGN_WIDTH = 375;
+      const viewport = document.getElementById('viewport');
       const canvas = document.getElementById('canvas');
       const preview = document.getElementById('preview');
+      const DESIGN_HEIGHT = 812;
       let previewMode = 'viewport';
       let contentWidth = DESIGN_WIDTH;
-      let contentHeight = window.innerHeight;
+      let contentHeight = DESIGN_HEIGHT;
 
       function withSizeReporter(html) {
         const reporter = `<script>
@@ -78,19 +81,30 @@
       }
 
       function resizeCanvas() {
-        const targetWidth = previewMode === 'thumbnail' ? Math.max(DESIGN_WIDTH, contentWidth) : DESIGN_WIDTH;
-        const targetHeight = previewMode === 'thumbnail'
-          ? Math.max(1, contentHeight)
-          : window.innerHeight;
-        const scale = previewMode === 'thumbnail'
-          ? Math.max(0.01, Math.min(1, window.innerWidth / targetWidth, window.innerHeight / targetHeight))
-          : Math.max(0.01, Math.min(1, window.innerWidth / DESIGN_WIDTH));
+        const isFixedAspect = previewMode === 'aspect' || previewMode === 'thumbnail';
+        const isFullPage = previewMode === 'full-page';
+        const isActual = previewMode === 'actual';
+        const targetWidth = isFullPage
+          ? Math.max(DESIGN_WIDTH, contentWidth)
+          : DESIGN_WIDTH;
+        const targetHeight = isFixedAspect
+          ? DESIGN_HEIGHT
+          : isFullPage || isActual
+            ? Math.max(DESIGN_HEIGHT, contentHeight)
+            : Math.max(1, window.innerHeight / Math.max(0.01, Math.min(1, window.innerWidth / DESIGN_WIDTH)));
+        const scale = isActual
+          ? 1
+          : isFixedAspect || isFullPage
+            ? Math.max(0.01, Math.min(window.innerWidth / targetWidth, window.innerHeight / targetHeight))
+            : Math.max(0.01, Math.min(1, window.innerWidth / DESIGN_WIDTH));
 
+        viewport.style.overflow = isActual ? 'auto' : 'hidden';
         canvas.style.width = `${targetWidth}px`;
         canvas.style.height = `${targetHeight}px`;
         canvas.style.transform = `scale(${scale})`;
         preview.style.width = `${targetWidth}px`;
         preview.style.height = `${targetHeight}px`;
+        preview.style.overflow = isFullPage ? 'hidden' : 'auto';
       }
 
       window.addEventListener('resize', resizeCanvas);
@@ -101,14 +115,14 @@
         if (!data) return;
         if (data.action === 'prototype-size' && event.source === preview.contentWindow) {
           contentWidth = Number.isFinite(data.width) ? data.width : DESIGN_WIDTH;
-          contentHeight = Number.isFinite(data.height) ? data.height : window.innerHeight;
+          contentHeight = Number.isFinite(data.height) ? data.height : DESIGN_HEIGHT;
           resizeCanvas();
           return;
         }
         if (data.action !== 'hydrate' || typeof data.html !== 'string') return;
-        previewMode = data.mode === 'thumbnail' ? 'thumbnail' : 'viewport';
+        previewMode = ['aspect', 'thumbnail', 'full-page', 'actual'].includes(data.mode) ? data.mode : 'viewport';
         contentWidth = DESIGN_WIDTH;
-        contentHeight = window.innerHeight;
+        contentHeight = DESIGN_HEIGHT;
         resizeCanvas();
         preview.srcdoc = withSizeReporter(data.html);
       });
