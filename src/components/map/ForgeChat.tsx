@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
+import type { FigmaFrameImportResponse } from '../../lib/api'
 import type { PrototypeVersion } from '../../store/appStore'
 import type {
   ChatMessage,
@@ -28,9 +29,10 @@ interface ForgeChatProps {
   onSend: (content: ChatMessage['content']) => void | Promise<void>
   onSuggestNodeOperations: (input: { supplementText: string; sources: SupplementSource[] }) => void | Promise<void>
   onClassifyImageAttachment: (input: ReferenceImageClassificationRequest) => Promise<ReferenceImageClassificationResponse>
+  onImportFigmaFrame: (input: { url: string }) => Promise<FigmaFrameImportResponse>
   onApplyNodeOperationSuggestion: (suggestionId: string) => void
   onDismissNodeOperationSuggestion: (suggestionId: string) => void
-  onGeneratePrototype: (instruction?: string, options?: { singlePrototypeOnly?: boolean; recordInstruction?: boolean }) => void | Promise<void>
+  onGeneratePrototype: (instruction?: string, options?: { singlePrototypeOnly?: boolean; recordInstruction?: boolean; evidenceContent?: ChatMessage['content'] }) => void | Promise<void>
   onRestorePrototype: (id: string) => void
   onClearPrototypeHistory: () => void
   onSelectVariant: (index: number) => void
@@ -354,6 +356,26 @@ function countMessageImages(messages: ChatMessage[]) {
   }, 0)
 }
 
+function messageText(content: ChatMessage['content']) {
+  if (typeof content === 'string') return content.trim()
+  return content
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text.trim())
+    .filter(Boolean)
+    .join('\n')
+    .trim()
+}
+
+function latestUserPrototypeInstruction(messages: ChatMessage[]) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message.role !== 'user') continue
+    const text = messageText(message.content)
+    if (text) return text.slice(0, 1400)
+  }
+  return null
+}
+
 function readFileAsText(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader()
@@ -389,6 +411,7 @@ export function ForgeChat({
   onSend,
   onSuggestNodeOperations,
   onClassifyImageAttachment,
+  onImportFigmaFrame,
   onApplyNodeOperationSuggestion,
   onDismissNodeOperationSuggestion,
   onGeneratePrototype,
@@ -405,6 +428,9 @@ export function ForgeChat({
   const [isClassifying, setIsClassifying] = useState(false)
   const [variantView, setVariantView] = useState<'grid' | 'single'>('single')
   const [singlePrototypeOnly, setSinglePrototypeOnly] = useState(false)
+  const [showFigmaImporter, setShowFigmaImporter] = useState(false)
+  const [figmaUrl, setFigmaUrl] = useState('')
+  const [isImportingFigma, setIsImportingFigma] = useState(false)
 
   const hasMultipleVariants = prototypeVariants.length > 1
   const selectedPrototypeHtml = prototypeVariants.find((variant) => variant.index === selectedVariantIndex)?.html ?? prototypeHtml
@@ -500,6 +526,28 @@ export function ForgeChat({
     }
   }
 
+  async function handleImportFigmaFrame() {
+    if (isImportingFigma) return
+
+    const url = figmaUrl.trim()
+    if (!url) {
+      setError('请粘贴 Figma Frame 链接。')
+      return
+    }
+
+    setError(null)
+    setIsImportingFigma(true)
+    try {
+      await onImportFigmaFrame({ url })
+      setFigmaUrl('')
+      setShowFigmaImporter(false)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '导入 Figma Frame 失败，请检查链接、环境变量和文件权限。')
+    } finally {
+      setIsImportingFigma(false)
+    }
+  }
+
   async function handleSupplementFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files ?? [])
     event.target.value = ''
@@ -560,7 +608,7 @@ export function ForgeChat({
 
   async function handleSend() {
     const text = draft.trim()
-    if (isSending || isClassifying) return
+    if (isSending || isClassifying || isImportingFigma) return
 
     if (!text && attachments.length === 0) return
 
@@ -578,11 +626,66 @@ export function ForgeChat({
     }
   }
 
-  async function handleGeneratePrototype(instruction?: string, options?: { recordInstruction?: boolean }) {
+  async function handleGeneratePrototype(instruction?: string, options?: { recordInstruction?: boolean; evidenceContent?: ChatMessage['content'] }) {
     await onGeneratePrototype(instruction, {
       singlePrototypeOnly: !instruction && singlePrototypeOnly,
       recordInstruction: options?.recordInstruction,
+      evidenceContent: options?.evidenceContent,
     })
+  }
+
+  async function handlePrototypeButtonClick() {
+    if (isSending || isClassifying || isImportingFigma) return
+
+    const draftInstruction = draft.trim()
+    const hasPendingEvidence = Boolean(draftInstruction || attachments.length > 0)
+    const pendingEvidenceContent = hasPendingEvidence ? buildMessageContent(draftInstruction) : undefined
+
+    if (!prototypeHtml) {
+      if (hasPendingEvidence) {
+        setDraft('')
+        setAttachments([])
+        setError(null)
+      }
+      await handleGeneratePrototype(undefined, { evidenceContent: pendingEvidenceContent })
+      return
+    }
+
+    if (draftInstruction && attachments.length > 0) {
+      setDraft('')
+      setAttachments([])
+      setError(null)
+      await handleGeneratePrototype(draftInstruction, { recordInstruction: true, evidenceContent: pendingEvidenceContent })
+      return
+    }
+
+    if (draftInstruction) {
+      if (attachments.length > 0) {
+        setError('带图片的原型修改请先发送给 AI，让图片证据进入当前节点上下文。')
+        return
+      }
+      setDraft('')
+      setError(null)
+      await handleGeneratePrototype(draftInstruction, { recordInstruction: true })
+      return
+    }
+
+    if (attachments.length > 0 && pendingEvidenceContent) {
+      const imageAlignmentInstruction = '请根据这些图片证据对齐当前原型的布局、层级、间距、颜色、控件位置和文字。'
+      setDraft('')
+      setAttachments([])
+      setError(null)
+      await handleGeneratePrototype(imageAlignmentInstruction, { recordInstruction: true, evidenceContent: pendingEvidenceContent })
+      return
+    }
+
+    const instruction = latestUserPrototypeInstruction(messages)
+    if (!instruction) {
+      setError('请先在对话框里描述要修改的 UI，再点击“按对话更新”。')
+      return
+    }
+    setError(null)
+    await handleGeneratePrototype(instruction)
   }
 
   function handleClearChat() {
@@ -704,6 +807,47 @@ export function ForgeChat({
             </div>
           ) : null}
 
+          {showFigmaImporter ? (
+            <div className="mb-sm rounded-lg border border-primary/30 bg-primary/10 p-sm">
+              <div className="mb-xs flex items-center justify-between gap-sm">
+                <div className="flex items-center gap-xs text-label-md font-medium text-primary">
+                  <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>design_services</span>
+                  Figma Frame
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowFigmaImporter(false)
+                  }}
+                  className="rounded px-xs text-label-md text-on-surface-variant hover:bg-surface-container-high"
+                  title="关闭"
+                >
+                  ×
+                </button>
+              </div>
+              <div className="grid grid-cols-1 gap-xs xl:grid-cols-[1fr_auto]">
+                <input
+                  value={figmaUrl}
+                  onChange={(event) => setFigmaUrl(event.target.value)}
+                  placeholder="粘贴 Figma Frame 链接"
+                  className="min-h-[36px] min-w-0 rounded-md border border-outline-variant bg-surface px-sm text-body-sm text-on-surface outline-none focus:border-primary"
+                />
+                <button
+                  type="button"
+                  onClick={() => void handleImportFigmaFrame()}
+                  disabled={isImportingFigma}
+                  className="flex min-h-[36px] items-center gap-xs rounded-md border border-primary bg-primary px-sm text-label-md font-medium text-on-primary transition-opacity hover:opacity-90 disabled:opacity-40"
+                  title="调用 Figma2Prefab 生成 HTML 原型"
+                >
+                  <span className={['material-symbols-outlined', isImportingFigma ? 'animate-spin' : ''].join(' ')} style={{ fontSize: '16px' }}>
+                    {isImportingFigma ? 'sync' : 'download'}
+                  </span>
+                  生成 HTML
+                </button>
+              </div>
+            </div>
+          ) : null}
+
           {attachments.length > 0 ? (
             <div className="mb-sm flex gap-xs overflow-x-auto rounded-lg border border-secondary/30 bg-secondary/10 p-xs">
               {attachments.map((item) => (
@@ -787,6 +931,17 @@ export function ForgeChat({
                   </span>
                   资料
                 </button>
+                <button
+                  onClick={() => setShowFigmaImporter((current) => !current)}
+                  disabled={isImportingFigma}
+                  className="flex min-h-[36px] items-center gap-xs rounded-lg border border-outline-variant bg-surface px-md py-sm text-label-md text-on-surface-variant transition-colors hover:border-primary hover:text-primary disabled:opacity-40"
+                  title="从 Figma 链接生成 HTML 原型"
+                >
+                  <span className={['material-symbols-outlined', isImportingFigma ? 'animate-spin' : ''].join(' ')} style={{ fontSize: '16px' }}>
+                    {isImportingFigma ? 'sync' : 'design_services'}
+                  </span>
+                  Figma
+                </button>
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -809,7 +964,7 @@ export function ForgeChat({
 
                 <button
                   onClick={() => void handleSend()}
-                  disabled={!canSubmitDraft || isSending || isClassifying}
+                  disabled={!canSubmitDraft || isSending || isClassifying || isImportingFigma}
                   className="flex min-h-[36px] items-center gap-xs rounded-lg border border-secondary bg-secondary-container px-md py-sm text-label-md font-medium text-on-secondary-container transition-opacity hover:opacity-90 disabled:opacity-40"
                 >
                   <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>send</span>
@@ -829,14 +984,15 @@ export function ForgeChat({
               <h2 className="text-headline-sm font-semibold">视觉舱</h2>
             </div>
             <button
-              onClick={() => void handleGeneratePrototype()}
+              onClick={() => void handlePrototypeButtonClick()}
               disabled={isGeneratingPrototype}
               className="flex items-center gap-xs rounded-lg border border-secondary/40 bg-secondary/10 px-sm py-xs font-mono text-[11px] uppercase text-secondary transition-colors hover:bg-secondary/20 disabled:opacity-40"
+              title={prototypeHtml ? '使用最近的对话或当前输入框内容增量修改已有原型' : '根据当前节点生成首版 HTML 原型'}
             >
               <span className={['material-symbols-outlined', isGeneratingPrototype ? 'animate-spin' : ''].join(' ')} style={{ fontSize: '15px' }}>
                 {isGeneratingPrototype ? 'sync' : 'auto_awesome'}
               </span>
-              {prototypeHtml ? '更新原型' : '生成原型'}
+              {prototypeHtml ? '按对话更新' : '生成原型'}
             </button>
           </div>
         </div>
@@ -877,6 +1033,7 @@ export function ForgeChat({
                   onSinglePrototypeOnlyChange={setSinglePrototypeOnly}
                   onRestore={onRestorePrototype}
                   onClearHistory={onClearPrototypeHistory}
+                  canClearHistory={prototypeHistory.length > 0 || Boolean(selectedPrototypeHtml)}
                 />
               </div>
             )}

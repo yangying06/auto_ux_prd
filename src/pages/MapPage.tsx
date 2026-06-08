@@ -1,21 +1,27 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'wouter'
-import { startDecomposition, pollDecomposition, exportSpecFolder, exportNodeMarkdown } from '../lib/api'
+import { previewDecomposition, startDecomposition, pollDecomposition, exportSpecFolder, exportNodeMarkdown, suggestPrdNodeOperations } from '../lib/api'
 import { MapAdjustmentPanel } from '../components/map/MapAdjustmentPanel'
-import type { PrdNode, PrdTree } from '../types/prdNode'
-import { openBoltWithPrompt, prdTreeToBoltPrompt } from '../lib/specPrompt'
+import type { PrdImportPreview, PrdNode, PrdNodeOperationSuggestion, PrdTree } from '../types/prdNode'
 import { useAppStore } from '../store/appStore'
 import { UploadCard } from '../components/upload/UploadCard'
 import { DecompProgress } from '../components/upload/DecompProgress'
 import { DecompLiveCanvas } from '../components/upload/DecompLiveCanvas'
+import { ImportPreview } from '../components/upload/ImportPreview'
+import { PrototypePreviewSurface } from '../components/state/PrototypeSandboxPreview'
 import { TopAppBar } from '../components/map/TopAppBar'
 import { TreeCanvas } from '../components/map/TreeCanvas'
 import { PreviewDrawer } from '../components/map/PreviewDrawer'
+import { buildProjectArchiveFile, encodeProjectArchive } from '../lib/archiveCodec'
+import { openProjectArchiveFile, saveProjectArchiveBytes } from '../lib/archiveIO'
+import { createProjectWorkspaceSnapshot } from '../lib/archiveSnapshot'
+import { AddNodeModal, type AddNodePayload } from '../components/map/AddNodeModal'
 
-type Stage = 'upload' | 'decomposing' | 'error' | 'map'
+type Stage = 'upload' | 'preview' | 'decomposing' | 'error' | 'map'
 
-const INITIAL_STEP = '正在通读原文并建立结构'
+const INITIAL_STEP = '正在建立原文索引'
 const POLL_INTERVAL_MS = 700
+const EMPTY_NODE_SUGGESTIONS: PrdNodeOperationSuggestion[] = []
 
 function findLastActiveIdx(steps: Array<{ status: string }>) {
   for (let i = steps.length - 1; i >= 0; i--) {
@@ -47,6 +53,36 @@ function allCompletionGateNodesDone(tree: PrdTree) {
   return targets.length > 0 && targets.every((node) => node.status === 'done')
 }
 
+function getPrimaryRootId(tree: PrdTree) {
+  return Object.values(tree)
+    .filter((node) => node.parentId === null)
+    .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id))[0]?.id ?? null
+}
+
+function clipNodeSourceText(text: string) {
+  const trimmed = text.trim()
+  if (trimmed.length <= 5000) return trimmed
+  return `${trimmed.slice(0, 5000)}\n\n[资料内容较长，节点预览仅保留前半部分，AI 分析文本也按附件上限截断]`
+}
+
+function buildAddedNodeContent(title: string, supplementText: string, sources: AddNodePayload['sources']) {
+  const sections = [
+    `# ${title}`,
+    '## 节点目标',
+    supplementText.trim() || '待基于补充资料完善页面目标、交互范围和验收点。',
+  ]
+
+  if (sources.length) {
+    sections.push(
+      '## 用户提供资料',
+      ...sources.map((source) => `### ${source.name}\n\n${clipNodeSourceText(source.text)}`),
+    )
+  }
+
+  sections.push('## MVC 拆分', '等待 AI 建议或人工补充 Model / Ctrl / View 子文档。')
+  return sections.join('\n\n')
+}
+
 function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
@@ -54,6 +90,32 @@ function downloadBlob(blob: Blob, filename: string) {
   a.download = filename
   a.click()
   URL.revokeObjectURL(url)
+}
+
+function hasProjectData(tree: PrdTree | null, sourceDocument: unknown) {
+  return Boolean(sourceDocument) || Object.keys(tree ?? {}).length > 0
+}
+
+function defaultArchiveFilename(projectName: string, sourceFilename?: string | null) {
+  const sourceBase = sourceFilename?.replace(/\.[^.]+$/u, '') ?? projectName
+  const safeName = (sourceBase || projectName || 'promptforge-project')
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return `${safeName || 'promptforge-project'}-${new Date().toISOString().slice(0, 10)}.gpf`
+}
+
+function collectGeneratedNodePrototypes(tree: PrdTree, nodePrototypeStates: ReturnType<typeof useAppStore.getState>['nodePrototypeStates']) {
+  return Object.values(tree)
+    .filter((node) => node.type === 'page' || node.type === 'ui')
+    .sort((a, b) => a.level - b.level || a.order - b.order || a.id.localeCompare(b.id))
+    .map((node) => {
+      const state = nodePrototypeStates[node.id]
+      const selectedVariant = state?.prototypeVariants.find((variant) => variant.index === state.selectedVariantIndex)
+      const html = selectedVariant?.html ?? state?.prototypeHtml ?? null
+      return html ? { node, html } : null
+    })
+    .filter((item): item is { node: PrdNode; html: string } => Boolean(item))
 }
 
 export function MapPage() {
@@ -65,27 +127,57 @@ export function MapPage() {
   const [nodeCount, setNodeCount] = useState(0)
   const [isExporting, setIsExporting] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
+  const [pendingMdText, setPendingMdText] = useState<string | null>(null)
+  const [importPreview, setImportPreview] = useState<PrdImportPreview | null>(null)
+  const [isPreviewLoading, setIsPreviewLoading] = useState(false)
+  const [previewError, setPreviewError] = useState<string | null>(null)
+  const [projectError, setProjectError] = useState<string | null>(null)
+  const [isAddNodeModalOpen, setIsAddNodeModalOpen] = useState(false)
+  const [addNodeParentId, setAddNodeParentId] = useState<string | null>(null)
+  const [createdAddNodeId, setCreatedAddNodeId] = useState<string | null>(null)
+  const [addNodeError, setAddNodeError] = useState<string | null>(null)
+  const [addNodeAssistantReply, setAddNodeAssistantReply] = useState<string | null>(null)
+  const [isAddNodeSubmitting, setIsAddNodeSubmitting] = useState(false)
+  const [isPrototypeModalOpen, setIsPrototypeModalOpen] = useState(false)
+  const [selectedPrototypeNodeId, setSelectedPrototypeNodeId] = useState<string | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const pollInFlightRef = useRef(false)
+  const previewRequestRef = useRef(0)
 
   const [, navigate] = useLocation()
 
   const prdTree = useAppStore((s) => s.prdTree)
   const settings = useAppStore((s) => s.settings)
+  const sourceDocument = useAppStore((s) => s.sourceDocument)
+  const currentArchivePath = useAppStore((s) => s.currentArchivePath)
+  const archiveDirty = useAppStore((s) => s.archiveDirty)
+  const nodePrototypeStates = useAppStore((s) => s.nodePrototypeStates)
+  const qaIssues = useAppStore((s) => s.qaIssues)
   const decompositionSteps = useAppStore((s) => s.decompositionSteps)
   const setDecompositionStatus = useAppStore((s) => s.setDecompositionStatus)
   const appendDecompositionStep = useAppStore((s) => s.appendDecompositionStep)
   const updateDecompositionStep = useAppStore((s) => s.updateDecompositionStep)
   const resetDecomposition = useAppStore((s) => s.resetDecomposition)
   const setPrdTree = useAppStore((s) => s.setPrdTree)
+  const setSourceDocument = useAppStore((s) => s.setSourceDocument)
+  const loadArchiveSnapshot = useAppStore((s) => s.loadArchiveSnapshot)
+  const markArchiveSaved = useAppStore((s) => s.markArchiveSaved)
+  const resetProject = useAppStore((s) => s.resetProject)
   const createPageNode = useAppStore((s) => s.createPageNode)
   const updateNodeContent = useAppStore((s) => s.updateNodeContent)
   const deleteNode = useAppStore((s) => s.deleteNode)
+  const createQaIssue = useAppStore((s) => s.createQaIssue)
   const applyMapAdjustmentOperations = useAppStore((s) => s.applyMapAdjustmentOperations)
+  const setNodeOperationSuggestions = useAppStore((s) => s.setNodeOperationSuggestions)
+  const dismissNodeOperationSuggestion = useAppStore((s) => s.dismissNodeOperationSuggestion)
+  const applyNodeOperationSuggestion = useAppStore((s) => s.applyNodeOperationSuggestion)
   const setNodeDocPath = useAppStore((s) => s.setNodeDocPath)
   const setSelectedNodeId = useAppStore((s) => s.setSelectedNodeId)
   const selectedNodeId = useAppStore((s) => s.selectedNodeId)
+  const addNodeSuggestions = useAppStore((s) => (
+    createdAddNodeId ? s.nodeOperationSuggestions[createdAddNodeId] ?? EMPTY_NODE_SUGGESTIONS : EMPTY_NODE_SUGGESTIONS
+  ))
 
   const clearPolling = () => {
     if (pollIntervalRef.current) {
@@ -93,6 +185,88 @@ export function MapPage() {
       pollIntervalRef.current = null
     }
     pollInFlightRef.current = false
+  }
+
+  const clearImportUiState = () => {
+    previewRequestRef.current += 1
+    setUploadError(null)
+    setDecompError(null)
+    setPreviewError(null)
+    setProjectError(null)
+    setImportPreview(null)
+    setPendingMdText(null)
+    setIsPreviewLoading(false)
+    setNodeCount(0)
+  }
+
+  const confirmProjectClose = (actionLabel: string) => {
+    if (!archiveDirty || !hasProjectData(prdTree, sourceDocument)) return true
+    return window.confirm(`当前项目有未保存修改。确定要${actionLabel}吗？`)
+  }
+
+  const handleSaveArchive = async (saveAs = false) => {
+    if (!hasProjectData(prdTree, sourceDocument)) {
+      setProjectError('当前没有可保存的项目。')
+      return
+    }
+
+    setProjectError(null)
+    try {
+      const snapshot = createProjectWorkspaceSnapshot(useAppStore.getState())
+      const archive = buildProjectArchiveFile(snapshot)
+      const bytes = encodeProjectArchive(archive)
+      const result = await saveProjectArchiveBytes({
+        bytes,
+        defaultFilename: defaultArchiveFilename(settings.projectName, sourceDocument?.filename),
+        currentPath: currentArchivePath,
+        saveAs,
+      })
+      if (result.status === 'saved') {
+        markArchiveSaved(result.path, archive.manifest.savedAt)
+      }
+    } catch (err) {
+      setProjectError(err instanceof Error ? err.message : '保存项目存档失败')
+    }
+  }
+
+  const handleOpenArchive = async () => {
+    if (!confirmProjectClose('打开其他存档')) return
+    clearPolling()
+    setProjectError(null)
+    try {
+      const archive = await openProjectArchiveFile()
+      if (!archive) return
+      loadArchiveSnapshot(archive.workspace, archive.path, archive.manifest.savedAt)
+      clearImportUiState()
+      sessionIdRef.current = null
+      const hasTree = Object.keys(archive.workspace.prdTree ?? {}).length > 0
+      setStage(hasTree ? 'map' : 'upload')
+      navigate('/')
+    } catch (err) {
+      setProjectError(err instanceof Error ? err.message : '打开项目存档失败')
+    }
+  }
+
+  const handleNewProject = () => {
+    if (!confirmProjectClose('新建项目')) return
+    clearPolling()
+    sessionIdRef.current = null
+    resetProject()
+    clearImportUiState()
+    setStage('upload')
+    navigate('/')
+  }
+
+  const handleDeleteProject = () => {
+    if (!hasProjectData(prdTree, sourceDocument)) return
+    const suffix = currentArchivePath ? '这不会删除磁盘上的本地存档文件。' : '当前项目数据会从工作区清空。'
+    if (!window.confirm(`确定删除当前项目吗？${suffix}`)) return
+    clearPolling()
+    sessionIdRef.current = null
+    resetProject()
+    clearImportUiState()
+    setStage('upload')
+    navigate('/')
   }
 
   const startPolling = (sessionId: string) => {
@@ -178,7 +352,7 @@ export function MapPage() {
     }, POLL_INTERVAL_MS)
   }
 
-  const handleFileRead = async (mdText: string) => {
+  const beginDecomposition = async (mdText: string) => {
     clearPolling()
     sessionIdRef.current = null
     resetDecomposition()
@@ -200,14 +374,55 @@ export function MapPage() {
     }
   }
 
+  const handleFileRead = async (mdText: string, filename: string) => {
+    clearPolling()
+    sessionIdRef.current = null
+    resetProject()
+    resetDecomposition()
+    setUploadError(null)
+    setDecompError(null)
+    setProjectError(null)
+    setNodeCount(0)
+    setSourceDocument({ filename, text: mdText, importedAt: new Date().toISOString() })
+    setPendingMdText(mdText)
+    setImportPreview(null)
+    setPreviewError(null)
+    setIsPreviewLoading(true)
+    setStage('preview')
+    const requestId = previewRequestRef.current + 1
+    previewRequestRef.current = requestId
+
+    try {
+      const preview = await previewDecomposition(settings.proxyBaseUrl, mdText)
+      if (previewRequestRef.current !== requestId) return
+      setImportPreview(preview)
+    } catch (err) {
+      if (previewRequestRef.current !== requestId) return
+      setPreviewError(err instanceof Error ? err.message : '无法建立导入预览')
+    } finally {
+      if (previewRequestRef.current === requestId) setIsPreviewLoading(false)
+    }
+  }
+
+  const handleConfirmPreview = () => {
+    if (!pendingMdText) return
+    void beginDecomposition(pendingMdText)
+  }
+
   const handleReset = () => {
     clearPolling()
     sessionIdRef.current = null
-    resetDecomposition()
+    resetProject()
+    clearImportUiState()
     setStage('upload')
-    setDecompError(null)
-    setNodeCount(0)
-    setSelectedNodeId(null)
+    setIsAddNodeModalOpen(false)
+    setAddNodeParentId(null)
+    setCreatedAddNodeId(null)
+    setAddNodeError(null)
+    setAddNodeAssistantReply(null)
+    setIsAddNodeSubmitting(false)
+    setIsPrototypeModalOpen(false)
+    setSelectedPrototypeNodeId(null)
   }
 
   useEffect(() => {
@@ -217,7 +432,16 @@ export function MapPage() {
   if (stage === 'map' && prdTree) {
     const selectedNode = selectedNodeId ? (prdTree[selectedNodeId] ?? null) : null
 
+    const completionTargets = completionGateNodes(prdTree)
+    const incompleteCompletionTargets = completionTargets.filter((node) => node.status !== 'done')
+    const generatedNodePrototypes = collectGeneratedNodePrototypes(prdTree, nodePrototypeStates)
+    const selectedNodePrototype = generatedNodePrototypes.find((item) => item.node.id === selectedPrototypeNodeId)
+      ?? generatedNodePrototypes[0]
     const canExport = allCompletionGateNodesDone(prdTree)
+    const canValidatePrototype = completionTargets.length > 0
+    const hasProject = hasProjectData(prdTree, sourceDocument)
+    const topError = exportError ?? projectError
+    const qaOpenIssueCount = Object.values(qaIssues).filter((issue) => issue.status !== 'draft' && issue.status !== 'closed').length
 
     const handleExport = async () => {
       setIsExporting(true)
@@ -235,10 +459,89 @@ export function MapPage() {
       }
     }
 
-    const handleCreatePage = () => {
-      const title = window.prompt('请输入页面名称，例如：主界面、规则页、排行榜')
-      if (!title?.trim()) return
-      createPageNode({ title, parentId: selectedNode?.id ?? null })
+    const handleOpenAddNode = (parentId: string | null) => {
+      setAddNodeParentId(parentId ?? getPrimaryRootId(prdTree))
+      setCreatedAddNodeId(null)
+      setAddNodeError(null)
+      setAddNodeAssistantReply(null)
+      setIsAddNodeModalOpen(true)
+    }
+
+    const handleCloseAddNode = () => {
+      if (createdAddNodeId) setNodeOperationSuggestions(createdAddNodeId, [])
+      setIsAddNodeModalOpen(false)
+      setAddNodeParentId(null)
+      setCreatedAddNodeId(null)
+      setAddNodeError(null)
+      setAddNodeAssistantReply(null)
+      setIsAddNodeSubmitting(false)
+    }
+
+    const handleCreatePage = async (payload: AddNodePayload) => {
+      const sources = payload.sources.filter((source) => source.text.trim())
+      const supplementText = payload.supplementText.trim()
+      const hasSourceMaterial = Boolean(supplementText) || sources.length > 0
+      const parentId = addNodeParentId && prdTree[addNodeParentId] ? addNodeParentId : getPrimaryRootId(prdTree)
+
+      setIsAddNodeSubmitting(true)
+      setAddNodeError(null)
+      setAddNodeAssistantReply(null)
+      try {
+        const newNodeId = createPageNode({
+          title: payload.title,
+          parentId,
+          summary: hasSourceMaterial
+            ? `${payload.title} 页面节点，已附加补充资料，等待确认 MVC 拆分。`
+            : undefined,
+          content: buildAddedNodeContent(payload.title, supplementText, sources),
+        })
+        if (!newNodeId) throw new Error('无法创建节点，请输入有效名称。')
+
+        setCreatedAddNodeId(newNodeId)
+        setSelectedNodeId(newNodeId)
+        setNodeOperationSuggestions(newNodeId, [])
+
+        if (!hasSourceMaterial) {
+          handleCloseAddNode()
+          return
+        }
+
+        const nextTree = useAppStore.getState().prdTree ?? {}
+        const response = await suggestPrdNodeOperations(settings.proxyBaseUrl, {
+          tree: nextTree,
+          selectedNodeId: newNodeId,
+          supplementText: [`新增节点名称：${payload.title}`, supplementText].filter(Boolean).join('\n\n'),
+          sources,
+        })
+        setAddNodeAssistantReply(response.reply)
+        setNodeOperationSuggestions(newNodeId, response.suggestions)
+        if (!response.suggestions.length) {
+          setAddNodeError(response.reply || 'AI 没有返回可应用的 MVC 拆分建议。')
+        }
+      } catch (err) {
+        setAddNodeError(err instanceof Error ? err.message : '新增节点失败')
+      } finally {
+        setIsAddNodeSubmitting(false)
+      }
+    }
+
+    const handleApplyAddNodeSuggestion = (suggestionId: string) => {
+      if (!createdAddNodeId) return
+      applyNodeOperationSuggestion(createdAddNodeId, suggestionId)
+    }
+
+    const handleDismissAddNodeSuggestion = (suggestionId: string) => {
+      if (!createdAddNodeId) return
+      dismissNodeOperationSuggestion(createdAddNodeId, suggestionId)
+    }
+
+    const handleApplyAllAddNodeSuggestions = () => {
+      if (!createdAddNodeId) return
+      const ids = addNodeSuggestions.map((suggestion) => suggestion.id)
+      for (const suggestionId of ids) {
+        applyNodeOperationSuggestion(createdAddNodeId, suggestionId)
+      }
+      setAddNodeAssistantReply('已应用全部 MVC 拆分建议。')
     }
 
     const handleDeleteNode = (node: PrdNode) => {
@@ -263,35 +566,76 @@ export function MapPage() {
       }
     }
 
-    const handleValidatePrototype = () => {
-      if (!canExport) {
-        setExportError('所有叶子文档包标记为已完成后才能 Bolt 验证')
+    const handleOpenProjectPrototype = () => {
+      if (!canValidatePrototype) {
+        setExportError('暂无可用于生成 HTML 验证原型的文档包')
         return
       }
-      openBoltWithPrompt(prdTreeToBoltPrompt(prdTree))
+      if (!generatedNodePrototypes.length) {
+        setExportError('还没有界面节点原型。请先进入具体界面节点，在右侧视觉舱生成原型预览。')
+        return
+      }
+
+      if (incompleteCompletionTargets.length > 0) {
+        const proceed = window.confirm(
+          [
+            `仍有 ${incompleteCompletionTargets.length} 个文档包未确认。`,
+            '',
+            'HTML 验证原型会汇总当前已生成的界面节点原型，未确认或未生成原型的节点不会出现在组合预览里。',
+            '',
+            '是否继续用于早期评审？',
+          ].join('\n'),
+        )
+        if (!proceed) return
+      }
+
+      setSelectedPrototypeNodeId((current) => (
+        current && generatedNodePrototypes.some((item) => item.node.id === current)
+          ? current
+          : generatedNodePrototypes[0]?.node.id ?? null
+      ))
+      setIsPrototypeModalOpen(true)
+    }
+
+    const handleOpenQaForNode = (node: PrdNode) => {
+      createQaIssue((node.type === 'page' || node.type === 'ui') ? node.id : null)
+      navigate('/qa')
+    }
+
+    const handleOpenQaFromToolbar = () => {
+      navigate('/qa')
     }
 
     return (
       <div className="w-full h-screen flex flex-col bg-background animate-fade-in overflow-hidden">
         <TopAppBar
-          onUploadNew={handleReset}
-          onDelete={() => {
-            if (window.confirm('确定要删除当前项目吗？所有节点和进度将被清除。')) {
-              handleReset()
-            }
-          }}
+          projectName={settings.projectName}
+          archiveDirty={archiveDirty}
+          currentArchivePath={currentArchivePath}
+          hasProject={hasProject}
+          onNewProject={handleNewProject}
+          onOpenArchive={() => { void handleOpenArchive() }}
+          onSaveArchive={() => { void handleSaveArchive(false) }}
+          onSaveArchiveAs={() => { void handleSaveArchive(true) }}
+          onDeleteProject={handleDeleteProject}
           canExport={canExport}
           onExport={handleExport}
           isExporting={isExporting}
-          onValidatePrototype={handleValidatePrototype}
-          canValidatePrototype={canExport}
+          onValidatePrototype={() => { void handleOpenProjectPrototype() }}
+          canValidatePrototype={canValidatePrototype}
+          prototypeValidationRiskCount={incompleteCompletionTargets.length}
+          onOpenQa={handleOpenQaFromToolbar}
+          qaOpenIssueCount={qaOpenIssueCount}
         />
-        {exportError && (
+        {topError && (
           <div className="bg-error/10 border-b border-error/30 px-lg py-sm text-error font-label-md text-label-md flex items-center gap-sm">
             <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>error</span>
-            {exportError}
+            {topError}
             <button
-              onClick={() => setExportError(null)}
+              onClick={() => {
+                setExportError(null)
+                setProjectError(null)
+              }}
               className="ml-auto text-error/60 hover:text-error cursor-pointer"
               aria-label="关闭错误提示"
             >
@@ -306,15 +650,6 @@ export function MapPage() {
             onApply={applyMapAdjustmentOperations}
           />
           <div className="flex min-w-0 flex-1 flex-col">
-            <div className="flex items-center justify-between border-b border-outline-variant bg-surface-container-low px-md py-sm">
-              <div className="text-label-md text-on-surface-variant">页面级导图：单击查看，双击打磨</div>
-              <button
-                onClick={handleCreatePage}
-                className="rounded-lg bg-primary px-md py-sm text-label-md text-on-primary hover:bg-primary/90"
-              >
-                新建页面
-              </button>
-            </div>
             <TreeCanvas
               tree={prdTree}
               selectedNodeId={selectedNodeId}
@@ -328,6 +663,7 @@ export function MapPage() {
                 setSelectedNodeId(null)
                 navigate('/forge/' + id)
               }}
+              onAddNode={handleOpenAddNode}
             />
           </div>
           <PreviewDrawer
@@ -336,8 +672,93 @@ export function MapPage() {
             onDelete={handleDeleteNode}
             onOpenDoc={handleOpenDoc}
             onUpdateContent={updateNodeContent}
+            onOpenQa={handleOpenQaForNode}
           />
         </main>
+        <AddNodeModal
+          isOpen={isAddNodeModalOpen}
+          isSubmitting={isAddNodeSubmitting}
+          error={addNodeError}
+          assistantReply={addNodeAssistantReply}
+          createdNodeLabel={createdAddNodeId ? prdTree[createdAddNodeId]?.label ?? null : null}
+          suggestions={addNodeSuggestions}
+          onCreate={handleCreatePage}
+          onClose={handleCloseAddNode}
+          onApplySuggestion={handleApplyAddNodeSuggestion}
+          onDismissSuggestion={handleDismissAddNodeSuggestion}
+          onApplyAllSuggestions={handleApplyAllAddNodeSuggestions}
+        />
+        {isPrototypeModalOpen ? (
+          <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/70 p-lg backdrop-blur-sm">
+            <section className="flex h-[88vh] w-[min(860px,96vw)] flex-col overflow-hidden rounded-xl border border-outline-variant bg-surface shadow-2xl">
+              <header className="flex shrink-0 flex-wrap items-center justify-between gap-md border-b border-outline-variant bg-surface-container-low px-lg py-md">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-sm">
+                    <span className="material-symbols-outlined text-tertiary" style={{ fontSize: '20px' }}>preview</span>
+                    <h2 className="font-title-md text-title-md text-on-surface">HTML 验证原型</h2>
+                  </div>
+                  <p className="mt-xs max-w-[760px] text-body-sm text-on-surface-variant">
+                    汇总各界面节点已生成的 HTML 原型，用于进入 Cocos 编码前确认流程、状态和反馈边界；Prefab 仍由 Figma 通过 figma2prefab 生成。
+                  </p>
+                </div>
+                <div className="flex items-center gap-sm">
+                  <button
+                    type="button"
+                    onClick={() => setIsPrototypeModalOpen(false)}
+                    className="flex h-10 w-10 items-center justify-center rounded-lg border border-outline-variant bg-surface-container-high text-on-surface-variant transition-colors hover:text-on-surface"
+                    aria-label="关闭 HTML 验证原型"
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>close</span>
+                  </button>
+                </div>
+              </header>
+              <div className="flex shrink-0 gap-xs overflow-x-auto border-b border-outline-variant bg-surface-container-low px-lg py-sm">
+                {generatedNodePrototypes.map((item) => (
+                  <button
+                    key={item.node.id}
+                    type="button"
+                    onClick={() => setSelectedPrototypeNodeId(item.node.id)}
+                    className={[
+                      'shrink-0 rounded-lg border px-sm py-xs text-label-md transition-colors',
+                      selectedNodePrototype?.node.id === item.node.id
+                        ? 'border-tertiary bg-tertiary-container text-on-tertiary-container'
+                        : 'border-outline-variant bg-surface-container-high text-on-surface-variant hover:text-on-surface',
+                    ].join(' ')}
+                  >
+                    {item.node.label}
+                  </button>
+                ))}
+              </div>
+              <div className="flex min-h-0 flex-1 items-center justify-center bg-zinc-950 p-lg">
+                <div className="flex h-full max-h-[720px] w-full max-w-[360px] flex-col overflow-hidden rounded-[32px] border-[10px] border-zinc-900 bg-black shadow-2xl ring-1 ring-white/10">
+                  <div className="flex h-9 shrink-0 items-center justify-center bg-zinc-900">
+                    <div className="h-1.5 w-20 rounded-full bg-zinc-700" />
+                  </div>
+                  <div className="min-h-0 flex-1 overflow-hidden bg-black">
+                    <PrototypePreviewSurface
+                      html={selectedNodePrototype?.html ?? null}
+                      title={selectedNodePrototype ? `${selectedNodePrototype.node.label} HTML prototype` : 'HTML prototype'}
+                      interactive
+                      fit="pane"
+                      surfaceClassName="h-full w-full"
+                      fallback={(
+                        <div className="flex h-full items-center justify-center p-md text-center text-body-sm text-on-surface-variant">
+                          还没有可展示的界面节点原型。
+                        </div>
+                      )}
+                    />
+                  </div>
+                </div>
+              </div>
+              <footer className="flex shrink-0 flex-wrap items-center justify-between gap-sm border-t border-outline-variant bg-surface-container-low px-lg py-sm text-label-md text-on-surface-variant">
+                <div className="min-w-0 truncate">
+                  当前展示：{selectedNodePrototype?.node.label ?? '无'} · 共 {generatedNodePrototypes.length} 个已生成节点原型
+                </div>
+                <span>{incompleteCompletionTargets.length > 0 ? `仍有 ${incompleteCompletionTargets.length} 个文档包未确认` : '文档包已全部确认'}</span>
+              </footer>
+            </section>
+          </div>
+        ) : null}
       </div>
     )
   }
@@ -364,12 +785,32 @@ export function MapPage() {
     )
   }
 
+  if (stage === 'preview') {
+    return (
+      <div className="h-screen w-full overflow-hidden bg-background p-lg blueprint-grid">
+        <div className="mx-auto flex h-full max-w-[1180px] flex-col rounded-xl border border-outline-variant bg-surface-container-low/95 p-lg shadow-2xl">
+          <ImportPreview
+            preview={importPreview}
+            isLoading={isPreviewLoading}
+            error={previewError}
+            onConfirm={handleConfirmPreview}
+            onReset={handleReset}
+          />
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="w-full h-screen flex items-center justify-center bg-background blueprint-grid overflow-hidden">
       <div className="max-w-[480px] w-full mx-auto bg-surface-container-low border border-outline-variant rounded-xl p-12 shadow-2xl flex flex-col items-center gap-6">
         <div className="w-full transition-opacity duration-300">
           {stage === 'upload' ? (
-            <UploadCard onFileRead={handleFileRead} error={uploadError} />
+            <UploadCard
+              onFileRead={handleFileRead}
+              onOpenArchive={() => { void handleOpenArchive() }}
+              error={uploadError ?? projectError}
+            />
           ) : (
             <DecompProgress steps={decompositionSteps} nodeCount={nodeCount} error={decompError} />
           )}

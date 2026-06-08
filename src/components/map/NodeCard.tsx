@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { formatSpecLens, resolveNodeSpecLens } from '../../lib/prdNodeLens'
 import type { PrdNode } from '../../types/prdNode'
 import { DocumentMiniPreview } from './DocumentPreview'
 
@@ -44,6 +45,7 @@ function StatusBadge({ node }: { node: PrdNode }) {
 
 export function NodeCard({ node, isSelected, onNodeClick, onNodeDoubleClick }: NodeCardProps) {
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lensLabel = formatSpecLens(resolveNodeSpecLens(node))
 
   useEffect(() => {
     return () => {
@@ -117,6 +119,9 @@ export function NodeCard({ node, isSelected, onNodeClick, onNodeDoubleClick }: N
             <span className="truncate font-code-sm text-code-sm">{node.docPath ?? node.id}</span>
           </div>
           <h4 className="line-clamp-2 font-headline-sm text-headline-sm text-on-surface">{node.label}</h4>
+          <div className="mt-xs inline-flex max-w-full rounded border border-outline-variant bg-surface-container px-xs py-[2px] font-code-sm text-code-sm text-on-surface-variant">
+            <span className="truncate">{lensLabel}</span>
+          </div>
         </div>
         <StatusBadge node={node} />
       </div>

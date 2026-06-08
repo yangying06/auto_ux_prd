@@ -8,7 +8,8 @@ import type {
   ReferenceImageClassificationResponse,
 } from '../types/chat'
 import type { UXRequirementState } from '../types/uxRequirement'
-import type { MapAdjustmentOperation, PrdNode, PrdNodeOperationSuggestion } from '../types/prdNode'
+import type { MapAdjustmentOperation, PrdImportPreview, PrdNode, PrdNodeOperationSuggestion, PrdPerformanceSpec } from '../types/prdNode'
+import type { QaChatResponse, QaIssue } from '../types/qa'
 
 async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
   let response: Response
@@ -115,6 +116,13 @@ export function exportFinalPrompt(baseUrl: string, requirementState: UXRequireme
 
 // ── Decomposition API ────────────────────────────────────────────────────────
 
+export function previewDecomposition(baseUrl: string, mdText: string) {
+  return requestJson<PrdImportPreview>(baseUrl, '/api/decompose/preview', {
+    method: 'POST',
+    body: JSON.stringify({ mdText }),
+  })
+}
+
 export function startDecomposition(baseUrl: string, mdText: string) {
   return requestJson<{ sessionId: string }>(baseUrl, '/api/decompose/start', {
     method: 'POST',
@@ -145,6 +153,7 @@ export interface NodeChatResponse {
     summary?: string | null
     content?: string | null
     techNotes?: string | null
+    performanceSpec?: PrdPerformanceSpec | null
   } | null
   intents?: NodeChatIntent[]
   prototypeInstruction?: string | null
@@ -172,6 +181,29 @@ export function classifyReferenceImage(
   })
 }
 
+export interface FigmaFrameImportResponse {
+  fileKey: string
+  nodeId: string
+  panelName: string
+  taskId: string | null
+  sourceUrl: string
+  html: string
+  summary: string
+  uiSpecPath: string
+  assetCount: number
+  zipFileCount: number
+}
+
+export function importFigmaFrame(
+  baseUrl: string,
+  payload: { url: string },
+) {
+  return requestJson<FigmaFrameImportResponse>(baseUrl, '/api/figma/frame', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 export interface MapAdjustmentResponse {
   reply: string
   operations: MapAdjustmentOperation[]
@@ -185,6 +217,18 @@ export function requestMapAdjustment(
   return requestJson<MapAdjustmentResponse>(baseUrl, '/api/map-adjust', {
     method: 'POST',
     body: JSON.stringify({ messages, tree }),
+  })
+}
+
+export function sendQaChat(
+  baseUrl: string,
+  issue: QaIssue,
+  messages: ChatMessage[],
+  tree: Record<string, PrdNode>,
+) {
+  return requestJson<QaChatResponse>(baseUrl, '/api/qa/chat', {
+    method: 'POST',
+    body: JSON.stringify({ issue, messages, tree }),
   })
 }
 

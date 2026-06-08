@@ -9,9 +9,10 @@ interface PreviewDrawerProps {
   onDelete?: (node: PrdNode) => void
   onOpenDoc?: (node: PrdNode) => void
   onUpdateContent?: (nodeId: string, content: string) => void
+  onOpenQa?: (node: PrdNode) => void
 }
 
-export function PreviewDrawer({ node, onClose, onDelete, onOpenDoc, onUpdateContent }: PreviewDrawerProps) {
+export function PreviewDrawer({ node, onClose, onDelete, onOpenDoc, onUpdateContent, onOpenQa }: PreviewDrawerProps) {
   const [, navigate] = useLocation()
   const isOpen = node !== null
   const canForge = Boolean(node && node.type === 'page' && (node.needsPolish || node.status === 'done'))
@@ -127,7 +128,7 @@ export function PreviewDrawer({ node, onClose, onDelete, onOpenDoc, onUpdateCont
       {/* Footer */}
       {node && (
         <div className="p-md border-t border-outline-variant shrink-0 bg-surface-container-low">
-          <div className="mb-sm grid grid-cols-3 gap-xs">
+          <div className="mb-sm grid grid-cols-4 gap-xs">
             <button
               onClick={() => setIsEditing(true)}
               className="rounded border border-outline-variant px-sm py-xs text-label-md text-on-surface-variant hover:bg-surface-variant"
@@ -139,6 +140,12 @@ export function PreviewDrawer({ node, onClose, onDelete, onOpenDoc, onUpdateCont
               className="rounded border border-outline-variant px-sm py-xs text-label-md text-on-surface-variant hover:bg-surface-variant"
             >
               打开文档
+            </button>
+            <button
+              onClick={() => onOpenQa?.(node)}
+              className="rounded border border-primary/40 px-sm py-xs text-label-md text-primary hover:bg-primary-container/20"
+            >
+              提 Bug
             </button>
             <button
               onClick={() => onDelete?.(node)}

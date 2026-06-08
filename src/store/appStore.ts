@@ -1,10 +1,15 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { defaultSettings } from '../data/defaultSettings'
+import { persistableMessage, persistableNodeChats } from '../lib/messagePersistence'
+import { normalizePerformanceSpec } from '../lib/performanceOrchestration'
+import { defaultAudienceForSpecLens, normalizeLegacyAudience, normalizeNodeLensFields, specLensFromLegacyAudience } from '../lib/prdNodeLens'
 import type { AppSettings, ChatMessage, RagSearchResult } from '../types/chat'
 import type { UXRequirementState } from '../types/uxRequirement'
-import type { CreatePageNodeInput, DecompositionStatus, DecompositionStep, MapAdjustmentOperation, PrdNode, PrdNodeOperationSuggestion, PrdNodeReference, PrdTree, UpdateNodePatch } from '../types/prdNode'
+import type { CreatePageNodeInput, DecompositionStatus, DecompositionStep, MapAdjustmentOperation, PrdNode, PrdNodeDocumentField, PrdNodeDocumentSnapshot, PrdNodeOperationSuggestion, PrdNodePolishRevision, PrdNodeReference, PrdPerformanceSpec, PrdTree, UpdateNodePatch } from '../types/prdNode'
 import type { PrototypeVariant } from '../types/prototypeVariant'
+import type { ProjectSourceDocument, ProjectWorkspaceSnapshot } from '../types/archive'
+import type { QaAttachment, QaIssue, QaIssuePatch, QaIssueStatus, QaNodeRef } from '../types/qa'
 
 const emptyRequirement: UXRequirementState = {
   trigger_condition: null,
@@ -20,7 +25,7 @@ const emptyRequirement: UXRequirementState = {
 }
 
 const STORAGE_KEY = 'gameux-promptforge-state'
-const STORAGE_VERSION = 7
+const STORAGE_VERSION = 11
 const PROTOTYPE_HISTORY_LIMIT = 4
 
 export interface PrototypeVersion {
@@ -48,12 +53,41 @@ interface NodePolishPatch {
   summary?: string | null
   content?: string | null
   techNotes?: string | null
+  performanceSpec?: PrdPerformanceSpec | null
 }
+
+const DOCUMENT_FIELDS: PrdNodeDocumentField[] = ['summary', 'content', 'techNotes']
 
 function normalizeOptionalText(value: string | null | undefined) {
   if (typeof value !== 'string') return null
   const trimmed = value.trim()
   return trimmed.length ? trimmed : null
+}
+
+function createDocumentSnapshot(node: PrdNode): PrdNodeDocumentSnapshot {
+  return {
+    summary: node.summary,
+    content: node.content,
+    techNotes: node.techNotes,
+  }
+}
+
+function changedDocumentFields(before: PrdNodeDocumentSnapshot, after: PrdNodeDocumentSnapshot): PrdNodeDocumentField[] {
+  return DOCUMENT_FIELDS.filter((field) => before[field] !== after[field])
+}
+
+function createNodePolishRevision(nodeId: string, before: PrdNodeDocumentSnapshot, after: PrdNodeDocumentSnapshot): PrdNodePolishRevision | null {
+  const changedFields = changedDocumentFields(before, after)
+  if (!changedFields.length) return null
+  return {
+    id: `${Date.now()}-${nodeId}`,
+    nodeId,
+    createdAt: new Date().toISOString(),
+    before,
+    after,
+    changedFields,
+    accepted: false,
+  }
 }
 
 function normalizeReferences(value: PrdNodeReference[] | null | undefined): PrdNodeReference[] {
@@ -96,6 +130,8 @@ function collectDescendantIds(tree: PrdTree, nodeId: string) {
 }
 
 function sanitizePatch(patch: UpdateNodePatch): UpdateNodePatch {
+  const specLens = patch.specLens ?? specLensFromLegacyAudience(patch.audience)
+  const audience = normalizeLegacyAudience(patch.audience) ?? defaultAudienceForSpecLens(specLens) ?? patch.audience
   return {
     ...patch,
     label: patch.label?.trim() || undefined,
@@ -104,10 +140,14 @@ function sanitizePatch(patch: UpdateNodePatch): UpdateNodePatch {
     docPath: patch.docPath === undefined ? undefined : normalizeOptionalText(patch.docPath),
     references: patch.references ? normalizeReferences(patch.references) : undefined,
     techNotes: patch.techNotes === undefined ? undefined : normalizeOptionalText(patch.techNotes),
+    audience,
+    specLens,
+    sections: patch.sections,
     handoffGoal: patch.handoffGoal === undefined ? undefined : normalizeOptionalText(patch.handoffGoal),
     qualityGate: patch.qualityGate === undefined ? undefined : normalizeOptionalText(patch.qualityGate),
     sourceKind: patch.sourceKind,
     evidenceRefs: patch.evidenceRefs,
+    performanceSpec: patch.performanceSpec === undefined ? undefined : normalizePerformanceSpec(patch.performanceSpec),
   }
 }
 
@@ -126,27 +166,6 @@ function makeSuggestionNodeId(tree: PrdTree, suggestion: PrdNodeOperationSuggest
     index += 1
   }
   return id
-}
-
-function persistableMessage(message: ChatMessage): ChatMessage {
-  if (typeof message.content === 'string') return message
-
-  return {
-    ...message,
-    content: message.content.map((block) => {
-      if (block.type === 'text') return { ...block }
-      return { type: 'image', source: { ...block.source } }
-    }),
-  }
-}
-
-function persistableNodeChats(nodeChats: Record<string, ChatMessage[]>) {
-  return Object.fromEntries(
-    Object.entries(nodeChats).map(([nodeId, messages]) => [
-      nodeId,
-      messages.slice(-24).map(persistableMessage),
-    ]),
-  )
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -191,27 +210,46 @@ function rebuildPrdTreeLinks(tree: PrdTree): PrdTree {
   return next
 }
 
+function normalizePrdTreeNode(node: PrdNode): PrdNode {
+  return normalizeNodeLensFields({
+    ...node,
+    type: node.type ?? 'feature',
+    status: node.status ?? 'pending',
+    references: normalizeReferences(node.references),
+    sections: node.sections ?? {},
+    performanceSpec: normalizePerformanceSpec(node.performanceSpec),
+  })
+}
+
 function normalizePersistedPrdTree(value: unknown): PrdTree | null {
   if (!isRecord(value)) return null
   if (persistedTreeHasLocalTemplates(value)) return null
   const normalized = Object.fromEntries(
     Object.entries(value).map(([id, rawNode]) => {
       const node = rawNode as PrdNode
-      return [id, {
-        ...node,
-        type: node.type ?? 'feature',
-        status: node.status ?? 'pending',
-        references: normalizeReferences(node.references),
-      }]
+      return [id, normalizePrdTreeNode(node)]
     })
   ) as PrdTree
   return rebuildPrdTreeLinks(normalized)
+}
+
+function normalizePrdTree(value: PrdTree): PrdTree {
+  return rebuildPrdTreeLinks(Object.fromEntries(
+    Object.entries(value).map(([id, node]) => [id, normalizePrdTreeNode(node)])
+  ) as PrdTree)
 }
 
 export const initialMessages: ChatMessage[] = [
   {
     role: 'assistant',
     content: '你好！我是你的 UX 需求打磨助手。请描述你想实现的交互效果，我会帮你梳理触发条件、执行规则和资源依赖。',
+  },
+]
+
+export const initialMapAdjustmentMessages: ChatMessage[] = [
+  {
+    role: 'assistant',
+    content: '如果页面拆分不合理，可以告诉我如何调整。我会先给出操作建议，确认后才会修改导图。',
   },
 ]
 
@@ -252,7 +290,121 @@ function setNodePrototypeState(state: AppStoreState, nodeId: string, nodeState: 
   }
 }
 
-interface AppStoreState {
+function makeQaIssueId() {
+  return `QA-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+}
+
+function createQaNodeRef(node: PrdNode): QaNodeRef {
+  return {
+    nodeId: node.id,
+    nodeType: node.type,
+    title: node.label,
+    summary: node.summary,
+    content: node.content,
+    docPath: node.docPath ?? null,
+    capturedAt: new Date().toISOString(),
+    snapshot: {
+      id: node.id,
+      label: node.label,
+      summary: node.summary,
+      content: node.content,
+      type: node.type,
+      status: node.status,
+      techNotes: node.techNotes,
+      docPath: node.docPath,
+      audience: node.audience,
+      specLens: node.specLens,
+      sections: node.sections,
+      handoffGoal: node.handoffGoal,
+      qualityGate: node.qualityGate,
+    },
+  }
+}
+
+function createEmptyQaIssue(nodeRefs: QaNodeRef[]): QaIssue {
+  const now = new Date().toISOString()
+  const primaryTitle = nodeRefs[0]?.title
+  return {
+    id: makeQaIssueId(),
+    title: primaryTitle ? `${primaryTitle} 的待确认缺陷` : '待确认缺陷',
+    status: 'draft',
+    severity: 'major',
+    priority: 'medium',
+    nodeRefs,
+    attachments: [],
+    messages: [
+      {
+        role: 'assistant',
+        content: primaryTitle
+          ? `已引用「${primaryTitle}」。请描述你看到的问题和复现路径，我会确认信息是否足够报给程序。`
+          : '请先添加界面节点，再描述你看到的问题和复现路径。我会确认信息是否足够报给程序。',
+      },
+    ],
+    description: '',
+    stepsToReproduce: [],
+    expectedResult: '',
+    actualResult: '',
+    environment: null,
+    aiSummary: '',
+    aiQuestions: [],
+    aiConfidence: 0,
+    suspectedCause: null,
+    devSuggestion: null,
+    readyToConfirm: false,
+    createdAt: now,
+    updatedAt: now,
+    qaConfirmedAt: null,
+    devReceivedAt: null,
+    closedAt: null,
+  }
+}
+
+function normalizeStringArray(value: string[] | undefined) {
+  if (!Array.isArray(value)) return undefined
+  return value.map((item) => item.trim()).filter(Boolean)
+}
+
+function clampQaConfidence(value: number | undefined, fallback: number) {
+  if (typeof value !== 'number' || Number.isNaN(value)) return fallback
+  return Math.max(0, Math.min(100, Math.round(value)))
+}
+
+function applyQaPatch(issue: QaIssue, patch: QaIssuePatch): QaIssue {
+  const stepsToReproduce = normalizeStringArray(patch.stepsToReproduce)
+  const aiQuestions = normalizeStringArray(patch.aiQuestions)
+  return {
+    ...issue,
+    title: patch.title?.trim() || issue.title,
+    severity: patch.severity ?? issue.severity,
+    priority: patch.priority ?? issue.priority,
+    description: patch.description?.trim() ?? issue.description,
+    stepsToReproduce: stepsToReproduce ?? issue.stepsToReproduce,
+    expectedResult: patch.expectedResult?.trim() ?? issue.expectedResult,
+    actualResult: patch.actualResult?.trim() ?? issue.actualResult,
+    environment: patch.environment === undefined ? issue.environment : normalizeOptionalText(patch.environment),
+    aiSummary: patch.aiSummary?.trim() ?? issue.aiSummary,
+    aiQuestions: aiQuestions ?? issue.aiQuestions,
+    aiConfidence: clampQaConfidence(patch.aiConfidence, issue.aiConfidence),
+    suspectedCause: patch.suspectedCause === undefined ? issue.suspectedCause : normalizeOptionalText(patch.suspectedCause),
+    devSuggestion: patch.devSuggestion === undefined ? issue.devSuggestion : normalizeOptionalText(patch.devSuggestion),
+    readyToConfirm: patch.readyToConfirm ?? issue.readyToConfirm,
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+function issueWithStatus(issue: QaIssue, status: QaIssueStatus): QaIssue {
+  const now = new Date().toISOString()
+  return {
+    ...issue,
+    status,
+    qaConfirmedAt: status === 'qa_confirmed' && !issue.qaConfirmedAt ? now : issue.qaConfirmedAt,
+    devReceivedAt: status === 'dev_received' && !issue.devReceivedAt ? now : issue.devReceivedAt,
+    closedAt: status === 'closed' ? now : status === 'reopened' ? null : issue.closedAt,
+    updatedAt: now,
+  }
+}
+
+export interface AppStoreState {
   requirement: UXRequirementState
   messages: ChatMessage[]
   latestRag: RagSearchResult | null
@@ -267,7 +419,20 @@ interface AppStoreState {
   decompositionStatus: DecompositionStatus
   decompositionSteps: DecompositionStep[]
   nodeChats: Record<string, ChatMessage[]>
+  nodePolishRevisions: Record<string, PrdNodePolishRevision>
   nodeOperationSuggestions: Record<string, PrdNodeOperationSuggestion[]>
+  qaIssues: Record<string, QaIssue>
+  mapAdjustmentMessages: ChatMessage[]
+  pendingMapAdjustmentOperations: MapAdjustmentOperation[]
+  sourceDocument: ProjectSourceDocument | null
+  currentArchivePath: string | null
+  lastSavedAt: string | null
+  archiveDirty: boolean
+  setSourceDocument: (sourceDocument: ProjectSourceDocument | null) => void
+  loadArchiveSnapshot: (snapshot: ProjectWorkspaceSnapshot, archivePath: string | null, savedAt?: string | null) => void
+  markArchiveSaved: (archivePath: string | null, savedAt?: string) => void
+  markArchiveDirty: () => void
+  resetProject: () => void
   createPageNode: (input: CreatePageNodeInput) => string
   updateNode: (nodeId: string, patch: UpdateNodePatch) => void
   updateNodeContent: (nodeId: string, content: string) => void
@@ -279,7 +444,21 @@ interface AppStoreState {
   setNodeOperationSuggestions: (scopeId: string, suggestions: PrdNodeOperationSuggestion[]) => void
   dismissNodeOperationSuggestion: (scopeId: string, suggestionId: string) => void
   applyNodeOperationSuggestion: (scopeId: string, suggestionId: string) => void
+  createQaIssue: (initialNodeId?: string | null) => string
+  deleteQaIssue: (issueId: string) => void
+  appendQaIssueMessage: (issueId: string, message: ChatMessage) => void
+  applyQaIssuePatch: (issueId: string, patch: QaIssuePatch) => void
+  addQaIssueNodeRef: (issueId: string, nodeId: string) => void
+  removeQaIssueNodeRef: (issueId: string, nodeId: string) => void
+  addQaIssueAttachment: (issueId: string, attachment: QaAttachment) => void
+  removeQaIssueAttachment: (issueId: string, attachmentId: string) => void
+  updateQaIssueStatus: (issueId: string, status: QaIssueStatus) => void
+  setMapAdjustmentMessages: (messages: ChatMessage[] | ((current: ChatMessage[]) => ChatMessage[])) => void
+  setPendingMapAdjustmentOperations: (operations: MapAdjustmentOperation[]) => void
+  clearMapAdjustmentState: () => void
   applyNodePolish: (nodeId: string, patch: NodePolishPatch) => void
+  acceptNodePolishRevision: (nodeId: string) => void
+  revertNodePolishRevision: (nodeId: string) => void
   updateNodeStatus: (nodeId: string, status: PrdNode['status']) => void
   applyRequirementPatch: (patch: Partial<UXRequirementState>) => void
   setMessages: (messages: ChatMessage[] | ((current: ChatMessage[]) => ChatMessage[])) => void
@@ -329,7 +508,75 @@ export const useAppStore = create<AppStoreState>()(
       decompositionStatus: 'idle',
       decompositionSteps: [],
       nodeChats: {},
+      nodePolishRevisions: {},
       nodeOperationSuggestions: {},
+      qaIssues: {},
+      mapAdjustmentMessages: initialMapAdjustmentMessages,
+      pendingMapAdjustmentOperations: [],
+      sourceDocument: null,
+      currentArchivePath: null,
+      lastSavedAt: null,
+      archiveDirty: false,
+      setSourceDocument: (sourceDocument) => set({ sourceDocument, archiveDirty: true }),
+      loadArchiveSnapshot: (snapshot, currentArchivePath, savedAt) =>
+        set(() => {
+          const prdTree = normalizePersistedPrdTree(snapshot.prdTree)
+          const selectedNodeId = prdTree && snapshot.selectedNodeId && prdTree[snapshot.selectedNodeId]
+            ? snapshot.selectedNodeId
+            : null
+          return {
+            requirement: snapshot.requirement ?? emptyRequirement,
+            messages: snapshot.messages ?? initialMessages,
+            latestRag: snapshot.latestRag ?? null,
+            prototypeHtml: snapshot.prototypeHtml ?? null,
+            prototypeHistory: Array.isArray(snapshot.prototypeHistory) ? snapshot.prototypeHistory.slice(0, PROTOTYPE_HISTORY_LIMIT) : [],
+            prototypeVariants: Array.isArray(snapshot.prototypeVariants) ? snapshot.prototypeVariants : [],
+            selectedVariantIndex: typeof snapshot.selectedVariantIndex === 'number' ? snapshot.selectedVariantIndex : -1,
+            nodePrototypeStates: snapshot.nodePrototypeStates ?? {},
+            settings: snapshot.settings ?? defaultSettings,
+            prdTree,
+            selectedNodeId,
+            decompositionStatus: prdTree ? 'done' : 'idle',
+            decompositionSteps: [],
+            nodeChats: snapshot.nodeChats ?? {},
+            nodePolishRevisions: snapshot.nodePolishRevisions ?? {},
+            nodeOperationSuggestions: snapshot.nodeOperationSuggestions ?? {},
+            qaIssues: snapshot.qaIssues ?? {},
+            mapAdjustmentMessages: snapshot.mapAdjustmentMessages ?? initialMapAdjustmentMessages,
+            pendingMapAdjustmentOperations: snapshot.pendingMapAdjustmentOperations ?? [],
+            sourceDocument: snapshot.sourceDocument ?? null,
+            currentArchivePath,
+            lastSavedAt: savedAt ?? new Date().toISOString(),
+            archiveDirty: false,
+          }
+        }),
+      markArchiveSaved: (currentArchivePath, savedAt) => set({ currentArchivePath, lastSavedAt: savedAt ?? new Date().toISOString(), archiveDirty: false }),
+      markArchiveDirty: () => set({ archiveDirty: true }),
+      resetProject: () =>
+        set({
+          requirement: emptyRequirement,
+          messages: initialMessages,
+          latestRag: null,
+          prototypeHtml: null,
+          prototypeHistory: [],
+          prototypeVariants: [],
+          selectedVariantIndex: -1,
+          nodePrototypeStates: {},
+          prdTree: null,
+          selectedNodeId: null,
+          decompositionStatus: 'idle',
+          decompositionSteps: [],
+          nodeChats: {},
+          nodePolishRevisions: {},
+          nodeOperationSuggestions: {},
+          qaIssues: {},
+          mapAdjustmentMessages: initialMapAdjustmentMessages,
+          pendingMapAdjustmentOperations: [],
+          sourceDocument: null,
+          currentArchivePath: null,
+          lastSavedAt: null,
+          archiveDirty: false,
+        }),
       createPageNode: (input) => {
         const title = input.title.trim()
         if (!title) return ''
@@ -354,11 +601,13 @@ export const useAppStore = create<AppStoreState>()(
           children: [],
           docPath: `pages/${id}.md`,
           audience: 'client',
+          specLens: 'full',
+          sections: {},
           handoffGoal: `打磨 ${title} 页面的交互设计规格。`,
           qualityGate: '页面目标、入口、UI 元素、状态、跳转关系和验收点清晰。',
           references: [],
         }
-        set({ prdTree: rebuildPrdTreeLinks({ ...tree, [id]: node }), selectedNodeId: id })
+        set({ prdTree: rebuildPrdTreeLinks({ ...tree, [id]: node }), selectedNodeId: id, archiveDirty: true })
         return id
       },
       updateNode: (nodeId, patch) =>
@@ -371,13 +620,14 @@ export const useAppStore = create<AppStoreState>()(
               ...state.prdTree,
               [nodeId]: { ...node, ...nextPatch },
             }),
+            archiveDirty: true,
           }
         }),
       updateNodeContent: (nodeId, content) =>
         set((state) => {
           const node = state.prdTree?.[nodeId]
           if (!node || !state.prdTree) return state
-          return { prdTree: { ...state.prdTree, [nodeId]: { ...node, content } } }
+          return { prdTree: { ...state.prdTree, [nodeId]: { ...node, content } }, archiveDirty: true }
         }),
       deleteNode: (nodeId) =>
         set((state) => {
@@ -394,12 +644,17 @@ export const useAppStore = create<AppStoreState>()(
           return {
             prdTree: rebuildPrdTreeLinks(next),
             selectedNodeId: removedIds.has(state.selectedNodeId ?? '') ? null : state.selectedNodeId,
+            nodePolishRevisions: Object.fromEntries(
+              Object.entries(state.nodePolishRevisions).filter(([id]) => !removedIds.has(id)),
+            ),
+            archiveDirty: true,
           }
         }),
       applyMapAdjustmentOperations: (operations) =>
         set((state) => {
           let tree = state.prdTree ?? {}
           let selectedNodeId = state.selectedNodeId
+          const removedRevisionIds = new Set<string>()
           for (const operation of operations) {
             if (operation.type === 'create_node') {
               const title = operation.title.trim()
@@ -425,6 +680,8 @@ export const useAppStore = create<AppStoreState>()(
                   children: [],
                   docPath: `pages/${id}.md`,
                   audience: 'client',
+                  specLens: 'full',
+                  sections: {},
                   handoffGoal: `打磨 ${title} 页面的交互设计规格。`,
                   qualityGate: '页面目标、入口、UI 元素、状态、跳转关系和验收点清晰。',
                   references: [],
@@ -436,6 +693,7 @@ export const useAppStore = create<AppStoreState>()(
               const removedIds = collectDescendantIds(tree, operation.nodeId)
               tree = Object.fromEntries(Object.entries(tree).filter(([id]) => !removedIds.has(id))) as PrdTree
               if (selectedNodeId && removedIds.has(selectedNodeId)) selectedNodeId = null
+              for (const id of removedIds) removedRevisionIds.add(id)
             } else if (operation.type === 'update_node') {
               const node = tree[operation.nodeId]
               if (!node) continue
@@ -466,13 +724,20 @@ export const useAppStore = create<AppStoreState>()(
               }
             }
           }
-          return { prdTree: rebuildPrdTreeLinks(tree), selectedNodeId }
+          return {
+            prdTree: normalizePrdTree(tree),
+            selectedNodeId,
+            nodePolishRevisions: removedRevisionIds.size
+              ? Object.fromEntries(Object.entries(state.nodePolishRevisions).filter(([id]) => !removedRevisionIds.has(id)))
+              : state.nodePolishRevisions,
+            archiveDirty: true,
+          }
         }),
       setNodeDocPath: (nodeId, docPath) =>
         set((state) => {
           const node = state.prdTree?.[nodeId]
           if (!node || !state.prdTree) return state
-          return { prdTree: { ...state.prdTree, [nodeId]: { ...node, docPath } } }
+          return { prdTree: { ...state.prdTree, [nodeId]: { ...node, docPath } }, archiveDirty: true }
         }),
       appendNodeMessage: (nodeId, msg) =>
         set((state) => ({
@@ -480,11 +745,12 @@ export const useAppStore = create<AppStoreState>()(
             ...state.nodeChats,
             [nodeId]: [...(state.nodeChats[nodeId] ?? []), msg],
           },
+          archiveDirty: true,
         })),
       clearNodeChat: (nodeId) =>
         set((state) => {
           const { [nodeId]: _, ...rest } = state.nodeChats
-          return { nodeChats: rest }
+          return { nodeChats: rest, archiveDirty: true }
         }),
       setNodeOperationSuggestions: (scopeId, suggestions) =>
         set((state) => ({
@@ -492,6 +758,7 @@ export const useAppStore = create<AppStoreState>()(
             ...state.nodeOperationSuggestions,
             [scopeId]: suggestions.map((suggestion) => ({ ...suggestion, status: 'pending' })),
           },
+          archiveDirty: true,
         })),
       dismissNodeOperationSuggestion: (scopeId, suggestionId) =>
         set((state) => ({
@@ -499,6 +766,7 @@ export const useAppStore = create<AppStoreState>()(
             ...state.nodeOperationSuggestions,
             [scopeId]: (state.nodeOperationSuggestions[scopeId] ?? []).filter((suggestion) => suggestion.id !== suggestionId),
           },
+          archiveDirty: true,
         })),
       applyNodeOperationSuggestion: (scopeId, suggestionId) =>
         set((state) => {
@@ -509,7 +777,7 @@ export const useAppStore = create<AppStoreState>()(
             const targetId = suggestion.targetNodeId ?? ''
             const node = tree[targetId]
             if (!node) return state
-            tree = { ...tree, [targetId]: { ...node, ...sanitizePatch(suggestion.patch as UpdateNodePatch) } }
+            tree = { ...tree, [targetId]: normalizePrdTreeNode({ ...node, ...sanitizePatch(suggestion.patch as UpdateNodePatch) }) }
           } else {
             const parent = suggestion.parentId ? tree[suggestion.parentId] : null
             const siblings = Object.values(tree).filter((node) => node.parentId === (parent?.id ?? null))
@@ -534,6 +802,8 @@ export const useAppStore = create<AppStoreState>()(
                 children: [],
                 docPath: suggestion.patch.docPath ?? null,
                 audience: suggestion.patch.audience ?? null,
+                specLens: suggestion.patch.specLens ?? specLensFromLegacyAudience(suggestion.patch.audience),
+                sections: suggestion.patch.sections ?? {},
                 handoffGoal: suggestion.patch.handoffGoal ?? null,
                 qualityGate: suggestion.patch.qualityGate ?? null,
                 references: [],
@@ -543,12 +813,150 @@ export const useAppStore = create<AppStoreState>()(
             }
           }
           return {
-            prdTree: rebuildPrdTreeLinks(tree),
+            prdTree: normalizePrdTree(tree),
             nodeOperationSuggestions: {
               ...state.nodeOperationSuggestions,
               [scopeId]: (state.nodeOperationSuggestions[scopeId] ?? []).filter((item) => item.id !== suggestionId),
             },
+            archiveDirty: true,
           }
+        }),
+      createQaIssue: (initialNodeId) => {
+        const state = useAppStore.getState()
+        const node = initialNodeId ? state.prdTree?.[initialNodeId] : null
+        const issue = createEmptyQaIssue(node ? [createQaNodeRef(node)] : [])
+        set({
+          qaIssues: {
+            ...state.qaIssues,
+            [issue.id]: issue,
+          },
+          archiveDirty: true,
+        })
+        return issue.id
+      },
+      deleteQaIssue: (issueId) =>
+        set((state) => {
+          const { [issueId]: _removed, ...rest } = state.qaIssues
+          return { qaIssues: rest, archiveDirty: true }
+        }),
+      appendQaIssueMessage: (issueId, message) =>
+        set((state) => {
+          const issue = state.qaIssues[issueId]
+          if (!issue) return state
+          return {
+            qaIssues: {
+              ...state.qaIssues,
+              [issueId]: {
+                ...issue,
+                messages: [...issue.messages, message],
+                updatedAt: new Date().toISOString(),
+              },
+            },
+            archiveDirty: true,
+          }
+        }),
+      applyQaIssuePatch: (issueId, patch) =>
+        set((state) => {
+          const issue = state.qaIssues[issueId]
+          if (!issue) return state
+          return {
+            qaIssues: {
+              ...state.qaIssues,
+              [issueId]: applyQaPatch(issue, patch),
+            },
+            archiveDirty: true,
+          }
+        }),
+      addQaIssueNodeRef: (issueId, nodeId) =>
+        set((state) => {
+          const issue = state.qaIssues[issueId]
+          const node = state.prdTree?.[nodeId]
+          if (!issue || !node || issue.nodeRefs.some((ref) => ref.nodeId === nodeId)) return state
+          return {
+            qaIssues: {
+              ...state.qaIssues,
+              [issueId]: {
+                ...issue,
+                nodeRefs: [...issue.nodeRefs, createQaNodeRef(node)],
+                updatedAt: new Date().toISOString(),
+              },
+            },
+            archiveDirty: true,
+          }
+        }),
+      removeQaIssueNodeRef: (issueId, nodeId) =>
+        set((state) => {
+          const issue = state.qaIssues[issueId]
+          if (!issue) return state
+          return {
+            qaIssues: {
+              ...state.qaIssues,
+              [issueId]: {
+                ...issue,
+                nodeRefs: issue.nodeRefs.filter((ref) => ref.nodeId !== nodeId),
+                updatedAt: new Date().toISOString(),
+              },
+            },
+            archiveDirty: true,
+          }
+        }),
+      addQaIssueAttachment: (issueId, attachment) =>
+        set((state) => {
+          const issue = state.qaIssues[issueId]
+          if (!issue) return state
+          return {
+            qaIssues: {
+              ...state.qaIssues,
+              [issueId]: {
+                ...issue,
+                attachments: [...issue.attachments, attachment],
+                updatedAt: new Date().toISOString(),
+              },
+            },
+            archiveDirty: true,
+          }
+        }),
+      removeQaIssueAttachment: (issueId, attachmentId) =>
+        set((state) => {
+          const issue = state.qaIssues[issueId]
+          if (!issue) return state
+          return {
+            qaIssues: {
+              ...state.qaIssues,
+              [issueId]: {
+                ...issue,
+                attachments: issue.attachments.filter((attachment) => attachment.id !== attachmentId),
+                updatedAt: new Date().toISOString(),
+              },
+            },
+            archiveDirty: true,
+          }
+        }),
+      updateQaIssueStatus: (issueId, status) =>
+        set((state) => {
+          const issue = state.qaIssues[issueId]
+          if (!issue) return state
+          return {
+            qaIssues: {
+              ...state.qaIssues,
+              [issueId]: issueWithStatus(issue, status),
+            },
+            archiveDirty: true,
+          }
+        }),
+      setMapAdjustmentMessages: (messages) => {
+        set((state) => ({
+          mapAdjustmentMessages: typeof messages === 'function' ? messages(state.mapAdjustmentMessages) : messages,
+          archiveDirty: true,
+        }))
+      },
+      setPendingMapAdjustmentOperations: (pendingMapAdjustmentOperations) =>
+        set({ pendingMapAdjustmentOperations, archiveDirty: true }),
+      clearMapAdjustmentState: () =>
+        set({
+          mapAdjustmentMessages: initialMapAdjustmentMessages,
+          pendingMapAdjustmentOperations: [],
+          archiveDirty: true,
         }),
       applyNodePolish: (nodeId, patch) =>
         set((state) => {
@@ -558,17 +966,61 @@ export const useAppStore = create<AppStoreState>()(
           const summary = normalizeOptionalText(patch.summary)
           const content = normalizeOptionalText(patch.content)
           const techNotes = normalizeOptionalText(patch.techNotes)
+          const performanceSpec = patch.performanceSpec === undefined
+            ? node.performanceSpec
+            : normalizePerformanceSpec(patch.performanceSpec)
+          const nextNode = {
+            ...node,
+            summary: summary ?? node.summary,
+            content: content ?? node.content,
+            techNotes: techNotes ?? node.techNotes,
+            performanceSpec,
+          }
+          const revision = createNodePolishRevision(
+            nodeId,
+            createDocumentSnapshot(node),
+            createDocumentSnapshot(nextNode),
+          )
 
+          return {
+            prdTree: {
+              ...state.prdTree,
+              [nodeId]: nextNode,
+            },
+            nodePolishRevisions: revision
+              ? { ...state.nodePolishRevisions, [nodeId]: revision }
+              : state.nodePolishRevisions,
+            archiveDirty: true,
+          }
+        }),
+      acceptNodePolishRevision: (nodeId) =>
+        set((state) => {
+          const revision = state.nodePolishRevisions[nodeId]
+          if (!revision) return state
+          const { [nodeId]: _removed, ...restRevisions } = state.nodePolishRevisions
+          return {
+            nodePolishRevisions: restRevisions,
+            archiveDirty: true,
+          }
+        }),
+      revertNodePolishRevision: (nodeId) =>
+        set((state) => {
+          const node = state.prdTree?.[nodeId]
+          const revision = state.nodePolishRevisions[nodeId]
+          if (!node || !revision || !state.prdTree) return state
+          const { [nodeId]: _removed, ...restRevisions } = state.nodePolishRevisions
           return {
             prdTree: {
               ...state.prdTree,
               [nodeId]: {
                 ...node,
-                summary: summary ?? node.summary,
-                content: content ?? node.content,
-                techNotes: techNotes ?? node.techNotes,
+                summary: revision.before.summary,
+                content: revision.before.content,
+                techNotes: revision.before.techNotes,
               },
             },
+            nodePolishRevisions: restRevisions,
+            archiveDirty: true,
           }
         }),
       updateNodeStatus: (nodeId, status) =>
@@ -584,6 +1036,7 @@ export const useAppStore = create<AppStoreState>()(
                 needsPolish: status === 'pending_refine' ? true : node.needsPolish,
               },
             },
+            archiveDirty: true,
           }
         }),
       applyRequirementPatch: (patch) => {
@@ -598,21 +1051,24 @@ export const useAppStore = create<AppStoreState>()(
             missing_reasons: patch.missing_reasons ?? state.requirement.missing_reasons,
             next_question: 'next_question' in patch ? (patch.next_question ?? null) : state.requirement.next_question,
           },
+          archiveDirty: true,
         }))
       },
       setMessages: (messages) => {
         set((state) => ({
           messages: typeof messages === 'function' ? messages(state.messages) : messages,
+          archiveDirty: true,
         }))
       },
-      setLatestRag: (latestRag) => set({ latestRag }),
+      setLatestRag: (latestRag) => set({ latestRag, archiveDirty: true }),
       setPrototypeHtml: (prototypeHtml, meta) =>
         set((state) => {
-          if (!prototypeHtml) return { prototypeHtml: null, prototypeHistory: [] }
+          if (!prototypeHtml) return { prototypeHtml: null, prototypeHistory: [], archiveDirty: true }
           const version = makePrototypeVersion(prototypeHtml, state.prototypeHistory, meta)
           return {
             prototypeHtml,
             prototypeHistory: [version, ...state.prototypeHistory].slice(0, PROTOTYPE_HISTORY_LIMIT),
+            archiveDirty: true,
           }
         }),
       recordPrototypeHistory: (html, meta) =>
@@ -620,21 +1076,23 @@ export const useAppStore = create<AppStoreState>()(
           const version = makePrototypeVersion(html, state.prototypeHistory, meta)
           return {
             prototypeHistory: [version, ...state.prototypeHistory].slice(0, PROTOTYPE_HISTORY_LIMIT),
+            archiveDirty: true,
           }
         }),
       restorePrototypeVersion: (id) =>
         set((state) => {
           const version = state.prototypeHistory.find((item) => item.id === id)
           if (!version) return state
-          return { prototypeHtml: version.html }
+          return { prototypeHtml: version.html, archiveDirty: true }
         }),
-      clearPrototypeHistory: () => set({ prototypeHistory: [] }),
-      setPrototypeVariants: (variants) => set({ prototypeVariants: variants, selectedVariantIndex: -1 }),
+      clearPrototypeHistory: () => set({ prototypeHistory: [], archiveDirty: true }),
+      setPrototypeVariants: (variants) => set({ prototypeVariants: variants, selectedVariantIndex: -1, archiveDirty: true }),
       updatePrototypeVariant: (index, patch) =>
         set((state) => ({
           prototypeVariants: state.prototypeVariants.map((variant) =>
             variant.index === index ? { ...variant, ...patch } : variant,
           ),
+          archiveDirty: true,
         })),
       selectPrototypeVariant: (index) =>
         set((state) => {
@@ -643,82 +1101,107 @@ export const useAppStore = create<AppStoreState>()(
           return {
             selectedVariantIndex: index,
             prototypeHtml: variant.html ?? state.prototypeHtml,
+            archiveDirty: true,
           }
         }),
-      clearPrototypeVariants: () => set({ prototypeVariants: [], selectedVariantIndex: -1 }),
+      clearPrototypeVariants: () => set({ prototypeVariants: [], selectedVariantIndex: -1, archiveDirty: true }),
       setNodePrototypeHtml: (nodeId, prototypeHtml, meta) =>
         set((state) => {
           const current = getNodePrototypeState(state, nodeId)
           if (!prototypeHtml) {
-            return setNodePrototypeState(state, nodeId, {
+            return {
+              ...setNodePrototypeState(state, nodeId, {
               ...current,
               prototypeHtml: null,
               prototypeHistory: [],
-            })
+              }),
+              archiveDirty: true,
+            }
           }
           const version = makePrototypeVersion(prototypeHtml, current.prototypeHistory, meta)
-          return setNodePrototypeState(state, nodeId, {
+          return {
+            ...setNodePrototypeState(state, nodeId, {
             ...current,
             prototypeHtml,
             prototypeHistory: [version, ...current.prototypeHistory].slice(0, PROTOTYPE_HISTORY_LIMIT),
-          })
+            }),
+            archiveDirty: true,
+          }
         }),
       recordNodePrototypeHistory: (nodeId, html, meta) =>
         set((state) => {
           const current = getNodePrototypeState(state, nodeId)
           const version = makePrototypeVersion(html, current.prototypeHistory, meta)
-          return setNodePrototypeState(state, nodeId, {
+          return {
+            ...setNodePrototypeState(state, nodeId, {
             ...current,
             prototypeHistory: [version, ...current.prototypeHistory].slice(0, PROTOTYPE_HISTORY_LIMIT),
-          })
+            }),
+            archiveDirty: true,
+          }
         }),
       restoreNodePrototypeVersion: (nodeId, id) =>
         set((state) => {
           const current = getNodePrototypeState(state, nodeId)
           const version = current.prototypeHistory.find((item) => item.id === id)
           if (!version) return state
-          return setNodePrototypeState(state, nodeId, { ...current, prototypeHtml: version.html })
+          return { ...setNodePrototypeState(state, nodeId, { ...current, prototypeHtml: version.html }), archiveDirty: true }
         }),
       clearNodePrototypeHistory: (nodeId) =>
         set((state) => {
           const current = getNodePrototypeState(state, nodeId)
-          return setNodePrototypeState(state, nodeId, { ...current, prototypeHistory: [] })
+          return {
+            ...setNodePrototypeState(state, nodeId, {
+              ...current,
+              prototypeHtml: null,
+              prototypeHistory: [],
+              prototypeVariants: [],
+              selectedVariantIndex: -1,
+            }),
+            archiveDirty: true,
+          }
         }),
       setNodePrototypeVariants: (nodeId, variants) =>
         set((state) => {
           const current = getNodePrototypeState(state, nodeId)
-          return setNodePrototypeState(state, nodeId, { ...current, prototypeVariants: variants, selectedVariantIndex: -1 })
+          return { ...setNodePrototypeState(state, nodeId, { ...current, prototypeVariants: variants, selectedVariantIndex: -1 }), archiveDirty: true }
         }),
       updateNodePrototypeVariant: (nodeId, index, patch) =>
         set((state) => {
           const current = getNodePrototypeState(state, nodeId)
-          return setNodePrototypeState(state, nodeId, {
+          return {
+            ...setNodePrototypeState(state, nodeId, {
             ...current,
             prototypeVariants: current.prototypeVariants.map((variant) =>
               variant.index === index ? { ...variant, ...patch } : variant,
             ),
-          })
+            }),
+            archiveDirty: true,
+          }
         }),
       selectNodePrototypeVariant: (nodeId, index) =>
         set((state) => {
           const current = getNodePrototypeState(state, nodeId)
           const variant = current.prototypeVariants.find((item) => item.index === index)
           if (!variant) return state
-          return setNodePrototypeState(state, nodeId, {
+          return {
+            ...setNodePrototypeState(state, nodeId, {
             ...current,
             selectedVariantIndex: index,
             prototypeHtml: variant.html ?? current.prototypeHtml,
-          })
+            }),
+            archiveDirty: true,
+          }
         }),
       clearNodePrototypeVariants: (nodeId) =>
         set((state) => {
           const current = getNodePrototypeState(state, nodeId)
-          return setNodePrototypeState(state, nodeId, { ...current, prototypeVariants: [], selectedVariantIndex: -1 })
+          return { ...setNodePrototypeState(state, nodeId, { ...current, prototypeVariants: [], selectedVariantIndex: -1 }), archiveDirty: true }
         }),
-      updateSettings: (settings) => set({ settings }),
-      resetSession: () => set({ messages: initialMessages, latestRag: null, prototypeHtml: null, prototypeHistory: [], prototypeVariants: [], selectedVariantIndex: -1 }),
-      resetRequirement: () => set({ requirement: emptyRequirement, latestRag: null, prototypeHtml: null, prototypeHistory: [], prototypeVariants: [], selectedVariantIndex: -1 }),
-      setPrdTree: (prdTree) => set({ prdTree: rebuildPrdTreeLinks(prdTree) }),
+      updateSettings: (settings) => set({ settings, archiveDirty: true }),
+      resetSession: () => set({ messages: initialMessages, latestRag: null, prototypeHtml: null, prototypeHistory: [], prototypeVariants: [], selectedVariantIndex: -1, archiveDirty: true }),
+      resetRequirement: () => set({ requirement: emptyRequirement, latestRag: null, prototypeHtml: null, prototypeHistory: [], prototypeVariants: [], selectedVariantIndex: -1, archiveDirty: true }),
+      setPrdTree: (prdTree) => set({ prdTree: normalizePrdTree(prdTree), archiveDirty: true }),
       setSelectedNodeId: (selectedNodeId) => set({ selectedNodeId }),
       setDecompositionStatus: (decompositionStatus) => set({ decompositionStatus }),
       appendDecompositionStep: (step) =>
@@ -730,15 +1213,28 @@ export const useAppStore = create<AppStoreState>()(
           ),
         })),
       mergePartialTree: (nodes) =>
-        set((state) => ({ prdTree: rebuildPrdTreeLinks({ ...(state.prdTree ?? {}), ...nodes }) })),
+        set((state) => ({ prdTree: normalizePrdTree({ ...(state.prdTree ?? {}), ...nodes }), archiveDirty: true })),
       resetDecomposition: () =>
-        set({ prdTree: null, selectedNodeId: null, decompositionStatus: 'idle', decompositionSteps: [], nodeChats: {}, nodeOperationSuggestions: {}, nodePrototypeStates: {} }),
+        set({
+          prdTree: null,
+          selectedNodeId: null,
+          decompositionStatus: 'idle',
+          decompositionSteps: [],
+          nodeChats: {},
+          nodeOperationSuggestions: {},
+          qaIssues: {},
+          mapAdjustmentMessages: initialMapAdjustmentMessages,
+          pendingMapAdjustmentOperations: [],
+          nodePrototypeStates: {},
+          nodePolishRevisions: {},
+          archiveDirty: true,
+        }),
     }),
     {
       name: STORAGE_KEY,
       version: STORAGE_VERSION,
       migrate: (persistedState: unknown, version: number): unknown => {
-        if (version === 3 || version === 4 || version === 5 || version === 6 || version === 7 || version === 8) {
+        if (version === 3 || version === 4 || version === 5 || version === 6 || version === 7 || version === 8 || version === 9 || version === 10) {
           const previous = persistedState as {
             requirement?: unknown
             messages?: unknown
@@ -748,8 +1244,19 @@ export const useAppStore = create<AppStoreState>()(
             selectedNodeId?: unknown
             prototypeHtml?: unknown
             prototypeHistory?: unknown
+            prototypeVariants?: unknown
+            selectedVariantIndex?: unknown
             nodeChats?: unknown
+            nodePolishRevisions?: unknown
             nodePrototypeStates?: unknown
+            nodeOperationSuggestions?: unknown
+            qaIssues?: unknown
+            mapAdjustmentMessages?: unknown
+            pendingMapAdjustmentOperations?: unknown
+            sourceDocument?: unknown
+            currentArchivePath?: unknown
+            lastSavedAt?: unknown
+            archiveDirty?: unknown
           }
           const prdTree = normalizePersistedPrdTree(previous.prdTree)
           return {
@@ -761,8 +1268,19 @@ export const useAppStore = create<AppStoreState>()(
             selectedNodeId: prdTree ? previous.selectedNodeId ?? null : null,
             prototypeHtml: typeof previous.prototypeHtml === 'string' ? previous.prototypeHtml : null,
             prototypeHistory: Array.isArray(previous.prototypeHistory) ? previous.prototypeHistory.slice(0, PROTOTYPE_HISTORY_LIMIT) : [],
+            prototypeVariants: Array.isArray(previous.prototypeVariants) ? previous.prototypeVariants : [],
+            selectedVariantIndex: typeof previous.selectedVariantIndex === 'number' ? previous.selectedVariantIndex : -1,
             nodeChats: prdTree && previous.nodeChats && typeof previous.nodeChats === 'object' ? previous.nodeChats : {},
+            nodePolishRevisions: prdTree && previous.nodePolishRevisions && typeof previous.nodePolishRevisions === 'object' ? previous.nodePolishRevisions : {},
             nodePrototypeStates: prdTree && previous.nodePrototypeStates && typeof previous.nodePrototypeStates === 'object' ? previous.nodePrototypeStates : {},
+            nodeOperationSuggestions: prdTree && previous.nodeOperationSuggestions && typeof previous.nodeOperationSuggestions === 'object' ? previous.nodeOperationSuggestions : {},
+            qaIssues: prdTree && previous.qaIssues && typeof previous.qaIssues === 'object' ? previous.qaIssues : {},
+            mapAdjustmentMessages: Array.isArray(previous.mapAdjustmentMessages) ? previous.mapAdjustmentMessages : initialMapAdjustmentMessages,
+            pendingMapAdjustmentOperations: Array.isArray(previous.pendingMapAdjustmentOperations) ? previous.pendingMapAdjustmentOperations : [],
+            sourceDocument: previous.sourceDocument && typeof previous.sourceDocument === 'object' ? previous.sourceDocument : null,
+            currentArchivePath: typeof previous.currentArchivePath === 'string' ? previous.currentArchivePath : null,
+            lastSavedAt: typeof previous.lastSavedAt === 'string' ? previous.lastSavedAt : null,
+            archiveDirty: typeof previous.archiveDirty === 'boolean' ? previous.archiveDirty : false,
           }
         }
         // Unknown version — safe reset
@@ -775,8 +1293,19 @@ export const useAppStore = create<AppStoreState>()(
           selectedNodeId: null,
           prototypeHtml: null,
           prototypeHistory: [],
+          prototypeVariants: [],
+          selectedVariantIndex: -1,
           nodeChats: {},
+          nodePolishRevisions: {},
           nodePrototypeStates: {},
+          nodeOperationSuggestions: {},
+          qaIssues: {},
+          mapAdjustmentMessages: initialMapAdjustmentMessages,
+          pendingMapAdjustmentOperations: [],
+          sourceDocument: null,
+          currentArchivePath: null,
+          lastSavedAt: null,
+          archiveDirty: false,
         }
       },
       partialize: (state) => ({
@@ -785,11 +1314,22 @@ export const useAppStore = create<AppStoreState>()(
         latestRag: state.latestRag,
         prototypeHtml: state.prototypeHtml,
         prototypeHistory: state.prototypeHistory,
+        prototypeVariants: state.prototypeVariants,
+        selectedVariantIndex: state.selectedVariantIndex,
         settings: state.settings,
         prdTree: state.prdTree as PrdTree | null,
         selectedNodeId: state.selectedNodeId,
-        nodeChats: persistableNodeChats(state.nodeChats),
+        nodeChats: persistableNodeChats(state.nodeChats, 24),
+        nodePolishRevisions: state.nodePolishRevisions,
         nodePrototypeStates: state.nodePrototypeStates,
+        nodeOperationSuggestions: state.nodeOperationSuggestions,
+        qaIssues: state.qaIssues,
+        mapAdjustmentMessages: state.mapAdjustmentMessages.map(persistableMessage),
+        pendingMapAdjustmentOperations: state.pendingMapAdjustmentOperations,
+        sourceDocument: state.sourceDocument,
+        currentArchivePath: state.currentArchivePath,
+        lastSavedAt: state.lastSavedAt,
+        archiveDirty: state.archiveDirty,
         // decompositionStatus: intentionally NOT persisted (session-only)
         // decompositionSteps: intentionally NOT persisted (session-only)
       }),

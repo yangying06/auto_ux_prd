@@ -11,6 +11,9 @@ export type PrdNodeAudience =
   | 'ctrl'
   | 'view'
 
+export type PrdNodeSpecLens = 'full' | 'model' | 'control' | 'view'
+export type PrdNodeSectionKey = 'data' | 'interaction' | 'view'
+
 export type PrdNodeType = 'module' | 'feature' | 'ui' | 'page'
 export type PrdNodeStatus = 'pending' | 'pending_refine' | 'done'
 export type PrdNodeSourceKind = 'prd' | 'user' | 'upload'
@@ -21,11 +24,50 @@ export interface PrdNodeEvidenceRef {
   quote?: string | null
 }
 
+export interface PrdNodeSection {
+  title?: string | null
+  summary?: string | null
+  content?: string | null
+  evidenceRefs?: PrdNodeEvidenceRef[]
+  openQuestions?: string[]
+}
+
+export type PrdNodeSections = Partial<Record<PrdNodeSectionKey, PrdNodeSection>>
+
 export interface PrdNodeReference {
   targetNodeId: string | null
   label: string
   reason?: string | null
   sourceNodeId?: string | null
+}
+
+export type PrdPerformanceSpecSource = 'auto' | 'ai' | 'user'
+
+export interface PrdPerformanceSequenceStep {
+  id?: string | null
+  title: string
+  detail: string
+  layer?: string | null
+  assets?: string[]
+  waitFor?: string | null
+}
+
+export interface PrdPerformanceSpec {
+  detected: boolean
+  disabled?: boolean
+  source: PrdPerformanceSpecSource
+  confidence: number
+  eventTypes: string[]
+  trigger: string | null
+  branches: string[]
+  sequence: PrdPerformanceSequenceStep[]
+  assets: string[]
+  layers: string[]
+  controls: string[]
+  endState: string | null
+  openQuestions: string[]
+  prototypeNotes: string[]
+  updatedAt?: string | null
 }
 
 export interface CreatePageNodeInput {
@@ -45,10 +87,13 @@ export interface UpdateNodePatch {
   status?: PrdNodeStatus
   type?: PrdNodeType
   audience?: PrdNodeAudience | null
+  specLens?: PrdNodeSpecLens | null
+  sections?: PrdNodeSections
   handoffGoal?: string | null
   qualityGate?: string | null
   sourceKind?: PrdNodeSourceKind
   evidenceRefs?: PrdNodeEvidenceRef[]
+  performanceSpec?: PrdPerformanceSpec | null
 }
 
 export type PrdNodeOperationPatch = Partial<Pick<
@@ -60,11 +105,14 @@ export type PrdNodeOperationPatch = Partial<Pick<
   | 'needsPolish'
   | 'docPath'
   | 'audience'
+  | 'specLens'
+  | 'sections'
   | 'handoffGoal'
   | 'qualityGate'
   | 'techNotes'
   | 'sourceKind'
   | 'evidenceRefs'
+  | 'performanceSpec'
 >>
 
 export interface PrdNodeOperationSuggestion {
@@ -126,18 +174,95 @@ export interface PrdNode {
   children: string[]
   docPath?: string | null
   audience?: PrdNodeAudience | null
+  specLens?: PrdNodeSpecLens | null
+  sections?: PrdNodeSections
   handoffGoal?: string | null
   qualityGate?: string | null
   references?: PrdNodeReference[]
   sourceKind?: PrdNodeSourceKind
   evidenceRefs?: PrdNodeEvidenceRef[]
+  performanceSpec?: PrdPerformanceSpec | null
 }
 
 export type PrdTree = Record<string, PrdNode>
+
+export type PrdNodeDocumentField = 'summary' | 'content' | 'techNotes'
+
+export interface PrdNodeDocumentSnapshot {
+  summary: string
+  content: string
+  techNotes: string | null
+}
+
+export interface PrdNodePolishRevision {
+  id: string
+  nodeId: string
+  createdAt: string
+  before: PrdNodeDocumentSnapshot
+  after: PrdNodeDocumentSnapshot
+  changedFields: PrdNodeDocumentField[]
+  accepted: boolean
+}
 
 export type DecompositionStatus = 'idle' | 'decomposing' | 'done' | 'error'
 
 export interface DecompositionStep {
   label: string
   status: 'pending' | 'active' | 'complete' | 'error'
+}
+
+export type DocumentSourceIssueSeverity = 'info' | 'warning' | 'critical'
+
+export interface DocumentSourceIssue {
+  id: string
+  severity: DocumentSourceIssueSeverity
+  title: string
+  detail: string
+  sectionId?: string | null
+}
+
+export interface DocumentSourceSection {
+  id: string
+  title: string
+  titlePath: string
+  level: number
+  startLine: number
+  endLine: number
+  charCount: number
+  estimatedTokens: number
+  excerpt: string
+  signals: string[]
+}
+
+export interface DocumentKeywordSignal {
+  category: 'pages' | 'states' | 'rewards' | 'navigation' | 'apis' | 'configs'
+  label: string
+  matches: number
+}
+
+export interface DocumentSourceIndex {
+  sourceLabel: string
+  totalLines: number
+  totalChars: number
+  estimatedTokens: number
+  headingCount: number
+  sectionCount: number
+  largestSectionChars: number
+  sections: DocumentSourceSection[]
+  keywordSignals: DocumentKeywordSignal[]
+  issues: DocumentSourceIssue[]
+}
+
+export interface PrdImportCandidateNode {
+  title: string
+  sectionId: string
+  sourceLabel: string
+  reason: string
+  confidence: number
+  excerpt: string
+}
+
+export interface PrdImportPreview {
+  sourceIndex: DocumentSourceIndex
+  candidateNodes: PrdImportCandidateNode[]
 }

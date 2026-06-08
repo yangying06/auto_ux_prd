@@ -19,6 +19,7 @@ interface PrototypeBoardProps {
   onSinglePrototypeOnlyChange?: (checked: boolean) => void
   onRestore: (id: string) => void
   onClearHistory: () => void
+  canClearHistory?: boolean
 }
 
 export function PrototypeBoard({
@@ -29,9 +30,11 @@ export function PrototypeBoard({
   onSinglePrototypeOnlyChange,
   onRestore,
   onClearHistory,
+  canClearHistory,
 }: PrototypeBoardProps) {
   const [previewMode, setPreviewMode] = useState<PreviewMode>('fit')
   const previewFit = previewMode === 'fit' ? 'fullPage' : previewMode === 'actual' ? 'actual' : 'pane'
+  const clearHistoryEnabled = canClearHistory ?? history.length > 0
 
   function handleRestore(id: string) {
     if (!id) return
@@ -95,7 +98,7 @@ export function PrototypeBoard({
           <button
             type="button"
             onClick={onClearHistory}
-            disabled={history.length === 0 || isLoading}
+            disabled={!clearHistoryEnabled || isLoading}
             title="清空历史版本"
             className="h-8 rounded-md border border-outline-variant/40 bg-surface-container-high px-sm font-mono text-[11px] text-on-surface-variant transition-colors hover:border-error hover:text-error disabled:cursor-not-allowed disabled:opacity-40"
           >

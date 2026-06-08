@@ -1,11 +1,12 @@
 import { useRef, useState } from 'react'
 
 interface UploadCardProps {
-  onFileRead: (text: string) => void
+  onFileRead: (text: string, filename: string) => void
+  onOpenArchive?: () => void
   error?: string | null
 }
 
-export function UploadCard({ onFileRead, error }: UploadCardProps) {
+export function UploadCard({ onFileRead, onOpenArchive, error }: UploadCardProps) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [rejectionError, setRejectionError] = useState<string | null>(null)
@@ -21,7 +22,7 @@ export function UploadCard({ onFileRead, error }: UploadCardProps) {
     const reader = new FileReader()
     reader.onload = (e) => {
       const text = e.target?.result as string
-      if (text) onFileRead(text)
+      if (text) onFileRead(text, file.name)
     }
     reader.readAsText(file, 'UTF-8')
   }
@@ -74,16 +75,25 @@ export function UploadCard({ onFileRead, error }: UploadCardProps) {
         }}
       />
 
-      {/* CTA button */}
-      <button
-        className="flex items-center gap-2 bg-surface-container-high hover:bg-surface-variant
-          border border-outline-variant rounded-lg px-4 py-2
-          text-label-md text-on-surface transition-colors min-h-[44px]"
-        onClick={() => inputRef.current?.click()}
-      >
-        <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>upload_file</span>
-        上传PRD文档
-      </button>
+      {/* CTA buttons */}
+      <div className="flex flex-wrap items-center justify-center gap-sm">
+        <button
+          className="flex min-h-[44px] items-center gap-2 rounded-lg border border-outline-variant bg-surface-container-high px-4 py-2 text-label-md text-on-surface transition-colors hover:bg-surface-variant"
+          onClick={() => inputRef.current?.click()}
+        >
+          <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>upload_file</span>
+          上传PRD文档
+        </button>
+        {onOpenArchive ? (
+          <button
+            className="flex min-h-[44px] items-center gap-2 rounded-lg border border-secondary/40 bg-secondary/10 px-4 py-2 text-label-md text-secondary transition-colors hover:bg-secondary/20"
+            onClick={onOpenArchive}
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>folder_open</span>
+            打开存档
+          </button>
+        ) : null}
+      </div>
 
       {/* Inline error state */}
       {displayError && (

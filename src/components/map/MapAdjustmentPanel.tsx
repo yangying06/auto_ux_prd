@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { requestMapAdjustment } from '../../lib/api'
+import { useAppStore } from '../../store/appStore'
 import type { ChatMessage } from '../../types/chat'
 import type { MapAdjustmentOperation, PrdTree } from '../../types/prdNode'
 
@@ -18,11 +19,11 @@ function operationLabel(operation: MapAdjustmentOperation) {
 }
 
 export function MapAdjustmentPanel({ baseUrl, tree, onApply }: MapAdjustmentPanelProps) {
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    { role: 'assistant', content: '如果页面拆分不合理，可以告诉我如何调整。我会先给出操作建议，确认后才会修改导图。' },
-  ])
+  const messages = useAppStore((s) => s.mapAdjustmentMessages)
+  const setMessages = useAppStore((s) => s.setMapAdjustmentMessages)
+  const pendingOperations = useAppStore((s) => s.pendingMapAdjustmentOperations)
+  const setPendingOperations = useAppStore((s) => s.setPendingMapAdjustmentOperations)
   const [draft, setDraft] = useState('')
-  const [pendingOperations, setPendingOperations] = useState<MapAdjustmentOperation[]>([])
   const [isSending, setIsSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [isCollapsed, setIsCollapsed] = useState(false)

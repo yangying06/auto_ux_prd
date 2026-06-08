@@ -1,4 +1,6 @@
-import type { PrdTree } from '../types/prdNode'
+import { formatSectionTitle, formatSpecLens, hasNodeSections, resolveNodeAudience, resolveNodeSpecLens } from './prdNodeLens'
+import { formatPerformanceSpecForPrompt, formatPerformanceSpecMarkdown, resolveNodePerformanceSpec } from './performanceOrchestration'
+import type { PrdNode, PrdTree } from '../types/prdNode'
 import type { UXRequirementState } from '../types/uxRequirement'
 
 function formatValue(value: string | null | undefined, fallback = '未明确') {
@@ -39,6 +41,9 @@ export function requirementToBoltPrompt(requirement: UXRequirementState) {
 引擎约束：${formatValue(requirement.engine_constraints, '无特殊 Cocos 约束')}
 完成度：${requirement.completion_rate}%
 
+表现编排：
+${requirement.performance_spec ? formatPerformanceSpecForPrompt(requirement.performance_spec) : '未提供单独表现编排；仅按执行规则生成关键状态反馈。'}
+
 资源依赖：
 ${formatAssets(requirement)}
 
@@ -57,30 +62,68 @@ function buildNodePath(id: string, tree: PrdTree) {
   return labels.join(' / ')
 }
 
+function formatNodeSectionsForPrompt(node: PrdNode) {
+  if (!hasNodeSections(node.sections)) return null
+  return [
+    '- 页面规格视角：',
+    ...(['view', 'interaction', 'data'] as const).map((key) => {
+      const section = node.sections?.[key]
+      if (!section?.summary && !section?.content) return null
+      return [
+        `  - ${section.title ?? formatSectionTitle(key)}`,
+        section.summary ? `    摘要：${section.summary}` : null,
+        section.content ? `    内容：${section.content}` : null,
+      ].filter(Boolean).join('\n')
+    }).filter((item): item is string => Boolean(item)),
+  ].join('\n')
+}
+
+function uniqueNodes(nodes: PrdNode[]) {
+  const seen = new Set<string>()
+  return nodes.filter((node) => {
+    if (seen.has(node.id)) return false
+    seen.add(node.id)
+    return true
+  })
+}
+
 export function prdTreeToBoltPrompt(tree: PrdTree) {
   const nodes = Object.values(tree)
   const leaves = nodes.filter((node) => node.children.length === 0)
   const completedLeaves = leaves.filter((node) => node.status === 'done')
-  const visualLeaves = leaves.filter((node) => node.type === 'ui' || node.audience === 'client')
+  const visualLeaves = leaves.filter((node) => (
+    node.type === 'ui'
+    || resolveNodeAudience(node) === 'client'
+    || resolveNodeSpecLens(node) === 'view'
+  ))
   const completedVisualLeaves = visualLeaves.filter((node) => node.status === 'done')
-  const sourceNodes = completedVisualLeaves.length
+  const sectionPages = nodes.filter((node) => hasNodeSections(node.sections))
+  const completedSectionPages = sectionPages.filter((node) => node.status === 'done')
+  const baseSourceNodes = completedVisualLeaves.length
     ? completedVisualLeaves
     : completedLeaves.length
       ? completedLeaves
       : visualLeaves.length
         ? visualLeaves
         : leaves
+  const sourceNodes = uniqueNodes([
+    ...baseSourceNodes,
+    ...(completedSectionPages.length ? completedSectionPages : sectionPages),
+  ])
 
   const specs = sourceNodes.map((node) => [
     `## ${buildNodePath(node.id, tree)}`,
     `- 文档节点编号：${node.id}`,
     node.docPath ? `- 导出路径：${node.docPath}` : null,
-    node.audience ? `- 面向角色：${node.audience}` : null,
+    `- 面向角色：${resolveNodeAudience(node) ?? '未定'}`,
+    `- 规格视角：${formatSpecLens(resolveNodeSpecLens(node))}`,
     `- 类型：${node.type}`,
     `- 状态：${node.status}`,
     node.handoffGoal ? `- AI 接力目标：${node.handoffGoal}` : null,
     `- 摘要：${node.summary}`,
     `- 内容：${node.content}`,
+    formatNodeSectionsForPrompt(node),
+    formatPerformanceSpecMarkdown(resolveNodePerformanceSpec(node)),
     node.techNotes ? `- 技术备注：${node.techNotes}` : null,
   ].filter(Boolean).join('\n')).join('\n\n')
 
@@ -98,7 +141,51 @@ ${specs || '暂无节点内容'}
 `
 }
 
-export function openBoltWithPrompt(prompt: string) {
+const MAX_BOLT_PROMPT_URL_LENGTH = 60000
+
+async function copyPromptToClipboard(prompt: string) {
+  try {
+    await navigator.clipboard?.writeText(prompt)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export async function openBoltWithPrompt(prompt: string) {
   const url = `https://bolt.new/?prompt=${encodeURIComponent(prompt)}`
-  window.open(url, '_blank', 'noopener,noreferrer')
+  const isUrlTooLong = url.length > MAX_BOLT_PROMPT_URL_LENGTH
+  const targetUrl = isUrlTooLong ? 'https://bolt.new/' : url
+
+  if (isUrlTooLong) {
+    const copied = await copyPromptToClipboard(prompt)
+    if (copied) {
+      window.alert('当前导图内容较长，已复制 Bolt Prompt。即将打开 bolt.new，请在输入框中粘贴后生成原型。')
+    } else {
+      window.prompt('当前导图内容较长，无法通过 URL 直接传给 Bolt。请先复制这段 Prompt，再到 bolt.new 粘贴生成原型。', prompt)
+    }
+  }
+
+  const popup = window.open('about:blank', '_blank')
+  if (popup) {
+    popup.opener = null
+    popup.document.title = 'Opening Bolt...'
+    popup.document.body.innerHTML = '<p style="font:14px system-ui;padding:24px">正在打开 bolt.new...</p>'
+    popup.location.href = targetUrl
+    return true
+  }
+
+  const copied = await copyPromptToClipboard(prompt)
+  if (!copied) {
+    window.prompt('浏览器阻止了新窗口，且无法自动复制。请手动复制这段 Prompt。', prompt)
+  }
+  const shouldOpenCurrentWindow = window.confirm(
+    copied
+      ? '浏览器阻止了新窗口，Bolt Prompt 已复制。是否在当前窗口打开 bolt.new？'
+      : '浏览器阻止了新窗口。是否在当前窗口打开 bolt.new？',
+  )
+  if (shouldOpenCurrentWindow) {
+    window.location.assign(targetUrl)
+  }
+  return false
 }

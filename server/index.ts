@@ -2,14 +2,17 @@ import Anthropic from '@anthropic-ai/sdk'
 import cors from 'cors'
 import dotenv from 'dotenv'
 import express from 'express'
-import { zipSync } from 'fflate'
+import { strFromU8, unzipSync, zipSync } from 'fflate'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
+import { formatPerformanceSpecForPrompt, formatPerformanceSpecMarkdown, normalizePerformanceSpec, resolveNodePerformanceSpec } from '../src/lib/performanceOrchestration'
+import { defaultAudienceForSpecLens, formatSectionTitle, formatSpecLens, hasNodeSections, normalizeLegacyAudience, normalizeNodeLensFields, normalizeSectionKeyForLens, normalizeSpecLensValue, resolveNodeAudience, resolveNodeSpecLens, specLensFromLegacyAudience } from '../src/lib/prdNodeLens'
 import { applyPrototypeEdit, normalizeGeneratedPrototypeHtml, normalizePrototypeHtml } from '../src/lib/prototypeUtils'
 import type { UXRequirementState } from '../src/types/uxRequirement'
-import type { MapAdjustmentOperation, PrdNode, PrdNodeAudience, PrdNodeEvidenceRef, PrdNodeOperationPatch, PrdNodeOperationSuggestion, PrdNodeReference, PrdNodeSourceKind, PrdNodeStatus } from '../src/types/prdNode'
+import type { DocumentKeywordSignal, DocumentSourceIndex, DocumentSourceIssue, DocumentSourceSection, MapAdjustmentOperation, PrdImportCandidateNode, PrdImportPreview, PrdNode, PrdNodeAudience, PrdNodeEvidenceRef, PrdNodeOperationPatch, PrdNodeOperationSuggestion, PrdNodeReference, PrdNodeSourceKind, PrdNodeStatus } from '../src/types/prdNode'
 import type { ReferenceImageClassificationRequest, ReferenceImageClassificationResponse, ReferenceImageRole } from '../src/types/chat'
+import type { QaAttachment, QaChatRequest, QaChatResponse, QaIssuePatch, QaIssuePriority, QaIssueSeverity } from '../src/types/qa'
 import { contentDispositionHeader } from './exportHeaders'
 import { extractNodeChatSuffix } from './nodeChatResponse'
 import { buildVariantConfigs, clampVariantCount, DEFAULT_CREATE_VARIANTS, DEFAULT_UPDATE_VARIANTS } from './prototypePrompts'
@@ -34,6 +37,21 @@ const LARGE_PRD_DECOMPOSE_THRESHOLD = 30 * 1024
 const LARGE_PRD_SLICE_TARGET_LENGTH = 12 * 1024
 const SOURCE_OUTLINE_ROOT_ID = 'SOURCE_OUTLINE_ROOT'
 const SPEC_EXPORT_ROOT = path.resolve(process.cwd(), 'generated', 'specs')
+const figma2PrefabBaseUrl = (process.env.FIGMA2PREFAB_BASE_URL ?? 'http://43.134.44.85:3000').replace(/\/+$/, '')
+const figma2PrefabConvertPath = process.env.FIGMA2PREFAB_CONVERT_PATH ?? '/api/convert'
+const figma2PrefabProvider = process.env.FIGMA2PREFAB_PROVIDER?.trim()
+const figmaToken = process.env.FIGMA_TOKEN ?? process.env.FIGMA_ACCESS_TOKEN ?? ''
+const FIGMA2PREFAB_POLL_INTERVAL_MS = Number.parseInt(process.env.FIGMA2PREFAB_POLL_INTERVAL_MS ?? '2500', 10)
+const FIGMA2PREFAB_TIMEOUT_MS = Number.parseInt(process.env.FIGMA2PREFAB_TIMEOUT_MS ?? '600000', 10)
+const FIGMA_ASSET_BUNDLE_TTL_MS = Number.parseInt(process.env.FIGMA_ASSET_BUNDLE_TTL_MS ?? `${30 * 60 * 1000}`, 10)
+
+interface FigmaAssetBundle {
+  createdAt: number
+  files: Record<string, Uint8Array>
+  lookup: Map<string, string>
+}
+
+const figmaAssetBundles = new Map<string, FigmaAssetBundle>()
 
 const anthropic = process.env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL })
@@ -126,6 +144,24 @@ interface PrototypeRequest {
   variantIndex?: number | null
   history?: string[] | null
   stream?: boolean | null
+}
+
+interface FigmaFrameRequest {
+  url?: string
+  token?: string
+}
+
+interface FigmaFrameResponse {
+  fileKey: string
+  nodeId: string
+  panelName: string
+  taskId: string | null
+  sourceUrl: string
+  html: string
+  summary: string
+  uiSpecPath: string
+  assetCount: number
+  zipFileCount: number
 }
 
 type PrototypeVariantMode = 'create' | 'update' | 'rewrite'
@@ -308,6 +344,142 @@ function safeParseMapAdjustmentJson(text: string) {
   } catch {
     return { reply: stripJsonEcho(trimmed), operations: [] }
   }
+}
+
+function safeParseQaChatJson(text: string) {
+  const trimmed = text.trim()
+  const firstBrace = trimmed.indexOf('{')
+  const lastBrace = trimmed.lastIndexOf('}')
+  const candidate = firstBrace !== -1 && lastBrace > firstBrace ? trimmed.slice(firstBrace, lastBrace + 1) : trimmed
+  try {
+    return JSON.parse(candidate) as { reply?: string; readyToConfirm?: unknown; issuePatch?: unknown }
+  } catch {
+    return { reply: stripJsonEcho(trimmed), readyToConfirm: false, issuePatch: {} }
+  }
+}
+
+function normalizeQaTextArray(value: unknown) {
+  if (!Array.isArray(value)) return undefined
+  return value.map((item) => normalizeNullableString(item)).filter((item): item is string => Boolean(item))
+}
+
+function normalizeQaSeverity(value: unknown): QaIssueSeverity | undefined {
+  return value === 'blocker' || value === 'major' || value === 'minor' || value === 'trivial'
+    ? value
+    : undefined
+}
+
+function normalizeQaPriority(value: unknown): QaIssuePriority | undefined {
+  return value === 'high' || value === 'medium' || value === 'low' ? value : undefined
+}
+
+function normalizeQaConfidenceValue(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, Math.min(100, Math.round(value)))
+  if (typeof value === 'string') {
+    const parsed = Number.parseInt(value, 10)
+    if (Number.isFinite(parsed)) return Math.max(0, Math.min(100, parsed))
+  }
+  return undefined
+}
+
+function normalizeQaIssuePatch(value: unknown): QaIssuePatch {
+  const candidate = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  const patch: QaIssuePatch = {}
+  const title = normalizeNullableString(candidate.title)
+  const description = normalizeNullableString(candidate.description)
+  const expectedResult = normalizeNullableString(candidate.expectedResult ?? candidate.expected_result)
+  const actualResult = normalizeNullableString(candidate.actualResult ?? candidate.actual_result)
+  const environment = normalizeNullableString(candidate.environment)
+  const aiSummary = normalizeNullableString(candidate.aiSummary ?? candidate.ai_summary)
+  const suspectedCause = normalizeNullableString(candidate.suspectedCause ?? candidate.suspected_cause)
+  const devSuggestion = normalizeNullableString(candidate.devSuggestion ?? candidate.dev_suggestion)
+  const stepsToReproduce = normalizeQaTextArray(candidate.stepsToReproduce ?? candidate.steps_to_reproduce)
+  const aiQuestions = normalizeQaTextArray(candidate.aiQuestions ?? candidate.ai_questions)
+  const severity = normalizeQaSeverity(candidate.severity)
+  const priority = normalizeQaPriority(candidate.priority)
+  const aiConfidence = normalizeQaConfidenceValue(candidate.aiConfidence ?? candidate.ai_confidence)
+
+  if (title) patch.title = title
+  if (severity) patch.severity = severity
+  if (priority) patch.priority = priority
+  if (description) patch.description = description
+  if (stepsToReproduce) patch.stepsToReproduce = stepsToReproduce
+  if (expectedResult) patch.expectedResult = expectedResult
+  if (actualResult) patch.actualResult = actualResult
+  if (candidate.environment !== undefined) patch.environment = environment
+  if (aiSummary) patch.aiSummary = aiSummary
+  if (aiQuestions) patch.aiQuestions = aiQuestions
+  if (aiConfidence !== undefined) patch.aiConfidence = aiConfidence
+  if (candidate.suspectedCause !== undefined || candidate.suspected_cause !== undefined) patch.suspectedCause = suspectedCause
+  if (candidate.devSuggestion !== undefined || candidate.dev_suggestion !== undefined) patch.devSuggestion = devSuggestion
+  if (typeof candidate.readyToConfirm === 'boolean') patch.readyToConfirm = candidate.readyToConfirm
+  if (typeof candidate.ready_to_confirm === 'boolean') patch.readyToConfirm = candidate.ready_to_confirm
+  return patch
+}
+
+function qaAttachmentToImageBlock(attachment: QaAttachment): Anthropic.ImageBlockParam | null {
+  if (attachment.type !== 'image' || !attachment.dataUrl) return null
+  const match = /^data:(image\/(?:png|jpeg|gif|webp));base64,(.+)$/u.exec(attachment.dataUrl)
+  const mediaType = attachment.mediaType ?? match?.[1]
+  const data = match?.[2] ?? attachment.dataUrl
+  if (
+    mediaType !== 'image/png'
+    && mediaType !== 'image/jpeg'
+    && mediaType !== 'image/gif'
+    && mediaType !== 'image/webp'
+  ) {
+    return null
+  }
+  return {
+    type: 'image',
+    source: {
+      type: 'base64',
+      media_type: mediaType,
+      data,
+    },
+  }
+}
+
+function formatQaNodeRefs(issue: QaChatRequest['issue']) {
+  if (!issue.nodeRefs.length) return '未引用节点'
+  return issue.nodeRefs.map((ref, index) => [
+    `### 引用 ${index + 1}: ${ref.title}`,
+    `- 节点 ID: ${ref.nodeId}`,
+    `- 类型: ${ref.nodeType}`,
+    `- 导出路径: ${ref.docPath ?? '未指定'}`,
+    `- 摘要: ${ref.summary}`,
+    ref.snapshot.handoffGoal ? `- AI 接力目标: ${ref.snapshot.handoffGoal}` : null,
+    ref.snapshot.qualityGate ? `- 质量门槛: ${ref.snapshot.qualityGate}` : null,
+    ref.snapshot.techNotes ? `- 技术备注: ${ref.snapshot.techNotes}` : null,
+    `- 内容:\n${ref.content}`,
+  ].filter(Boolean).join('\n')).join('\n\n')
+}
+
+function formatQaAttachments(issue: QaChatRequest['issue']) {
+  if (!issue.attachments.length) return '未上传附件'
+  return issue.attachments.map((attachment, index) => {
+    if (attachment.type === 'image') {
+      return `${index + 1}. 图片：${attachment.name}（${attachment.mediaType ?? '未知类型'}）`
+    }
+    return `${index + 1}. ${attachment.name}\n${attachment.text ?? '无文本内容'}`
+  }).join('\n\n')
+}
+
+function formatQaIssueDraft(issue: QaChatRequest['issue']) {
+  return [
+    `标题: ${issue.title}`,
+    `状态: ${issue.status}`,
+    `严重程度: ${issue.severity}`,
+    `优先级: ${issue.priority}`,
+    `描述: ${issue.description || '未填写'}`,
+    `复现步骤:\n${issue.stepsToReproduce.length ? issue.stepsToReproduce.map((step, index) => `${index + 1}. ${step}`).join('\n') : '未填写'}`,
+    `预期结果: ${issue.expectedResult || '未填写'}`,
+    `实际结果: ${issue.actualResult || '未填写'}`,
+    `环境: ${issue.environment ?? '未填写'}`,
+    `AI 摘要: ${issue.aiSummary || '未生成'}`,
+    `疑似原因: ${issue.suspectedCause ?? '未判断'}`,
+    `给程序的建议: ${issue.devSuggestion ?? '未生成'}`,
+  ].join('\n')
 }
 
 function normalizeNullableString(value: unknown) {
@@ -701,6 +873,45 @@ async function queryCocosKnowledge(query: string) {
 
 // ── Decomposition Tool ──────────────────────────────────────────────────────
 
+const prdNodeSectionSchema = {
+  type: ['object', 'null'],
+  additionalProperties: false,
+  properties: {
+    title: { type: ['string', 'null'], maxLength: 40 },
+    summary: { type: ['string', 'null'], maxLength: 160 },
+    content: { type: ['string', 'null'], maxLength: 1200 },
+    evidenceRefs: {
+      type: ['array', 'null'],
+      maxItems: 5,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          sourceKind: { type: 'string', enum: ['prd', 'user', 'upload'] },
+          sourceLabel: { type: 'string', maxLength: 80 },
+          quote: { type: ['string', 'null'], maxLength: 180 },
+        },
+        required: ['sourceKind', 'sourceLabel'],
+      },
+    },
+    openQuestions: {
+      type: ['array', 'null'],
+      maxItems: 6,
+      items: { type: 'string', maxLength: 140 },
+    },
+  },
+}
+
+const prdNodeSectionsSchema = {
+  type: ['object', 'null'],
+  additionalProperties: false,
+  properties: {
+    data: prdNodeSectionSchema,
+    interaction: prdNodeSectionSchema,
+    view: prdNodeSectionSchema,
+  },
+}
+
 const decomposePrdTool: Anthropic.Tool = {
   name: 'decompose_prd',
   description: '将 PRD 文档拆解为 AI 可接力执行的多文件知识库树。每个叶子节点代表一篇可导出的 Markdown 文档包。',
@@ -729,7 +940,9 @@ const decomposePrdTool: Anthropic.Tool = {
             extractedFrom: { type: ['string', 'null'], maxLength: 120, description: '原文位置，例如标题名、章节号或行号范围。无法定位时为 null；若原文标题是中文应保持中文。' },
             techNotes: { type: ['string', 'null'], maxLength: 220, description: '面向开发的中文技术备注，可为空。' },
             docPath: { type: ['string', 'null'], maxLength: 120, description: 'MVC 子文档导出路径，例如 "pages/page-main/model.md"、"pages/page-main/ctrl.md"、"pages/page-main/view.md"。' },
-            audience: { type: ['string', 'null'], enum: ['overview', 'client', 'server', 'config', 'api', 'acceptance', 'appendix', 'mixed', 'model', 'ctrl', 'view', null], description: '该文档主要服务的下游角色/AI 上下文类型。MVC 必须按证据维度归类：model=数据/配置/状态/规则，ctrl=流程/接口/命令/校验/状态流转，view=布局/文案/动画/视觉反馈；禁止只按关键词判断。' },
+            audience: { type: ['string', 'null'], enum: ['overview', 'client', 'server', 'config', 'api', 'acceptance', 'appendix', 'mixed', 'model', 'ctrl', 'view', null], description: '下游消费角色。优先使用 client/server/config/api/acceptance 等角色；model/ctrl/view 仅用于兼容旧结果，新结果应写入 specLens。' },
+            specLens: { type: ['string', 'null'], enum: ['full', 'model', 'control', 'view', null], description: '该节点的规格视角：full=整页规格，model=数据/配置/规则，control=交互流程/校验/状态流转，view=布局/文案/动效/视觉反馈。' },
+            sections: prdNodeSectionsSchema,
             handoffGoal: { type: ['string', 'null'], maxLength: 220, description: '中文一句话说明后续 AI 拿到这篇文档应完成什么任务。目录节点可为 null。' },
             qualityGate: { type: ['string', 'null'], maxLength: 220, description: '中文说明该文档可交给 AI 前必须满足的检查点，例如字段完整、验收项可测试、职责边界清晰。' },
             sourceKind: { type: ['string', 'null'], enum: ['prd', 'user', 'upload', null], description: '证据来源；原始 PRD 拆分固定为 prd。' },
@@ -785,7 +998,9 @@ const decomposePrdTopLevelTool: Anthropic.Tool = {
             extractedFrom: { type: ['string', 'null'], maxLength: 80, description: '原文章节或标题位置。' },
             techNotes: { type: ['string', 'null'], maxLength: 120, description: '简短技术备注；无则为 null。' },
             docPath: { type: ['null'], description: '顶层目录固定为 null；可导出的 Markdown 路径只在后续分支展开阶段填写。' },
-            audience: { type: ['string', 'null'], enum: ['overview', 'client', 'server', 'config', 'api', 'acceptance', 'appendix', 'mixed', 'model', 'ctrl', 'view', null], description: '下游消费角色；MVC 必须按证据维度判断，不得关键词归类。' },
+            audience: { type: ['string', 'null'], enum: ['overview', 'client', 'server', 'config', 'api', 'acceptance', 'appendix', 'mixed', 'model', 'ctrl', 'view', null], description: '下游消费角色。优先使用 client/server/config/api/acceptance 等角色；MVC 视角写入 specLens。' },
+            specLens: { type: ['string', 'null'], enum: ['full', 'model', 'control', 'view', null], description: '该节点的规格视角；页面节点通常为 full。' },
+            sections: prdNodeSectionsSchema,
             handoffGoal: { type: ['string', 'null'], maxLength: 120, description: '一句话说明后续 AI 应如何展开该目录。' },
             qualityGate: { type: ['string', 'null'], maxLength: 120, description: '一句话说明该目录展开时的检查标准。' },
             sourceKind: { type: ['string', 'null'], enum: ['prd', 'user', 'upload', null], description: '证据来源；原始 PRD 拆分固定为 prd。' },
@@ -911,6 +1126,43 @@ function normalizeEvidenceRefs(value: unknown, fallbackSourceKind: PrdNodeSource
   })
 }
 
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .flatMap((item) => {
+      const text = normalizeTextValue(item)
+      return text ? [text] : []
+    })
+    .slice(0, 6)
+}
+
+function normalizeNodeSections(value: unknown, fallbackSourceKind: PrdNodeSourceKind, fallbackLabel: string): PrdNode['sections'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const source = value as Record<string, unknown>
+  const sections: PrdNode['sections'] = {}
+
+  for (const key of ['data', 'interaction', 'view'] as const) {
+    const raw = source[key]
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue
+    const candidate = raw as Record<string, unknown>
+    const title = normalizeTextValue(candidate.title ?? candidate.label)
+    const summary = normalizeTextValue(candidate.summary ?? candidate.description)
+    const content = normalizeTextValue(candidate.content ?? candidate.body ?? candidate.detail)
+    const evidenceRefs = normalizeEvidenceRefs(candidate.evidenceRefs ?? candidate.evidence_refs ?? candidate.sources, fallbackSourceKind, fallbackLabel)
+    const openQuestions = normalizeStringArray(candidate.openQuestions ?? candidate.open_questions ?? candidate.questions)
+    if (!title && !summary && !content && !evidenceRefs.length && !openQuestions.length) continue
+    sections[key] = {
+      title,
+      summary,
+      content,
+      evidenceRefs,
+      openQuestions,
+    }
+  }
+
+  return sections
+}
+
 function isTemplateDecompositionNode(node: PrdNode) {
   const text = [
     node.id,
@@ -965,7 +1217,9 @@ function normalizeDecompositionNodes(raw: unknown): PrdNode[] {
       const extractedFrom = normalizeTextValue(n.extractedFrom ?? n.extracted_from ?? n.source ?? n.sourceRange) ?? null
       const techNotes = normalizeTextValue(n.techNotes ?? n.tech_notes ?? n.notes) ?? null
       const docPath = normalizeTextValue(n.docPath ?? n.doc_path ?? n.path ?? n.filePath ?? n.file_path) ?? (type === 'page' ? `pages/${id}.md` : null)
-      const audience = normalizeAudience(n.audience ?? n.targetAudience ?? n.target_audience ?? n.role) ?? (type === 'page' ? 'client' : null)
+      const rawAudience = normalizeAudience(n.audience ?? n.targetAudience ?? n.target_audience ?? n.role)
+      const rawSpecLens = normalizeSpecLensValue(n.specLens ?? n.spec_lens ?? n.lens ?? n.mvc ?? n.mvcLens ?? n.mvc_lens) ?? specLensFromLegacyAudience(rawAudience)
+      const lensFields = normalizeNodeLensFields({ type, audience: rawAudience, specLens: rawSpecLens })
       const handoffGoal = normalizeTextValue(n.handoffGoal ?? n.handoff_goal ?? n.aiHandoff ?? n.ai_handoff) ?? null
       const qualityGate = normalizeTextValue(n.qualityGate ?? n.quality_gate ?? n.acceptanceGate ?? n.acceptance_gate) ?? null
       const references = normalizeNodeReferences(n.references ?? n.crossPageReferences ?? n.cross_page_references)
@@ -975,13 +1229,18 @@ function normalizeDecompositionNodes(raw: unknown): PrdNode[] {
         sourceKind,
         extractedFrom ?? 'PRD 原文',
       )
+      const sections = normalizeNodeSections(n.sections ?? n.sectionDrafts ?? n.section_drafts ?? n.lenses, sourceKind, extractedFrom ?? 'PRD 原文')
 
       return {
         id, parentId, label, summary, content, type,
         status,
         level, order, needsPolish, techNotes,
         extractedFrom,
-        docPath, audience, handoffGoal, qualityGate,
+        docPath,
+        audience: lensFields.audience,
+        specLens: lensFields.specLens,
+        sections,
+        handoffGoal, qualityGate,
         references,
         sourceKind,
         evidenceRefs,
@@ -1092,9 +1351,287 @@ function extractMarkdownHeadings(mdText: string): MarkdownHeading[] {
   })
 }
 
+function estimateTextTokens(text: string) {
+  return Math.max(1, Math.ceil(text.length / 2))
+}
+
+function compactExcerpt(text: string, maxLength = 180) {
+  const excerpt = text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^#+\s*/, '').trim())
+    .filter((line) => line && !/^\|?\s*[-:]{3,}/.test(line))
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return excerpt.length > maxLength ? `${excerpt.slice(0, maxLength)}...` : excerpt
+}
+
+function countPattern(text: string, pattern: RegExp) {
+  return text.match(pattern)?.length ?? 0
+}
+
+function countLinesMatching(text: string, pattern: RegExp) {
+  return text.split(/\r?\n/).filter((line) => pattern.test(line)).length
+}
+
+const keywordSignalDefinitions: Array<{ category: DocumentKeywordSignal['category']; label: string; pattern: RegExp }> = [
+  { category: 'pages', label: '页面/界面', pattern: /页面|界面|弹窗|面板|浮层|主界面|详情页|规则页|帮助页|排行榜|商城|背包|任务页|结算页/gu },
+  { category: 'states', label: '状态/反馈', pattern: /状态|空状态|加载|Loading|成功|失败|完成|未完成|可领取|已领取|倒计时|冷却|禁用|置灰/gu },
+  { category: 'rewards', label: '奖励/资源', pattern: /奖励|道具|金币|钻石|积分|经验|宝箱|货币|体力|奖池|领取/gu },
+  { category: 'navigation', label: '入口/跳转', pattern: /入口|跳转|返回|关闭|打开|进入|退出|导航|路由|引导/gu },
+  { category: 'apis', label: '接口/请求', pattern: /接口|API|endpoint|请求|响应|返回值|服务端|客户端|协议/giu },
+  { category: 'configs', label: '配置/参数', pattern: /配置|参数|开关|阈值|概率|权重|字段|枚举|表格|数值/gu },
+]
+
+function buildSectionSignals(text: string) {
+  return keywordSignalDefinitions
+    .filter((definition) => countPattern(text, definition.pattern) > 0)
+    .map((definition) => definition.label)
+}
+
+function buildKeywordSignals(mdText: string): DocumentKeywordSignal[] {
+  return keywordSignalDefinitions
+    .map((definition) => ({
+      category: definition.category,
+      label: definition.label,
+      matches: countPattern(mdText, definition.pattern),
+    }))
+    .filter((signal) => signal.matches > 0)
+    .sort((a, b) => b.matches - a.matches || a.label.localeCompare(b.label))
+}
+
+function markdownHeadingTitlePath(heading: MarkdownHeading, headingMap: Map<string, MarkdownHeading>) {
+  const titles: string[] = []
+  let current: MarkdownHeading | undefined = heading
+  while (current) {
+    titles.unshift(current.title)
+    current = current.parentId ? headingMap.get(current.parentId) : undefined
+  }
+  return titles.join(' / ')
+}
+
+function makeDocumentSourceSection(
+  id: string,
+  title: string,
+  titlePath: string,
+  level: number,
+  startLine: number,
+  endLine: number,
+  text: string,
+): DocumentSourceSection {
+  const normalizedText = text.trim()
+  return {
+    id,
+    title,
+    titlePath,
+    level,
+    startLine,
+    endLine,
+    charCount: normalizedText.length,
+    estimatedTokens: estimateTextTokens(normalizedText),
+    excerpt: compactExcerpt(normalizedText),
+    signals: buildSectionSignals(`${title}\n${titlePath}\n${normalizedText}`),
+  }
+}
+
+function buildDocumentSourceSections(mdText: string) {
+  const lines = mdText.split(/\r?\n/)
+  const headings = extractMarkdownHeadings(mdText)
+
+  if (!headings.length) {
+    return splitLongSectionLines(lines, 1, LARGE_PRD_SLICE_TARGET_LENGTH).map((slice, index) =>
+      makeDocumentSourceSection(
+        `SRC-${String(index + 1).padStart(3, '0')}`,
+        `全文片段 ${index + 1}`,
+        `全文片段 ${index + 1}`,
+        1,
+        slice.startLine,
+        slice.endLine,
+        slice.text,
+      )
+    )
+  }
+
+  const headingMap = new Map(headings.map((heading) => [heading.id, heading]))
+  return headings
+    .map((heading, index) => {
+      const nextHeading = headings[index + 1]
+      const endLine = nextHeading ? nextHeading.line - 1 : lines.length
+      return makeDocumentSourceSection(
+        `SRC-${String(index + 1).padStart(3, '0')}`,
+        heading.title,
+        markdownHeadingTitlePath(heading, headingMap),
+        heading.level,
+        heading.line,
+        endLine,
+        lines.slice(heading.line - 1, endLine).join('\n'),
+      )
+    })
+    .filter((section) => section.charCount > 0)
+}
+
+function buildDocumentSourceIssues(mdText: string, sections: DocumentSourceSection[], headingCount: number): DocumentSourceIssue[] {
+  const issues: DocumentSourceIssue[] = []
+  const imageRefs = countPattern(mdText, /!\[[^\]]*\]\([^)]+\)|\.(png|jpe?g|webp|gif)\b/giu)
+  const tableLines = countLinesMatching(mdText, /^\s*\|.+\|\s*$/)
+  const largest = sections.reduce<DocumentSourceSection | null>(
+    (current, section) => (!current || section.charCount > current.charCount ? section : current),
+    null,
+  )
+
+  if (!headingCount) {
+    issues.push({
+      id: 'no-markdown-headings',
+      severity: 'warning',
+      title: '缺少 Markdown 标题',
+      detail: '系统会按长度切片建立索引，页面边界更依赖正文线索，建议确认结构预览后再拆解。',
+      sectionId: null,
+    })
+  }
+
+  if (mdText.length >= LARGE_PRD_DECOMPOSE_THRESHOLD) {
+    issues.push({
+      id: 'large-document',
+      severity: 'info',
+      title: '大 PRD 分段分析',
+      detail: `文档超过 ${Math.round(LARGE_PRD_DECOMPOSE_THRESHOLD / 1024)}KB，正式拆解会分段识别页面线索后归并。`,
+      sectionId: null,
+    })
+  }
+
+  if (largest && largest.charCount > LARGE_PRD_SLICE_TARGET_LENGTH) {
+    issues.push({
+      id: 'large-section',
+      severity: 'warning',
+      title: '存在超长章节',
+      detail: `「${largest.titlePath}」约 ${largest.charCount} 字符，后续会切成多个片段，建议检查该章节是否包含多个页面。`,
+      sectionId: largest.id,
+    })
+  }
+
+  if (headingCount > 120) {
+    issues.push({
+      id: 'many-headings',
+      severity: 'info',
+      title: '标题数量较多',
+      detail: `检测到 ${headingCount} 个标题，预览只展示关键线索，正式导图仍会以页面/弹窗为单位归并。`,
+      sectionId: null,
+    })
+  }
+
+  if (tableLines > 12) {
+    issues.push({
+      id: 'table-heavy',
+      severity: 'info',
+      title: '表格内容较多',
+      detail: `检测到约 ${tableLines} 行表格，字段/配置更可能进入 model 子节点而不是页面节点。`,
+      sectionId: null,
+    })
+  }
+
+  if (imageRefs > 0) {
+    issues.push({
+      id: 'image-references',
+      severity: 'warning',
+      title: '包含图片引用',
+      detail: `检测到 ${imageRefs} 处图片引用。当前导入只读取 Markdown 文本，图片细节需要后续在 Deep Forge 中补充。`,
+      sectionId: null,
+    })
+  }
+
+  if (mdText.trim().length < 500) {
+    issues.push({
+      id: 'short-document',
+      severity: 'warning',
+      title: '文档内容较短',
+      detail: '可读文本较少，AI 可能只能生成少量页面节点，建议确认 PRD 是否完整。',
+      sectionId: null,
+    })
+  }
+
+  return issues
+}
+
+function buildDocumentSourceIndex(mdText: string): DocumentSourceIndex {
+  const lines = mdText.split(/\r?\n/)
+  const headings = extractMarkdownHeadings(mdText)
+  const sections = buildDocumentSourceSections(mdText)
+  const largestSectionChars = sections.reduce((max, section) => Math.max(max, section.charCount), 0)
+
+  return {
+    sourceLabel: '上传 PRD',
+    totalLines: lines.length,
+    totalChars: mdText.length,
+    estimatedTokens: estimateTextTokens(mdText),
+    headingCount: headings.length,
+    sectionCount: sections.length,
+    largestSectionChars,
+    sections,
+    keywordSignals: buildKeywordSignals(mdText),
+    issues: buildDocumentSourceIssues(mdText, sections, headings.length),
+  }
+}
+
+const candidatePageTitlePattern = /页面|界面|弹窗|面板|浮层|主界面|详情页|规则页|帮助页|排行榜|商城|背包|任务页|结算页|活动页|入口/iu
+const candidateContentPattern = /入口|跳转|打开|关闭|展示|按钮|列表|弹窗|页面|界面|空状态|倒计时|领取|返回|结算/giu
+
+function candidateKey(title: string) {
+  return title.replace(/[\s《》「」【】\[\]（）()：:，,。.!！?？\-_/\\]/g, '').toLowerCase()
+}
+
+function buildCandidateNodesFromIndex(sourceIndex: DocumentSourceIndex): PrdImportCandidateNode[] {
+  const candidates = new Map<string, PrdImportCandidateNode>()
+
+  for (const section of sourceIndex.sections) {
+    const text = `${section.title}\n${section.titlePath}\n${section.excerpt}`
+    const titleHit = candidatePageTitlePattern.test(section.title) || candidatePageTitlePattern.test(section.titlePath)
+    const contentHits = countPattern(text, candidateContentPattern)
+    const hasPageSignal = section.signals.includes('页面/界面')
+    if (!titleHit && !hasPageSignal && contentHits < 2) continue
+
+    const title = compactMarkdownTitle(section.title).slice(0, 24) || `页面线索 ${candidates.size + 1}`
+    const key = candidateKey(title)
+    if (!key || candidates.has(key)) continue
+
+    const confidence = Math.min(95, 48 + (titleHit ? 24 : 0) + (hasPageSignal ? 16 : 0) + Math.min(contentHits * 4, 16))
+    const reasonParts = [
+      titleHit ? '标题包含页面/界面线索' : null,
+      hasPageSignal ? '正文出现页面级信号' : null,
+      contentHits > 0 ? `命中 ${contentHits} 个交互词` : null,
+    ].filter(Boolean)
+
+    candidates.set(key, {
+      title,
+      sectionId: section.id,
+      sourceLabel: `${section.titlePath}（第 ${section.startLine}-${section.endLine} 行）`,
+      reason: reasonParts.join('；') || '正文出现交互结构线索',
+      confidence,
+      excerpt: section.excerpt,
+    })
+  }
+
+  return [...candidates.values()]
+    .sort((a, b) => b.confidence - a.confidence || a.title.localeCompare(b.title))
+    .slice(0, 12)
+}
+
+function buildPrdImportPreview(mdText: string): PrdImportPreview {
+  const sourceIndex = buildDocumentSourceIndex(mdText)
+  return {
+    sourceIndex,
+    candidateNodes: buildCandidateNodesFromIndex(sourceIndex),
+  }
+}
+
 function buildSourceOutlineForPrompt(mdText: string) {
   const headings = extractMarkdownHeadings(mdText)
-  if (!headings.length) return '原文没有明显 Markdown 标题。请直接通读全文后按方法论拆分，不要创建“标题骨架”兜底节点。'
+  if (!headings.length) {
+    const sourceIndex = buildDocumentSourceIndex(mdText)
+    const sections = sourceIndex.sections.slice(0, 20).map((section) => (
+      `- ${section.id}：第 ${section.startLine}-${section.endLine} 行，约 ${section.charCount} 字符`
+    ))
+    return `原文没有明显 Markdown 标题，已按长度建立 ${sourceIndex.sectionCount} 个索引片段。请直接通读相关片段后按方法论拆分，不要创建“标题骨架”兜底节点。\n${sections.join('\n')}`
+  }
 
   const lines = headings.slice(0, 80).map((heading) => {
     const indent = '  '.repeat(Math.max(0, heading.level - 1))
@@ -1104,18 +1641,26 @@ function buildSourceOutlineForPrompt(mdText: string) {
   return `${lines.join('\n')}${omitted}`
 }
 
-function buildSourceOutlineRootNode(mdText: string): PrdNode {
+function buildSourceOutlineRootNode(mdText: string, sourceIndex = buildDocumentSourceIndex(mdText)): PrdNode {
   const headings = extractMarkdownHeadings(mdText)
   const content = headings.length
     ? headings.map((heading) => `${'  '.repeat(Math.max(0, heading.level - 1))}- 第 ${heading.line} 行：${heading.title}`).join('\n')
     : '原文没有明显 Markdown 标题。后续页面节点仍必须由 AI 根据原文内容识别，不能使用本地标题生成假节点。'
+  const issueSummary = sourceIndex.issues.length
+    ? sourceIndex.issues.map((issue) => `- ${issue.title}：${issue.detail}`).join('\n')
+    : '- 未发现明显导入风险。'
+  const signalSummary = sourceIndex.keywordSignals.length
+    ? sourceIndex.keywordSignals.slice(0, 8).map((signal) => `- ${signal.label}：${signal.matches} 次`).join('\n')
+    : '- 未命中明显主题信号。'
 
   return {
     id: SOURCE_OUTLINE_ROOT_ID,
     parentId: null,
     label: 'PRD 原文目录',
-    summary: headings.length ? `原文包含 ${headings.length} 个 Markdown 标题，页面节点均应回溯到这些原文位置。` : '原文没有明显 Markdown 标题，页面节点需直接依据正文内容生成。',
-    content: `## 原文目录\n\n${content}`,
+    summary: headings.length
+      ? `原文包含 ${headings.length} 个 Markdown 标题、${sourceIndex.sectionCount} 个索引片段，页面节点均应回溯到这些原文位置。`
+      : `原文没有明显 Markdown 标题，已建立 ${sourceIndex.sectionCount} 个索引片段供页面节点回溯。`,
+    content: `## 原文目录\n\n${content}\n\n## 导入索引\n\n- 总行数：${sourceIndex.totalLines}\n- 估算 token：${sourceIndex.estimatedTokens}\n- 索引片段：${sourceIndex.sectionCount}\n- 最大片段：${sourceIndex.largestSectionChars} 字符\n\n## 主题信号\n\n${signalSummary}\n\n## 导入风险\n\n${issueSummary}`,
     type: 'module',
     status: 'pending',
     level: 0,
@@ -1405,6 +1950,22 @@ function appendBranchErrorNote(session: DecompositionSession, pageNode: PrdNode,
   }])
 }
 
+function buildPageSectionsFromLensNodes(nodes: PrdNode[]): PrdNode['sections'] {
+  const sections: PrdNode['sections'] = {}
+  for (const node of nodes) {
+    const key = normalizeSectionKeyForLens(resolveNodeSpecLens(node))
+    if (!key) continue
+    sections[key] = {
+      title: node.label,
+      summary: node.summary,
+      content: node.content,
+      evidenceRefs: node.evidenceRefs ?? [],
+      openQuestions: [],
+    }
+  }
+  return sections
+}
+
 async function runWithConcurrency<T>(items: T[], limit: number, task: (item: T) => Promise<void>) {
   let nextIndex = 0
   const workerCount = Math.min(limit, items.length)
@@ -1584,26 +2145,40 @@ async function decomposeBranch(mdText: string, parentNode: PrdNode, session: Dec
 
     const raw = (toolUse.input as { nodes?: unknown }).nodes ?? toolUse.input
     const pageSegment = pageDocPathSegment(parentNode)
+    const lensNodes = normalizeDecompositionNodes(raw)
+      .filter((node) => ['model', 'control', 'view'].includes(resolveNodeSpecLens(node)))
+      .map((node, index): PrdNode => {
+        const lens = resolveNodeSpecLens(node)
+        const pathSegment = lens === 'control' ? 'ctrl' : lens
+        return {
+          ...node,
+          id: `${parentNode.id}-${pathSegment.toUpperCase()}`,
+          parentId: parentNode.id,
+          type: lens === 'view' ? 'ui' : 'feature',
+          status: 'pending_refine',
+          level: 2,
+          order: index,
+          needsPolish: true,
+          docPath: `pages/${pageSegment}/${pathSegment}.md`,
+          audience: normalizeLegacyAudience(node.audience) ?? defaultAudienceForSpecLens(lens),
+          specLens: lens,
+          sourceKind: 'prd',
+          children: [],
+        }
+      })
+    const sections = buildPageSectionsFromLensNodes(lensNodes)
+    const pageUpdate = Object.keys(sections ?? {}).length
+      ? normalizeNodeLensFields({
+          ...parentNode,
+          sections: {
+            ...(parentNode.sections ?? {}),
+            ...sections,
+          },
+          specLens: 'full',
+        })
+      : null
     return {
-      nodes: normalizeDecompositionNodes(raw)
-        .filter((node) => ['model', 'ctrl', 'view'].includes(node.audience ?? ''))
-        .map((node, index): PrdNode => {
-          const kind = node.audience === 'model' || node.audience === 'ctrl' || node.audience === 'view' ? node.audience : 'view'
-          return {
-            ...node,
-            id: `${parentNode.id}-${kind.toUpperCase()}`,
-            parentId: parentNode.id,
-            type: kind === 'view' ? 'ui' : 'feature',
-            status: 'pending_refine',
-            level: 2,
-            order: index,
-            needsPolish: true,
-            docPath: `pages/${pageSegment}/${kind}.md`,
-            audience: kind,
-            sourceKind: 'prd',
-            children: [],
-          }
-        }),
+      nodes: pageUpdate ? [pageUpdate, ...lensNodes] : lensNodes,
       stopReason: response.stop_reason,
     }
   }
@@ -1655,9 +2230,10 @@ async function runDecompositionJob(sessionId: string, mdText: string): Promise<v
   if (!session) return
   const activeSession = session
 
-  activeSession.currentStep = '正在通读原文并建立结构'
+  activeSession.currentStep = '正在建立原文索引'
   activeSession.nodes = []
-  const sourceOutlineRoot = buildSourceOutlineRootNode(mdText)
+  const sourceIndex = buildDocumentSourceIndex(mdText)
+  const sourceOutlineRoot = buildSourceOutlineRootNode(mdText, sourceIndex)
   mergeSessionNodes(activeSession, [sourceOutlineRoot])
 
   const pageNodes = await decomposeL1(mdText, activeSession)
@@ -1723,6 +2299,15 @@ app.get('/api/health', (_req, res) => {
   })
 })
 
+app.post('/api/decompose/preview', (req, res) => {
+  const { mdText } = req.body as { mdText?: string }
+  if (!mdText?.trim()) {
+    return void res.status(400).json({ error: '缺少 PRD 文档内容' })
+  }
+
+  res.json(buildPrdImportPreview(mdText))
+})
+
 app.post('/api/decompose/start', (req, res) => {
   const { mdText } = req.body as { mdText?: string }
   if (!mdText?.trim()) {
@@ -1736,7 +2321,7 @@ app.post('/api/decompose/start', (req, res) => {
   decompositionSessions.set(sessionId, {
     status: 'running',
     nodes: [],
-    currentStep: '正在通读原文并建立结构',
+    currentStep: '正在建立原文索引',
   })
 
   // Fire-and-forget: do NOT await. Frontend polls for status.
@@ -1835,13 +2420,13 @@ app.post('/api/map-adjust', async (req, res) => {
   }
 
   const treeSummary = Object.values(tree)
-    .map((node) => `- ${node.id}｜${node.label}｜${node.status}｜${node.summary}`)
+    .map((node) => `- ${node.id}｜${node.label}｜${node.status}｜lens=${resolveNodeSpecLens(node)}｜audience=${resolveNodeAudience(node) ?? '未定'}｜${node.summary}`)
     .join('\n')
 
   const response = await anthropic.messages.create({
     model,
     max_tokens: 2048,
-    system: `你是 GameUX PromptForge 的页面级导图调整助手。\n只给出建议，不直接修改导图。\n必须返回 JSON：{"reply":"中文说明","operations":[]}。\noperations 只能包含 create_node/delete_node/update_node/move_content/add_reference。\n新增页面默认 status 为 pending_refine；不要拆按钮/字段级节点；跨页面关系用 add_reference。`,
+    system: `你是 GameUX PromptForge 的页面级导图调整助手。\n只给出建议，不直接修改导图。\n必须返回 JSON：{"reply":"中文说明","operations":[]}。\noperations 只能包含 create_node/delete_node/update_node/move_content/add_reference。\n新增页面默认 status 为 pending_refine；不要拆按钮/字段级节点；跨页面关系用 add_reference。MVC 视角必须写入 specLens；audience 只表示下游角色。`,
     messages: [
       { role: 'user', content: `当前导图：\n${treeSummary}\n\n用户对话：\n${messages.map((message) => `${message.role}: ${extractText(message.content)}`).join('\n')}` },
     ],
@@ -1851,6 +2436,97 @@ app.post('/api/map-adjust', async (req, res) => {
     reply: parsed.reply ?? '我没有找到可安全应用的调整建议。',
     operations: normalizeMapAdjustmentOperations(parsed.operations, tree),
   })
+})
+
+app.post('/api/qa/chat', async (req, res) => {
+  const { issue, messages, tree } = req.body as QaChatRequest
+  if (!issue || !messages?.length || !tree) {
+    res.status(400).json({ error: '缺少 QA 缺陷草稿、对话消息或导图树数据' })
+    return
+  }
+  if (!anthropic) {
+    res.status(400).json({ error: '未配置 ANTHROPIC_API_KEY。' })
+    return
+  }
+
+  const treeSummary = Object.values(tree)
+    .slice(0, 120)
+    .map((node) => `- ${node.id}｜parent=${node.parentId ?? 'ROOT'}｜${node.type}｜${node.label}｜${node.summary}`)
+    .join('\n')
+  const imageBlocks = issue.attachments
+    .map(qaAttachmentToImageBlock)
+    .filter((block): block is Anthropic.ImageBlockParam => Boolean(block))
+
+  const qaPrompt = `当前 PRD 导图摘要：
+${treeSummary || '无导图节点'}
+
+当前缺陷草稿：
+${formatQaIssueDraft(issue)}
+
+引用节点快照：
+${formatQaNodeRefs(issue)}
+
+上传附件：
+${formatQaAttachments(issue)}
+
+QA 对话记录：
+${messages.map((message) => `${message.role}: ${extractText(message.content)}`).join('\n\n')}
+
+请根据以上上下文继续和 QA 同学确认缺陷，并更新结构化缺陷单。`
+
+  const response = await anthropic.messages.create({
+    model,
+    max_tokens: 2048,
+    system: `你是 GameUX PromptForge 的 QA 缺陷确认助手。
+你的目标是通过对话把 QA 的零散描述和引用界面节点整理为可以直接推送给程序同学处理的缺陷单。
+
+规则：
+- 只用中文回复。
+- 先判断是否还缺关键证据；如果缺，只问一个最关键的问题，readyToConfirm 必须为 false。
+- 只有当问题现象、复现路径、预期结果、实际结果和关联界面节点都足够清楚时，才把 readyToConfirm 设为 true。
+- 如果信息足够，给出可确认的缺陷单摘要；前端会自动把它加入左侧 bug 列表。
+- 必须返回严格 JSON，不要 Markdown 代码块，不要在 JSON 外输出文字。
+- JSON 格式：
+{
+  "reply": "给 QA 看的中文回复，最多 8 行",
+  "readyToConfirm": false,
+  "issuePatch": {
+    "title": "缺陷标题",
+    "severity": "blocker|major|minor|trivial",
+    "priority": "high|medium|low",
+    "description": "缺陷描述",
+    "stepsToReproduce": ["步骤一"],
+    "expectedResult": "预期结果",
+    "actualResult": "实际结果",
+    "environment": "测试环境或 null",
+    "aiSummary": "AI 整理摘要",
+    "aiQuestions": ["仍需确认的问题"],
+    "aiConfidence": 0,
+    "suspectedCause": "疑似原因或 null",
+    "devSuggestion": "给程序同学的处理建议或 null",
+    "readyToConfirm": false
+  }
+}
+- severity 默认 major；priority 默认 medium；aiConfidence 用 0-100。
+- devSuggestion 要结合引用节点说明可能影响的界面、交互、数据或服务端边界。`,
+    messages: [
+      { role: 'user', content: buildContentWithImages(qaPrompt, imageBlocks) },
+    ],
+  })
+
+  const parsed = safeParseQaChatJson(textFromClaudeContent(response.content))
+  const issuePatch = normalizeQaIssuePatch(parsed.issuePatch)
+  const readyToConfirm = typeof parsed.readyToConfirm === 'boolean'
+    ? parsed.readyToConfirm
+    : issuePatch.readyToConfirm ?? false
+  res.json({
+    reply: parsed.reply ?? '我已经更新了缺陷草稿，请继续补充复现信息。',
+    issuePatch: {
+      ...issuePatch,
+      readyToConfirm,
+    },
+    readyToConfirm,
+  } satisfies QaChatResponse)
 })
 
 function normalizeMapAdjustmentOperations(value: unknown, tree: Record<string, PrdNode>): MapAdjustmentOperation[] {
@@ -1880,6 +2556,8 @@ function normalizeMapAdjustmentOperations(value: unknown, tree: Record<string, P
         const nodeId = normalizeTextValue(candidate.nodeId ?? candidate.node_id)
         const rawPatch = candidate.patch && typeof candidate.patch === 'object' ? candidate.patch as Record<string, unknown> : candidate
         if (!nodeId || !tree[nodeId]) return null
+        const rawAudience = normalizeAudience(rawPatch.audience)
+        const specLens = normalizeSpecLensValue(rawPatch.specLens ?? rawPatch.spec_lens ?? rawPatch.lens ?? rawPatch.mvc ?? rawPatch.mvcLens ?? rawPatch.mvc_lens) ?? specLensFromLegacyAudience(rawAudience)
         return {
           type,
           nodeId,
@@ -1893,8 +2571,13 @@ function normalizeMapAdjustmentOperations(value: unknown, tree: Record<string, P
             qualityGate: normalizeTextValue(rawPatch.qualityGate ?? rawPatch.quality_gate) ?? undefined,
             status: normalizeNodeStatus(rawPatch.status, tree[nodeId].status),
             type: normalizeNodeType(rawPatch.nodeType ?? rawPatch.type),
-            audience: normalizeAudience(rawPatch.audience),
+            audience: normalizeLegacyAudience(rawAudience) ?? defaultAudienceForSpecLens(specLens),
+            specLens: specLens ?? undefined,
+            sections: normalizeNodeSections(rawPatch.sections ?? rawPatch.sectionDrafts ?? rawPatch.section_drafts ?? rawPatch.lenses, 'user', 'map-adjustment'),
             references: normalizeNodeReferences(rawPatch.references),
+            performanceSpec: rawPatch.performanceSpec === undefined && rawPatch.performance_spec === undefined
+              ? undefined
+              : normalizePerformanceSpec(rawPatch.performanceSpec ?? rawPatch.performance_spec),
           },
         }
       }
@@ -1942,6 +2625,9 @@ function normalizeConfidence(value: unknown) {
 function normalizeOperationPatch(value: unknown, fallbackSourceKind: PrdNodeSourceKind): PrdNodeOperationPatch {
   const candidate = value && typeof value === 'object' ? value as Record<string, unknown> : {}
   const sourceKind = normalizeSourceKind(candidate.sourceKind ?? candidate.source_kind, fallbackSourceKind)
+  const rawAudience = normalizeAudience(candidate.audience)
+  const specLens = normalizeSpecLensValue(candidate.specLens ?? candidate.spec_lens ?? candidate.lens ?? candidate.mvc ?? candidate.mvcLens ?? candidate.mvc_lens) ?? specLensFromLegacyAudience(rawAudience)
+  const audience = normalizeLegacyAudience(rawAudience) ?? defaultAudienceForSpecLens(specLens) ?? undefined
   const patch: PrdNodeOperationPatch = {
     label: normalizeTextValue(candidate.label ?? candidate.title) ?? undefined,
     summary: normalizeTextValue(candidate.summary) ?? undefined,
@@ -1949,12 +2635,17 @@ function normalizeOperationPatch(value: unknown, fallbackSourceKind: PrdNodeSour
     type: candidate.type === undefined && candidate.nodeType === undefined ? undefined : normalizeNodeType(candidate.type ?? candidate.nodeType),
     needsPolish: candidate.needsPolish === undefined && candidate.needs_polish === undefined ? undefined : normalizeBooleanValue(candidate.needsPolish ?? candidate.needs_polish, true),
     docPath: normalizeTextValue(candidate.docPath ?? candidate.doc_path) ?? undefined,
-    audience: normalizeAudience(candidate.audience) ?? undefined,
+    audience,
+    specLens: specLens ?? undefined,
+    sections: normalizeNodeSections(candidate.sections ?? candidate.sectionDrafts ?? candidate.section_drafts ?? candidate.lenses, sourceKind, sourceKind === 'upload' ? 'upload' : 'user'),
     handoffGoal: normalizeTextValue(candidate.handoffGoal ?? candidate.handoff_goal) ?? undefined,
     qualityGate: normalizeTextValue(candidate.qualityGate ?? candidate.quality_gate) ?? undefined,
     techNotes: normalizeTextValue(candidate.techNotes ?? candidate.tech_notes) ?? undefined,
     sourceKind,
     evidenceRefs: normalizeEvidenceRefs(candidate.evidenceRefs ?? candidate.evidence_refs ?? candidate.sources, sourceKind, sourceKind === 'upload' ? '上传资料' : '用户补充'),
+    performanceSpec: candidate.performanceSpec === undefined && candidate.performance_spec === undefined
+      ? undefined
+      : normalizePerformanceSpec(candidate.performanceSpec ?? candidate.performance_spec),
   }
   return Object.fromEntries(Object.entries(patch).filter(([, item]) => item !== undefined)) as PrdNodeOperationPatch
 }
@@ -2021,22 +2712,25 @@ app.post('/api/prd-node-suggestions', async (req, res) => {
 
   const selectedNode = tree[selectedNodeId]
   const treeSummary = Object.values(tree)
-    .map((node) => `- ${node.id}｜parent=${node.parentId ?? 'ROOT'}｜${node.label}｜audience=${node.audience ?? '未定'}｜${node.summary}`)
+    .map((node) => `- ${node.id}｜parent=${node.parentId ?? 'ROOT'}｜lens=${resolveNodeSpecLens(node)}｜audience=${resolveNodeAudience(node) ?? '未定'}｜${node.label}｜${node.summary}`)
     .join('\n')
   const sourceText = [
     userText ? `## 用户补充\n${userText}` : null,
     ...normalizedSources.map((source) => `## ${source.sourceKind === 'upload' ? '上传资料' : '用户补充'}：${source.name}\n${source.text}`),
   ].filter(Boolean).join('\n\n')
+  const suggestionSystemPrompt = [
+    '你是 GameUX PromptForge 的导图节点补齐助手。你只能生成待用户确认的 create/update 建议，不能声称已经修改导图。',
+    '必须返回 JSON：{"reply":"中文说明","suggestions":[]}。suggestions 最多 5 条，每条包含 id、operation(create/update)、targetNodeId、parentId、patch、rationale、confidence、evidenceRefs。',
+    'MVC 分类必须按证据维度：model=领域事实/数据/配置/状态/规则；control=流程编排/API/命令/校验/请求响应/状态流转；view=UI 布局/文案/动画/视觉反馈。禁止因为关键词出现就归类。',
+    '新增或更新 MVC 视角时，patch.specLens 必须使用 model/control/view；patch.audience 只表示下游角色，优先使用 client/server/config/api/acceptance/mixed，不要再用 audience 承载 MVC。',
+    '如果建议只来自用户补充或上传资料，patch.sourceKind 和 evidenceRefs.sourceKind 必须用 user 或 upload，不得写成 prd。只有能从现有节点 content/extractedFrom 明确引用原 PRD 时才能标 prd。',
+    '新增 MVC 子节点应挂在当前页面或用户指定页面下，label 使用中文标题并包含 Model/Control/View；如果只是补齐页面章节，可以写入 patch.sections.data、patch.sections.interaction 或 patch.sections.view。',
+  ].join('\n')
 
   const response = await anthropic.messages.create({
     model,
     max_tokens: 3000,
-    system: `你是 GameUX PromptForge 的导图节点补齐助手。你只能生成待用户确认的 create/update 建议，绝不能声称已经修改导图。
-返回 JSON：{"reply":"中文说明","suggestions":[]}。
-suggestions 最多 5 条，每条包含 id、operation(create/update)、targetNodeId、parentId、patch、rationale、confidence、evidenceRefs。
-MVC 分类必须按证据维度：model=领域事实/数据/配置/状态/规则；ctrl=流程编排/API/命令/校验/请求响应/状态流转；view=UI 布局/文案/动画/视觉反馈。禁止因为关键词出现就归类。
-如果建议只来自用户补充或上传资料，patch.sourceKind 和 evidenceRefs.sourceKind 必须用 user 或 upload，不得写成 prd。只有能从现有节点 content/extractedFrom 明确引用原 PRD 时才能标 prd。
-新增 MVC 子节点应挂在当前页面或用户指定页面下，label 使用中文标题并包含 Model/Ctrl/View，audience 使用 model/ctrl/view。`,
+    system: suggestionSystemPrompt,
     messages: [{
       role: 'user',
       content: `当前选中节点：${selectedNode.id}｜${selectedNode.label}\n\n当前导图：\n${treeSummary}\n\n补充资料：\n${sourceText}`,
@@ -2049,6 +2743,40 @@ MVC 分类必须按证据维度：model=领域事实/数据/配置/状态/规则
     reply: parsed.reply ?? (suggestions.length ? '已生成待确认的节点调整建议。' : '没有找到可安全生成的节点建议。'),
     suggestions,
   })
+})
+
+app.post('/api/figma/frame', async (req, res) => {
+  try {
+    const assetBaseUrl = `${req.protocol}://${req.get('host') ?? `127.0.0.1:${port}`}`
+    const result = await importFigmaFrame(req.body as FigmaFrameRequest, assetBaseUrl)
+    res.json(result)
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : '导入 Figma Frame 失败。' })
+  }
+})
+
+app.get(/^\/api\/figma\/assets\/([^/]+)\/(.+)$/u, (req, res) => {
+  const params = req.params as unknown as { 0?: string; 1?: string }
+  const bundleId = params[0]
+  const rawAssetPath = params[1]
+  if (!bundleId || !rawAssetPath) {
+    res.status(400).json({ error: '缺少 Figma 资源路径。' })
+    return
+  }
+  const bundle = figmaAssetBundles.get(bundleId)
+  if (!bundle) {
+    res.status(404).json({ error: 'Figma 资源已过期，请重新导入。' })
+    return
+  }
+  const assetPath = normalizeZipPath(decodeURIComponent(rawAssetPath))
+  const bytes = findZipFile(bundle.files, bundle.lookup, assetPath)
+  if (!bytes) {
+    res.status(404).json({ error: '未找到 Figma 资源。' })
+    return
+  }
+  res.setHeader('Content-Type', mimeTypeForPath(assetPath))
+  res.setHeader('Cache-Control', 'private, max-age=1800')
+  res.end(Buffer.from(bytes))
 })
 
 const REFERENCE_IMAGE_ROLES = [
@@ -2185,6 +2913,8 @@ app.post('/api/node-chat', async (req, res) => {
     ? `\n\n页面下属 MVC 子节点上下文：\n${mvcChildren.map((child) => [
         `- 编号: ${child.id}`,
         `  类型: ${formatNodeType(child.type)}`,
+        `  规格视角: ${formatSpecLens(resolveNodeSpecLens(child))}`,
+        `  面向角色: ${formatAudience(resolveNodeAudience(child))}`,
         `  标题: ${child.label}`,
         `  摘要: ${child.summary}`,
         `  导出路径: ${child.docPath ?? '未指定'}`,
@@ -2192,6 +2922,11 @@ app.post('/api/node-chat', async (req, res) => {
         child.techNotes ? `  技术备注: ${child.techNotes}` : null,
       ].filter(Boolean).join('\n')).join('\n\n')}`
     : ''
+  const pageSectionContext = hasNodeSections(targetNode.sections)
+    ? `\n\n${formatNodeSectionsForContext(targetNode.sections)}`
+    : ''
+  const performanceSpec = resolveNodePerformanceSpec(targetNode)
+  const performanceContext = `\n\n表现编排扫描：\n${formatPerformanceSpecForPrompt(performanceSpec)}`
 
   const nodeContext = `目标节点：
 编号: ${targetNode.id}
@@ -2199,12 +2934,22 @@ app.post('/api/node-chat', async (req, res) => {
 标题: ${targetNode.label}
 摘要: ${targetNode.summary}
 导出路径: ${targetNode.docPath ?? '未指定'}
-面向角色: ${formatAudience(targetNode.audience)}
+面向角色: ${formatAudience(resolveNodeAudience(targetNode))}
+规格视角: ${formatSpecLens(resolveNodeSpecLens(targetNode))}
 AI 接力目标: ${targetNode.handoffGoal ?? '未指定'}
 质量门槛: ${targetNode.qualityGate ?? '未指定'}
-内容: ${targetNode.content}${targetNode.techNotes ? `\n技术备注: ${targetNode.techNotes}` : ''}${parentNode ? `\n\n父节点上下文：\n标题: ${parentNode.label}\n摘要: ${parentNode.summary}` : ''}${mvcChildContext}`
+内容: ${targetNode.content}${pageSectionContext}${performanceContext}${targetNode.techNotes ? `\n技术备注: ${targetNode.techNotes}` : ''}${parentNode ? `\n\n父节点上下文：\n标题: ${parentNode.label}\n摘要: ${parentNode.summary}` : ''}${mvcChildContext}`
 
   const hasReferenceImages = messages.some((message) => hasImages(message.content))
+  const conversationText = messages.map((message) => extractText(message.content)).join('\n')
+  const mentionsVisualResource = hasReferenceImages
+    || /figma|参考图|截图|原型图|原型图片|视觉稿|设计稿|界面图|UI\s*图|已上传|已导入/i.test(conversationText)
+  const declinedVisualResource = /没有.{0,8}(图|figma|设计稿|原型|截图|视觉稿)|暂无.{0,8}(图|figma|设计稿|原型|截图|视觉稿)|先按文字|没有资源/i.test(conversationText)
+  const isVisualNode = resolveNodeAudience(targetNode) === 'client'
+    || resolveNodeSpecLens(targetNode) === 'view'
+    || targetNode.type === 'page'
+    || targetNode.type === 'ui'
+  const shouldAskForVisualResource = isVisualNode && !mentionsVisualResource && !declinedVisualResource
 
   const nodeChatSystemPrompt = `你是游戏需求文档精修顾问，专注于把单个 PRD 拆分节点打磨成可直接交给 AI Agent 使用的 Markdown 文档。
 
@@ -2216,7 +2961,18 @@ ${nodeContext}
 - 用中文回复；所有展示给用户或写入导出文档的生成内容都必须是中文
 - 回复正文只写给用户看的简短 Markdown 总结，不要输出整篇重写文档；可用标题、列表、加粗或行内代码，最多8行
 - 如果文档还不完整，只问一个最关键的问题
+- 追问优先级不可颠倒：
+  1. 如果这是客户端/UI/页面节点，且尚未提供原型图片、Figma、参考图或视觉稿，第一优先级必须先询问这些资源；如果用户明确说没有，再继续按文字打磨。
+  2. 第二优先级补齐入口、主流程、状态/边界、依赖字段/配置、跨文档关系、可测试验收标准和 AI 接力说明。
+  3. 最后才进入表现打磨/表现编排澄清。
+- 当前是否应先询问原型/Figma/参考图资源：${shouldAskForVisualResource ? '是' : '否'}
+- 当“当前是否应先询问原型/Figma/参考图资源”为“是”时，你的唯一问题应是请用户上传原型截图/参考图或粘贴 Figma 链接；不要在同一轮追问表现编排
 - 优先补齐：原文位置、职责边界、核心规则、依赖字段/配置、跨文档关系、边界条件、需澄清点、可测试验收标准、AI 接力说明
+- 默认扫描目标节点中的表现编排缺口：结果/奖励表现、金币/数值获得、连线/命中、宝石/图标特效、弹窗揭晓、阶段演出、成功/失败反馈等都算表现编排
+- 不要问用户“这个表现重不重要”；这些表现通常是设计师已知但 PRD 未写清。你的角色是代替程序员追问 UI 设计师，把“会播什么、怎么播、播完怎么办”追问成可实现 spec
+- 追问表现编排时只围绕 7 类实现缺口：触发条件、分支规则、播放顺序、资源清单、层级位置、控制规则、结束状态
+- 只有在原型/视觉资源问题和主流程问题都不阻塞时，才根据节点内容整理播放流程草案；再问最阻塞实现的具体问题，例如“连线是逐条亮还是同时亮”“金币飞入在弹窗关闭前还是关闭后”“弹窗自动关闭还是点击关闭”
+- 表现编排模板由节点内容动态组合，用户不需要选择模板，也不需要勾选开关
 - 你必须自己从用户最新一轮输入中识别一个或多个意图，不要要求用户选择模式
 - document_polish：用户补充、确认、修正文档内容时，更新 nodePatch
 - reference_feedback：用户上传图片、提到参考图/截图/视觉对比时，把图片或视觉评论作为文档证据；通常也要更新 UI/client 文档的 nodePatch
@@ -2224,17 +2980,19 @@ ${nodeContext}
 - 一轮输入可以同时包含 document_polish、reference_feedback、prototype_update
 - 当用户上传参考图或界面截图时，仅对 client/UI 类文档像 screenshot-to-code 一样提取布局层级、控件分组、间距、对齐、视觉权重、可交互元素、状态反馈和素材/参考图边界，并转化为文档内容
 - 本轮是否包含图片参考：${hasReferenceImages ? '是' : '否'}
-- 当用户补充或确认的内容应合并进当前文档时，即使文档尚未完成，也要在回复末尾附加 JSON：{"nodeComplete": false, "intents": ["document_polish"], "prototypeInstruction": null, "nodePatch": {"summary": "中文一句话总结当前文档用途或 null", "content": "中文 Markdown 文档正文或本轮已采纳后的当前文档段落", "techNotes": "中文实现/接力注意事项或 null"}}
+- 当用户补充或确认的内容应合并进当前文档时，即使文档尚未完成，也要在回复末尾附加 JSON：{"nodeComplete": false, "intents": ["document_polish"], "prototypeInstruction": null, "nodePatch": {"summary": "中文一句话总结当前文档用途或 null", "content": "中文 Markdown 文档正文或本轮已采纳后的当前文档段落", "techNotes": "中文实现/接力注意事项或 null", "performanceSpec": null}}
+- 如果本轮补齐或修正了表现编排，nodePatch.performanceSpec 必须写入结构化对象：{"detected": true, "source": "ai", "confidence": 0-100, "eventTypes": ["表现类型"], "trigger": "触发条件或 null", "branches": ["分支规则"], "sequence": [{"title":"阶段名","detail":"播放内容","layer":"层级或 null","assets":["资源"],"waitFor":"等待条件或 null"}], "assets": ["资源"], "layers": ["层级"], "controls": ["可跳过/可打断/重复触发规则"], "endState": "播放完成后的状态或 null", "openQuestions": ["仍待确认的问题"], "prototypeNotes": ["原型应模拟的表现重点"]}
 - 当同一轮还要求更新右侧原型时，把 prototype_update 加入 intents，并填写中文 prototypeInstruction；如果没有原型相关要求，prototypeInstruction 必须为 null
+- 如果用户确认了表现流程，且右侧原型需要同步表现顺序，prototypeInstruction 应简短说明要更新的播放阶段、弹窗/特效/数值表现和结束状态
 - 当你判断该文档已经足够交给后续 AI 执行时，把同一个 JSON 的 nodeComplete 设为 true，并让 nodePatch 包含最终文档内容
 - JSON 只能放在回复末尾；回复正文不能包含 JSON、大括号、schema 说明或原始回包
 - nodePatch.content 必须整合当前节点原始内容、用户补充和图片观察结论，写成可导出的当前文档正文；不要只写本轮摘要，也不要重复堆叠旧的 Deep Forge 段落
-- nodePatch.summary、nodePatch.content、nodePatch.techNotes、prototypeInstruction 以及 content 内部 Markdown 标题必须使用中文；只有代码标识、文件路径、接口字段名、库/API 名称、枚举值和专有产品名可以保留英文
+- nodePatch.summary、nodePatch.content、nodePatch.techNotes、nodePatch.performanceSpec、prototypeInstruction 以及 content 内部 Markdown 标题必须使用中文；只有代码标识、文件路径、接口字段名、库/API 名称、枚举值和专有产品名可以保留英文
 - 保持专业、简洁、直接的语气`
 
   const response = await anthropic.messages.create({
     model,
-    max_tokens: 2048,
+    max_tokens: 4096,
     system: nodeChatSystemPrompt,
     messages: messages.map(toAnthropicNodeMessage),
   })
@@ -2286,6 +3044,9 @@ function buildPrototypeSpec(requirementState: UXRequirementState) {
 引擎约束：${requirementState.engine_constraints ?? '无'}
 完成度：${requirementState.completion_rate}%
 
+## 表现编排
+${requirementState.performance_spec ? formatPerformanceSpecForPrompt(requirementState.performance_spec) : '未提供单独的表现编排规格；请仅根据执行规则模拟关键状态反馈。'}
+
 ## 组件树
 ${componentTree}`
 }
@@ -2299,6 +3060,15 @@ function buildScreenshotFidelitySection() {
 `
 }
 
+function buildFigmaEvidencePolicySection(hasImages: boolean) {
+  if (!hasImages) return ''
+  return `
+## Figma / 参考图优先级
+- 如果附件来自 Figma Frame、布局参考图或界面截图，它是视觉结构的主来源：布局、层级、间距、颜色、控件位置、文字和素材位置都优先按图还原。
+- PRD 和节点文档只用于补充交互逻辑、状态流转、数据条件、Cocos 制作约束和图中不可见的异常状态。
+- 不要自行发明参考图/Figma 中不存在的装饰图、角色图、背景图或外层设备框。`
+}
+
 function buildCreatePrototypePrompt(requirementState: UXRequirementState, hasImages = false, focus?: string) {
   const focusSection = focus
     ? `\n## 本变体设计侧重\n${focus}\n（这是同一需求的多个备选方案之一，请在满足上述需求与约束的前提下，按本侧重做出有辨识度的设计。）\n`
@@ -2306,7 +3076,7 @@ function buildCreatePrototypePrompt(requirementState: UXRequirementState, hasIma
   return `你是 GameUX PromptForge 的游戏 UX 原型生成专家。根据以下 UX 需求状态${hasImages ? '和参考图' : ''}，生成一个可直接预览的自包含 HTML 原型。
 
 ${buildPrototypeSpec(requirementState)}
-${hasImages ? `\n${buildScreenshotFidelitySection()}` : ''}${focusSection}
+${hasImages ? `\n${buildScreenshotFidelitySection()}` : ''}${buildFigmaEvidencePolicySection(hasImages)}${focusSection}
 ## 尺寸契约
 - 预览沙盒按参考项目的手机适配方式提供 375px CSS 固定宽度；默认验收视口按 375x812 设计。
 - html、body 和唯一主根容器必须按移动端视口组织：width: 100vw; min-width: 375px; min-height: 100vh; overflow-x: hidden; overflow-y: auto。
@@ -2321,20 +3091,21 @@ ${hasImages ? `\n${buildScreenshotFidelitySection()}` : ''}${focusSection}
 2. 必须是静态单文件可运行：不需要 npm、构建步骤、本地资源或后端服务。
 3. 可使用 Tailwind CDN（https://cdn.tailwindcss.com）和少量内联 CSS/JS；不要引用不可访问的本地路径。
 4. 画面要像游戏交互原型，不要做营销页：包含设备内界面、状态切换、关键按钮反馈、禁用/加载/错误态。
-5. 组件标注要清楚：用小标签标出组件名称、类型、状态或动画参数。
-6. 未确认资源用占位块，不要伪造真实素材路径。
-7. 脚本必须安全自包含，不要访问父窗口、cookie、localStorage 或外部 API。
-8. 所有用户可见界面文字、按钮文案、状态提示、组件标注、注释说明必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。`
+5. 如果需求状态包含表现编排，必须模拟播放流程的大致顺序：前置特效、命中/高亮、弹窗/揭晓、数值滚动/飞入、收尾关闭等可以用占位特效和中文阶段标签表达；不要只画静态最终态。
+6. 组件标注要清楚：用小标签标出组件名称、类型、状态或动画参数。
+7. 未确认资源用占位块，不要伪造真实素材路径。
+8. 脚本必须安全自包含，不要访问父窗口、cookie、localStorage 或外部 API。
+9. 所有用户可见界面文字、按钮文案、状态提示、组件标注、注释说明必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。`
 }
 
-function buildUpdatePrototypePrompt(requirementState: UXRequirementState, currentHtml: string, instruction: string, history: string[] = [], focus?: string) {
+function buildUpdatePrototypePrompt(requirementState: UXRequirementState, currentHtml: string, instruction: string, history: string[] = [], focus?: string, hasImages = false) {
   const historySection = history.length > 0
     ? `\n## 当前变体历史修改指令\n${history.map((item, index) => `${index + 1}. ${item}`).join('\n')}\n`
     : ''
   const focusSection = focus ? `\n## 本次更新侧重\n${focus}\n` : ''
   return `你是 GameUX PromptForge 的原型迭代代理。请根据用户的修改说明，对当前 HTML 原型做最小必要修改。
 
-${buildPrototypeSpec(requirementState)}${historySection}${focusSection}
+${buildPrototypeSpec(requirementState)}${buildFigmaEvidencePolicySection(hasImages)}${historySection}${focusSection}
 
 ## 用户修改说明
 ${instruction}
@@ -2351,7 +3122,8 @@ ${currentHtml}
 6. 预览 iframe 是 375px CSS 固定宽度；默认验收视口按 375x812 设计，html、body 和唯一主根容器必须使用 width:100vw; min-width:375px; min-height:100vh; overflow-x:hidden; overflow-y:auto。
 7. 修改时优先保持核心界面、主要按钮和关键状态在首屏可见；新增内容超过首屏时，用弹层、抽屉、折叠区、标签页或状态切换承载，不要直接把主页面继续拉长。
 8. 禁止生成额外的 750px 设计稿容器，禁止 max-width/mx-auto/scale()/zoom 让界面缩在中间，也不要新增手机壳、浏览器壳或外层设备框；内容过长时允许纵向滚动，不要横向溢出。
-9. 所有用户可见界面文字、按钮文案、状态提示、组件标注、注释说明必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。`
+9. 如果需求状态包含表现编排，本次更新必须优先对齐播放顺序、阶段标签、弹窗/特效/数值表现和结束状态；可以用占位粒子、光效、震屏模拟、音效标签表达尚未接入的资源。
+10. 所有用户可见界面文字、按钮文案、状态提示、组件标注、注释说明必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。`
 }
 
 function applyPrototypeToolUses(currentHtml: string, content: Anthropic.Messages.ContentBlock[]) {
@@ -2393,6 +3165,391 @@ function buildImageBlocks(images: ContentBlock[] | null | undefined): Anthropic.
 
 function buildContentWithImages(prompt: string, imageBlocks: Anthropic.ImageBlockParam[]): Anthropic.ContentBlockParam[] | string {
   return imageBlocks.length > 0 ? [...imageBlocks, { type: 'text', text: prompt }] : prompt
+}
+
+function parseFigmaFrameUrl(rawUrl: string) {
+  let parsed: URL
+  try {
+    parsed = new URL(rawUrl)
+  } catch {
+    throw new Error('Figma 链接格式无效，请粘贴 figma.com 的 frame 链接。')
+  }
+
+  const keyMatch = parsed.pathname.match(/\/(?:file|design|proto)\/([A-Za-z0-9]+)/u)
+  const fileKey = keyMatch?.[1]
+  if (!fileKey) {
+    throw new Error('无法从链接中识别 Figma file key，请确认链接来自 figma.com/file、figma.com/design 或 figma.com/proto。')
+  }
+
+  const rawNodeId = parsed.searchParams.get('node-id') ?? parsed.searchParams.get('node_id') ?? ''
+  const nodeId = rawNodeId.trim().replace(/-/g, ':')
+  if (!nodeId) {
+    throw new Error('请在 Figma 中选中具体 Frame 后复制链接，链接里需要包含 node-id。')
+  }
+
+  return { fileKey, nodeId, sourceUrl: parsed.toString() }
+}
+
+interface FigmaConvertTaskResponse {
+  taskId?: string
+  id?: string
+}
+
+interface FigmaTaskProgressResponse {
+  status?: string
+  progress?: number
+  currentStep?: string
+  message?: string
+  error?: string
+}
+
+interface UiSpecRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+interface UiSpecAsset {
+  name: string
+  path: string
+  format?: string
+}
+
+interface UiSpecNode {
+  name: string
+  type: string
+  rect: UiSpecRect
+  asset?: string
+  properties?: Record<string, unknown>
+  children?: UiSpecNode[]
+  visible?: boolean
+}
+
+interface UiSpecDocument {
+  version?: string
+  engine?: string
+  designSize?: { width?: number; height?: number }
+  root?: UiSpecNode
+  assets?: UiSpecAsset[]
+}
+
+function joinServiceUrl(baseUrl: string, routePath: string) {
+  return `${baseUrl.replace(/\/+$/, '')}/${routePath.replace(/^\/+/, '')}`
+}
+
+async function readResponseSnippet(response: Response) {
+  const body = await response.text().catch(() => '')
+  return body ? `：${body.slice(0, 240)}` : ''
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function normalizeZipPath(value: string) {
+  return value.replace(/\\/g, '/').replace(/^\/+/, '')
+}
+
+function buildZipLookup(files: Record<string, Uint8Array>) {
+  return new Map(Object.keys(files).map((filePath) => [normalizeZipPath(filePath).toLowerCase(), filePath]))
+}
+
+function findZipFile(files: Record<string, Uint8Array>, lookup: Map<string, string>, candidatePath: string) {
+  const normalized = normalizeZipPath(candidatePath)
+  return files[normalized] ?? files[lookup.get(normalized.toLowerCase()) ?? '']
+}
+
+function mimeTypeForPath(filePath: string) {
+  const ext = filePath.split('.').pop()?.toLowerCase()
+  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg'
+  if (ext === 'webp') return 'image/webp'
+  if (ext === 'gif') return 'image/gif'
+  if (ext === 'svg') return 'image/svg+xml'
+  return 'image/png'
+}
+
+function escapeHtml(value: unknown) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function escapeAttr(value: unknown) {
+  return escapeHtml(value).replace(/`/g, '&#96;')
+}
+
+function cssNumber(value: unknown, fallback = 0) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+function propString(properties: Record<string, unknown> | undefined, key: string) {
+  return normalizeTextValue(properties?.[key])
+}
+
+function propNumber(properties: Record<string, unknown> | undefined, key: string) {
+  const value = properties?.[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function normalizeTextAlign(value: string | null) {
+  const text = value?.toLowerCase()
+  if (text === 'left' || text === 'right' || text === 'center') return text
+  return 'center'
+}
+
+function labelStyleFor(node: UiSpecNode) {
+  const props = node.properties
+  const fontSize = propNumber(props, 'fontSize') ?? Math.max(10, Math.round(node.rect.height * 0.55))
+  const color = propString(props, 'color') ?? '#ffffff'
+  const weight = propNumber(props, 'fontWeight') ?? 600
+  const align = normalizeTextAlign(propString(props, 'textAlign'))
+  const strokeWidth = propNumber(props, 'strokeWidth') ?? 0
+  const strokeColor = propString(props, 'strokeColor') ?? 'rgba(0,0,0,0.45)'
+  const shadow = strokeWidth > 0
+    ? `text-shadow:${Array.from({ length: Math.min(4, Math.max(1, Math.round(strokeWidth))) }, (_, index) => {
+        const offset = index + 1
+        return `${offset}px ${offset}px 0 ${strokeColor}, -${offset}px ${offset}px 0 ${strokeColor}, ${offset}px -${offset}px 0 ${strokeColor}, -${offset}px -${offset}px 0 ${strokeColor}`
+      }).join(',')};`
+    : ''
+  return [
+    `font-size:${fontSize}px`,
+    `color:${color}`,
+    `font-weight:${weight}`,
+    `text-align:${align}`,
+    `justify-content:${align === 'left' ? 'flex-start' : align === 'right' ? 'flex-end' : 'center'}`,
+    shadow,
+  ].filter(Boolean).join(';')
+}
+
+function countUiSpecNodes(node: UiSpecNode | undefined): number {
+  if (!node) return 0
+  return 1 + (node.children ?? []).reduce((sum, child) => sum + countUiSpecNodes(child), 0)
+}
+
+function renderUiSpecNode(node: UiSpecNode, assetUrls: Map<string, string>, depth = 0): string {
+  const rect = node.rect ?? { x: 0, y: 0, width: 0, height: 0 }
+  const type = node.type || 'Node'
+  const children = (node.children ?? []).map((child) => renderUiSpecNode(child, assetUrls, depth + 1)).join('\n')
+  const visibleStyle = node.visible === false ? 'display:none;' : ''
+  const commonStyle = [
+    `left:${cssNumber(rect.x)}px`,
+    `top:${cssNumber(rect.y)}px`,
+    `width:${Math.max(1, cssNumber(rect.width, 1))}px`,
+    `height:${Math.max(1, cssNumber(rect.height, 1))}px`,
+    `z-index:${depth}`,
+    visibleStyle,
+  ].filter(Boolean).join(';')
+  const assetUrl = node.asset ? assetUrls.get(node.asset) : null
+  const safeName = escapeAttr(node.name || type)
+  const className = `pf-node pf-${type.toLowerCase()}`
+  const imageHtml = assetUrl
+    ? `<img class="pf-asset" src="${escapeAttr(assetUrl)}" alt="" draggable="false" />`
+    : ''
+
+  if (type === 'Label') {
+    const text = propString(node.properties, 'text') ?? node.name ?? ''
+    return `<div class="${className}" data-node="${safeName}" style="${commonStyle};${labelStyleFor(node)}">${escapeHtml(text)}</div>`
+  }
+
+  const isInteractive = ['Button', 'Toggle', 'TabGroup'].includes(type)
+  if (isInteractive) {
+    const label = propString(node.properties, 'text') ?? node.name ?? type
+    return `<button type="button" class="${className}" data-node="${safeName}" aria-label="${escapeAttr(label)}" style="${commonStyle}">${imageHtml}${children}</button>`
+  }
+
+  const overflow = type === 'ScrollView' ? 'overflow:auto;' : 'overflow:visible;'
+  return `<div class="${className}" data-node="${safeName}" style="${commonStyle};${overflow}">${imageHtml}${children}</div>`
+}
+
+function findPreferredUiSpecPath(files: Record<string, Uint8Array>) {
+  const candidates = Object.keys(files).filter((filePath) => /(^|\/)ui_spec\.json$/iu.test(normalizeZipPath(filePath)))
+  if (!candidates.length) throw new Error('Figma2Prefab 结果 zip 中未找到 ui_spec.json。')
+  return (
+    candidates.find((filePath) => /(^|\/)uislots[^/]*\/ui_spec\.json$/iu.test(normalizeZipPath(filePath)))
+    ?? candidates.find((filePath) => /(^|\/)ui_slots[^/]*\/ui_spec\.json$/iu.test(normalizeZipPath(filePath)))
+    ?? candidates[0]
+  )
+}
+
+function registerFigmaAssetBundle(files: Record<string, Uint8Array>) {
+  const bundleId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  const bundle: FigmaAssetBundle = {
+    createdAt: Date.now(),
+    files,
+    lookup: buildZipLookup(files),
+  }
+  figmaAssetBundles.set(bundleId, bundle)
+  setTimeout(() => {
+    const current = figmaAssetBundles.get(bundleId)
+    if (current && current.createdAt === bundle.createdAt) figmaAssetBundles.delete(bundleId)
+  }, FIGMA_ASSET_BUNDLE_TTL_MS)
+  return bundleId
+}
+
+function buildAssetUrl(baseUrl: string, bundleId: string, filePath: string) {
+  return `${baseUrl.replace(/\/+$/, '')}/api/figma/assets/${encodeURIComponent(bundleId)}/${normalizeZipPath(filePath).split('/').map(encodeURIComponent).join('/')}`
+}
+
+function buildFigmaPrototypeHtml(spec: UiSpecDocument, uiSpecPath: string, bundleId: string, assetBaseUrl: string) {
+  if (!spec.root?.rect) throw new Error('ui_spec.json 缺少 root.rect，无法生成 HTML 原型。')
+  const folder = normalizeZipPath(uiSpecPath).replace(/\/?ui_spec\.json$/iu, '')
+  const designWidth = Math.max(1, Math.round(spec.designSize?.width ?? spec.root.rect.width ?? 750))
+  const designHeight = Math.max(1, Math.round(spec.designSize?.height ?? spec.root.rect.height ?? 1624))
+  const assetUrls = new Map<string, string>()
+  for (const asset of spec.assets ?? []) {
+    if (!asset.name || !asset.path) continue
+    assetUrls.set(asset.name, buildAssetUrl(assetBaseUrl, bundleId, `${folder}/${asset.path}`))
+  }
+  const body = renderUiSpecNode(spec.root, assetUrls)
+  const nodeCount = countUiSpecNodes(spec.root)
+
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${escapeHtml(spec.root.name)} Figma Prototype</title>
+  <style>
+    :root { --pf-scale: 1; color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-width: 375px; min-height: 100vh; overflow-x: hidden; background: #05070d; font-family: Inter, "PingFang SC", "Microsoft YaHei", Arial, sans-serif; }
+    body { display: flex; justify-content: center; align-items: flex-start; }
+    .pf-shell { position: relative; width: ${designWidth}px; height: ${designHeight}px; flex: 0 0 auto; overflow: visible; }
+    .pf-stage { position: absolute; left: 0; top: 0; width: ${designWidth}px; height: ${designHeight}px; overflow: hidden; transform: scale(var(--pf-scale)); transform-origin: top left; background: #05070d; }
+    .pf-node { position: absolute; margin: 0; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; }
+    .pf-node:focus-visible { outline: 3px solid rgba(255,255,255,0.65); outline-offset: 2px; }
+    .pf-button, .pf-toggle, .pf-tabgroup { cursor: pointer; transition: filter 120ms ease, transform 120ms ease; }
+    .pf-button:active, .pf-toggle:active, .pf-tabgroup:active, .pf-node[data-active="true"] { filter: brightness(1.15) saturate(1.1); transform: scale(0.985); }
+    .pf-label { display: flex; align-items: center; white-space: nowrap; line-height: 1; overflow: hidden; pointer-events: none; }
+    .pf-asset { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; pointer-events: none; user-select: none; }
+  </style>
+</head>
+<body>
+  <main class="pf-shell" aria-label="${escapeAttr(spec.root.name)}">
+    <section class="pf-stage" data-generator="figma2prefab" data-node-count="${nodeCount}">
+${body}
+    </section>
+  </main>
+  <script>
+    (() => {
+      const designWidth = ${designWidth};
+      const designHeight = ${designHeight};
+      const shell = document.querySelector('.pf-shell');
+      const resize = () => {
+        const scale = Math.max(0.01, Math.min(1, window.innerWidth / designWidth));
+        document.documentElement.style.setProperty('--pf-scale', String(scale));
+        shell.style.width = Math.round(designWidth * scale) + 'px';
+        shell.style.height = Math.round(designHeight * scale) + 'px';
+      };
+      window.addEventListener('resize', resize);
+      resize();
+      document.querySelectorAll('.pf-button, .pf-toggle, .pf-tabgroup').forEach((node) => {
+        node.addEventListener('click', () => {
+          node.dataset.active = 'true';
+          window.setTimeout(() => { node.dataset.active = 'false'; }, 180);
+        });
+      });
+    })();
+  </script>
+</body>
+</html>`
+}
+
+async function submitFigma2PrefabTask(rawUrl: string, token: string) {
+  const response = await fetch(joinServiceUrl(figma2PrefabBaseUrl, figma2PrefabConvertPath), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      figmaUrl: rawUrl,
+      figmaToken: token,
+      ...(figma2PrefabProvider ? { provider: figma2PrefabProvider } : {}),
+    }),
+  })
+
+  const contentType = response.headers.get('content-type') ?? ''
+  if (!response.ok) {
+    throw new Error(`Figma2Prefab 提交失败：HTTP ${response.status}${await readResponseSnippet(response)}`)
+  }
+  if (contentType.includes('application/zip')) {
+    return { taskId: null, zipBytes: new Uint8Array(await response.arrayBuffer()) }
+  }
+  const data = await response.json() as FigmaConvertTaskResponse
+  const taskId = normalizeTextValue(data.taskId ?? data.id)
+  if (!taskId) throw new Error('Figma2Prefab 未返回 taskId。')
+  return { taskId, zipBytes: null }
+}
+
+async function waitForFigma2PrefabTask(taskId: string) {
+  const deadline = Date.now() + FIGMA2PREFAB_TIMEOUT_MS
+  let lastMessage = '等待执行'
+  while (Date.now() < deadline) {
+    const response = await fetch(joinServiceUrl(figma2PrefabBaseUrl, `/api/tasks/${encodeURIComponent(taskId)}/progress`))
+    if (!response.ok) {
+      throw new Error(`Figma2Prefab 进度查询失败：HTTP ${response.status}${await readResponseSnippet(response)}`)
+    }
+    const progress = await response.json() as FigmaTaskProgressResponse
+    lastMessage = [progress.currentStep, progress.message].filter(Boolean).join(' / ') || lastMessage
+    if (progress.status === 'completed') return
+    if (progress.status === 'failed' || progress.status === 'error') {
+      throw new Error(progress.error || progress.message || 'Figma2Prefab 转换失败。')
+    }
+    await sleep(Math.max(500, FIGMA2PREFAB_POLL_INTERVAL_MS))
+  }
+  throw new Error(`Figma2Prefab 转换超时：${lastMessage}`)
+}
+
+async function downloadFigma2PrefabZip(taskId: string) {
+  const response = await fetch(joinServiceUrl(figma2PrefabBaseUrl, `/api/tasks/${encodeURIComponent(taskId)}/result`))
+  if (!response.ok) {
+    throw new Error(`Figma2Prefab 结果下载失败：HTTP ${response.status}${await readResponseSnippet(response)}`)
+  }
+  return new Uint8Array(await response.arrayBuffer())
+}
+
+function decodeUiSpec(files: Record<string, Uint8Array>, uiSpecPath: string) {
+  const data = files[uiSpecPath]
+  if (!data) throw new Error('无法读取 ui_spec.json。')
+  return JSON.parse(strFromU8(data)) as UiSpecDocument
+}
+
+async function importFigmaFrame(payload: FigmaFrameRequest, assetBaseUrl: string): Promise<FigmaFrameResponse> {
+  const rawUrl = payload.url?.trim()
+  if (!rawUrl) throw new Error('请填写 Figma Frame 链接。')
+  const token = payload.token?.trim() || figmaToken.trim()
+  if (!token) throw new Error('未配置 FIGMA_TOKEN。请在项目 .env 或 server/.env 中配置 Figma token，前端只需要粘贴 Figma 链接。')
+
+  const { fileKey, nodeId, sourceUrl } = parseFigmaFrameUrl(rawUrl)
+  const submitted = await submitFigma2PrefabTask(rawUrl, token)
+  let zipBytes = submitted.zipBytes
+  if (!zipBytes) {
+    if (!submitted.taskId) throw new Error('Figma2Prefab 未返回 taskId 或 zip 数据。')
+    await waitForFigma2PrefabTask(submitted.taskId)
+    zipBytes = await downloadFigma2PrefabZip(submitted.taskId)
+  }
+  const files = unzipSync(zipBytes)
+  const uiSpecPath = findPreferredUiSpecPath(files)
+  const spec = decodeUiSpec(files, uiSpecPath)
+  const bundleId = registerFigmaAssetBundle(files)
+  const html = buildFigmaPrototypeHtml(spec, uiSpecPath, bundleId, assetBaseUrl)
+  const panelName = spec.root?.name ?? normalizeZipPath(uiSpecPath).split('/').slice(-2, -1)[0] ?? 'UISlots'
+  const assetCount = spec.assets?.length ?? 0
+
+  return {
+    fileKey,
+    nodeId,
+    panelName,
+    taskId: submitted.taskId,
+    sourceUrl,
+    html,
+    summary: `已从 Figma2Prefab 生成 ${panelName} HTML 原型：${assetCount} 个资源、${countUiSpecNodes(spec.root)} 个节点。`,
+    uiSpecPath,
+    assetCount,
+    zipFileCount: Object.keys(files).length,
+  }
 }
 
 type OpenAiContentBlock =
@@ -2560,7 +3717,7 @@ async function generateUpdateVariant(
   cfg: { index: number; focus: string; temperature: number },
   history: string[],
 ): Promise<PrototypeVariantPayload> {
-  const prompt = buildUpdatePrototypePrompt(requirementState, currentHtml, instruction, history, cfg.focus)
+  const prompt = buildUpdatePrototypePrompt(requirementState, currentHtml, instruction, history, cfg.focus, imageBlocks.length > 0)
   if (usesOpenAiPrototypeProvider) {
     const raw = await createOpenAiChatCompletionText(prompt, imageBlocks, cfg.temperature)
     return {
@@ -2919,7 +4076,7 @@ function formatNodeType(type: PrdNode['type']) {
   return '功能'
 }
 
-function formatAudience(audience: PrdNode['audience']) {
+function formatAudience(audience: PrdNode['audience'] | null | undefined) {
   if (audience === 'overview') return '项目概览 / 路线规划 AI'
   if (audience === 'client') return '客户端 / UI AI'
   if (audience === 'server') return '服务端 / 业务逻辑 AI'
@@ -2931,6 +4088,22 @@ function formatAudience(audience: PrdNode['audience']) {
   return '未指定'
 }
 
+function formatNodeSectionsForContext(sections: PrdNode['sections']) {
+  if (!hasNodeSections(sections)) return ''
+  return [
+    '页面规格视角:',
+    ...(['view', 'interaction', 'data'] as const).map((key) => {
+      const section = sections?.[key]
+      if (!section?.summary && !section?.content) return null
+      return [
+        `- ${section.title ?? formatSectionTitle(key)}`,
+        section.summary ? `  摘要: ${section.summary}` : null,
+        section.content ? `  内容: ${section.content}` : null,
+      ].filter(Boolean).join('\n')
+    }).filter((item): item is string => Boolean(item)),
+  ].join('\n')
+}
+
 function generateMarkdown(node: PrdNode): string {
   const statusLabel = node.status === 'done' ? '已完成' : node.status === 'pending_refine' || node.needsPolish ? '待打磨' : '无需打磨'
   const lines = [
@@ -2939,7 +4112,8 @@ function generateMarkdown(node: PrdNode): string {
     `**节点编号：** ${node.id}`,
     `**节点类型：** ${formatNodeType(node.type)}`,
     `**导出路径：** ${node.docPath ?? '未指定'}`,
-    `**面向角色：** ${formatAudience(node.audience)}`,
+    `**面向角色：** ${formatAudience(resolveNodeAudience(node))}`,
+    `**规格视角：** ${formatSpecLens(resolveNodeSpecLens(node))}`,
     `**完成状态：** ${statusLabel}`,
     `**打磨要求：** ${node.needsPolish ? '需要 Deep Forge 确认' : '无需 Deep Forge 确认'}`,
     `**原文位置：** ${node.extractedFrom ?? '未定位'}`,
@@ -2960,6 +4134,29 @@ function generateMarkdown(node: PrdNode): string {
     '',
     node.content,
   ]
+  if (hasNodeSections(node.sections)) {
+    lines.push('', '## 页面规格视角')
+    for (const key of ['view', 'interaction', 'data'] as const) {
+      const section = node.sections?.[key]
+      if (!section?.summary && !section?.content && !section?.evidenceRefs?.length && !section?.openQuestions?.length) continue
+      lines.push('', `### ${section.title ?? formatSectionTitle(key)}`)
+      if (section.summary) lines.push('', section.summary)
+      if (section.content) lines.push('', section.content)
+      if (section.evidenceRefs?.length) {
+        lines.push('', '#### 证据引用')
+        for (const ref of section.evidenceRefs) {
+          lines.push(`- [${ref.sourceKind}] ${ref.sourceLabel}${ref.quote ? `：${ref.quote}` : ''}`)
+        }
+      }
+      if (section.openQuestions?.length) {
+        lines.push('', '#### 需澄清点', ...section.openQuestions.map((item) => `- ${item}`))
+      }
+    }
+  }
+  const performanceMarkdown = formatPerformanceSpecMarkdown(resolveNodePerformanceSpec(node))
+  if (performanceMarkdown) {
+    lines.push('', performanceMarkdown)
+  }
   if (node.references?.length) {
     lines.push('', '## 跨页面引用', '')
     for (const reference of node.references) {
@@ -2997,7 +4194,7 @@ function exportedPathFor(node: PrdNode, tree: Record<string, PrdNode>, pathByNod
 function generateIndexMarkdown(exportedNodes: PrdNode[], tree: Record<string, PrdNode>, pathByNodeId: Map<string, string>) {
   const sorted = [...exportedNodes].sort((a, b) => exportedPathFor(a, tree, pathByNodeId).localeCompare(exportedPathFor(b, tree, pathByNodeId)))
   const byAudience = sorted.reduce<Record<string, PrdNode[]>>((groups, node) => {
-    const key = formatAudience(node.audience)
+    const key = formatAudience(resolveNodeAudience(node))
     groups[key] = [...(groups[key] ?? []), node]
     return groups
   }, {})
@@ -3064,7 +4261,7 @@ function resolveGeneratedSpecPath(docPath: string) {
 
 function writeSpecFolder(tree: Record<string, PrdNode>) {
   const nodes = Object.values(tree)
-  const pageNodes = nodes.filter((node) => node.type === 'page' && node.children.length === 0 && node.status === 'done')
+  const pageNodes = nodes.filter((node) => node.type === 'page' && (node.children.length === 0 || hasNodeSections(node.sections)) && node.status === 'done')
   if (!pageNodes.length) throw new Error('没有找到已确认的页面 spec 节点')
   mkdirSync(SPEC_EXPORT_ROOT, { recursive: true })
   const pathByNodeId = new Map<string, string>()
@@ -3116,7 +4313,7 @@ app.post('/api/export-zip', (req, res) => {
   }
 
   const nodes = Object.values(tree)
-  const leafNodes = nodes.filter(n => n.children.length === 0 && (n.status === 'done' || !n.needsPolish))
+  const leafNodes = nodes.filter(n => (n.children.length === 0 || hasNodeSections(n.sections)) && (n.status === 'done' || !n.needsPolish))
 
   if (leafNodes.length === 0) {
     res.status(400).json({ error: '没有找到可导出的文档包节点' })

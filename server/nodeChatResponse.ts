@@ -1,9 +1,13 @@
+import { normalizePerformanceSpec } from '../src/lib/performanceOrchestration'
+import type { PrdPerformanceSpec } from '../src/types/prdNode'
+
 export type NodeChatIntent = 'document_polish' | 'prototype_update' | 'reference_feedback'
 
 export interface NodePolishPatch {
   summary?: string | null
   content?: string | null
   techNotes?: string | null
+  performanceSpec?: PrdPerformanceSpec | null
 }
 
 interface NodeChatSuffix {
@@ -42,6 +46,8 @@ function normalizeNodePolishPatch(value: unknown): NodePolishPatch | null {
   if ('content' in candidate) patch.content = normalizeNullableString(candidate.content)
   if ('techNotes' in candidate) patch.techNotes = normalizeNullableString(candidate.techNotes)
   if (!patch.techNotes && 'tech_notes' in candidate) patch.techNotes = normalizeNullableString(candidate.tech_notes)
+  if ('performanceSpec' in candidate) patch.performanceSpec = normalizePerformanceSpec(candidate.performanceSpec)
+  if (!patch.performanceSpec && 'performance_spec' in candidate) patch.performanceSpec = normalizePerformanceSpec(candidate.performance_spec)
 
   return Object.keys(patch).length ? patch : null
 }

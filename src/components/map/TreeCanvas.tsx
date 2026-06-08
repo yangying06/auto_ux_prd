@@ -17,6 +17,7 @@ interface TreeCanvasProps {
   selectedNodeId: string | null
   onNodeClick: (id: string) => void
   onNodeDoubleClick: (id: string) => void
+  onAddNode?: (parentId: string | null) => void
 }
 
 interface PositionedNode {
@@ -170,7 +171,16 @@ function connectorPath(parent: PositionedNode, child: PositionedNode) {
   return `M ${sx} ${sy} C ${midX} ${sy}, ${midX} ${ey}, ${ex} ${ey}`
 }
 
-export function TreeCanvas({ tree, selectedNodeId, onNodeClick, onNodeDoubleClick }: TreeCanvasProps) {
+function addNodeConnectorPath(root: PositionedNode, addSlot: { x: number; y: number; width: number; height: number }) {
+  const sx = root.x + root.width / 2
+  const sy = root.y + root.height
+  const ex = addSlot.x + addSlot.width / 2
+  const ey = addSlot.y
+  const midY = sy + Math.max(18, (ey - sy) / 2)
+  return `M ${sx} ${sy} C ${sx} ${midY}, ${ex} ${midY}, ${ex} ${ey}`
+}
+
+export function TreeCanvas({ tree, selectedNodeId, onNodeClick, onNodeDoubleClick, onAddNode }: TreeCanvasProps) {
   const transformRef = useRef({ scale: 1, tx: 0, ty: 0 })
   const viewportRef = useRef<HTMLDivElement>(null)
   const innerRef = useRef<HTMLDivElement>(null)
@@ -178,6 +188,31 @@ export function TreeCanvas({ tree, selectedNodeId, onNodeClick, onNodeDoubleClic
   const [scaleLabel, setScaleLabel] = useState(1)
 
   const layout = useMemo(() => buildTreeLayout(tree), [tree])
+  const addSlot = useMemo(() => {
+    if (!onAddNode) return null
+    const root = layout.nodes.find((item) => item.depth === 0) ?? null
+    if (!root) return null
+    const width = 246
+    const height = 104
+    const x = root.x + root.width / 2 - width / 2
+    const y = root.y + root.height + 36
+    return {
+      parent: root,
+      x,
+      y,
+      width,
+      height,
+      d: addNodeConnectorPath(root, {
+        x,
+        y,
+        width,
+        height,
+      }),
+    }
+  }, [layout, onAddNode])
+  const contentHeight = addSlot
+    ? Math.max(layout.contentHeight, addSlot.y + addSlot.height + PADDING_BOTTOM)
+    : layout.contentHeight
   const paths = useMemo(() => (
     layout.nodes
       .map((item) => {
@@ -242,7 +277,7 @@ export function TreeCanvas({ tree, selectedNodeId, onNodeClick, onNodeDoubleClic
     const scale = clampScale(Math.min(
       1,
       (viewport.clientWidth - 56) / layout.contentWidth,
-      (viewport.clientHeight - 56) / layout.contentHeight,
+      (viewport.clientHeight - 56) / contentHeight,
     ))
     applyTransform({ scale, tx: 28, ty: 28 })
   }
@@ -317,7 +352,7 @@ export function TreeCanvas({ tree, selectedNodeId, onNodeClick, onNodeDoubleClic
         className="relative"
         style={{
           width: layout.contentWidth,
-          height: layout.contentHeight,
+          height: contentHeight,
           minWidth: layout.contentWidth,
           transform: 'translate(0px, 0px) scale(1)',
           transformOrigin: '0 0',
@@ -338,7 +373,7 @@ export function TreeCanvas({ tree, selectedNodeId, onNodeClick, onNodeDoubleClic
 
         <svg
           className="pointer-events-none absolute top-0 left-0"
-          style={{ width: layout.contentWidth, height: layout.contentHeight, overflow: 'visible', zIndex: 0 }}
+          style={{ width: layout.contentWidth, height: contentHeight, overflow: 'visible', zIndex: 0 }}
         >
           {paths.map((path, i) => (
             <path
@@ -349,6 +384,14 @@ export function TreeCanvas({ tree, selectedNodeId, onNodeClick, onNodeDoubleClic
               style={{ animationDelay: `${Math.min(i * 45, 420)}ms` }}
             />
           ))}
+          {addSlot && (
+            <path
+              d={addSlot.d}
+              className="svg-line"
+              pathLength={1}
+              style={{ animationDelay: '180ms' }}
+            />
+          )}
         </svg>
 
         {layout.nodes.map((item) => (
@@ -366,6 +409,30 @@ export function TreeCanvas({ tree, selectedNodeId, onNodeClick, onNodeDoubleClic
             />
           </div>
         ))}
+
+        {addSlot && (
+          <button
+            type="button"
+            onClick={() => onAddNode?.(addSlot.parent.node.id)}
+            title="新增页面节点"
+            aria-label="新增页面节点"
+            className="group absolute z-20 flex items-center gap-sm rounded-lg border border-dashed border-primary/70 bg-surface-container-high/95 p-sm text-left shadow-lg transition-all hover:-translate-y-0.5 hover:border-primary hover:bg-primary-container/30 hover:shadow-xl focus:outline-none focus:ring-2 focus:ring-primary/50"
+            style={{ left: addSlot.x, top: addSlot.y, width: addSlot.width, height: addSlot.height }}
+          >
+            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg border border-primary/50 bg-primary-container text-primary transition-colors group-hover:bg-primary group-hover:text-on-primary">
+              <span className="material-symbols-outlined" style={{ fontSize: '30px' }}>add</span>
+            </span>
+            <span className="min-w-0">
+              <span className="block font-label-md text-label-md text-on-surface">新增页面节点</span>
+              <span className="mt-xs block text-body-sm leading-snug text-on-surface-variant">
+                上传资料，生成 MVC 拆分
+              </span>
+            </span>
+            <span className="absolute right-sm top-sm rounded border border-primary/30 bg-primary-container/40 px-xs py-[1px] font-mono text-[10px] uppercase text-primary">
+              new
+            </span>
+          </button>
+        )}
       </div>
     </div>
   )

@@ -1,3 +1,5 @@
+import type { PrdPerformanceSpec } from './prdNode'
+
 export interface AssetDependency {
   type: string
   path: string | null
@@ -52,4 +54,5 @@ export interface UXRequirementState {
   slot_confidence: SlotConfidence
   missing_reasons: MissingReasons
   next_question: string | null
+  performance_spec?: PrdPerformanceSpec | null
 }

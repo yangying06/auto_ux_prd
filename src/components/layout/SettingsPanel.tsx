@@ -56,7 +56,7 @@ export function SettingsPanel({ open, onResetSession, onResetRequirement, onClos
       : '模拟'
 
   return (
-    <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/50 p-lg backdrop-blur-sm">
+    <div className="absolute inset-0 z-[120] flex items-center justify-center bg-black/50 p-lg backdrop-blur-sm">
       <div className="w-full max-w-[720px] rounded-xl border border-outline-variant/40 bg-surface-container p-lg shadow-[0_0_32px_rgba(0,0,0,0.4)]">
         <div className="mb-lg flex items-start justify-between">
           <div>

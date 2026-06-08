@@ -61,8 +61,8 @@ export function AppShell({ onBack, onConfirm }: { onBack?: () => void; onConfirm
     }
   }
 
-  function handleOpenBolt() {
-    openBoltWithPrompt(requirementToBoltPrompt(requirement))
+  async function handleOpenBolt() {
+    await openBoltWithPrompt(requirementToBoltPrompt(requirement))
   }
 
   async function handleExportPrompt() {
@@ -100,7 +100,7 @@ export function AppShell({ onBack, onConfirm }: { onBack?: () => void; onConfirm
         onRestorePrototype={restorePrototypeVersion}
         onClearPrototypeHistory={clearPrototypeHistory}
         onExportPrompt={handleExportPrompt}
-        onOpenBolt={handleOpenBolt}
+        onOpenBolt={() => { void handleOpenBolt() }}
       />
       <SettingsPanel
         open={settingsOpen}
@@ -111,7 +111,7 @@ export function AppShell({ onBack, onConfirm }: { onBack?: () => void; onConfirm
 
       {/* Spec Preview Modal */}
       {specMarkdown ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/70 backdrop-blur-sm">
           <div className="flex h-[85vh] w-[75vw] flex-col overflow-hidden rounded-xl border border-outline-variant/40 bg-surface shadow-2xl">
             <div className="flex items-center justify-between border-b border-outline-variant/20 bg-surface-container-high px-lg py-md">
               <span className="font-mono text-label-md uppercase text-secondary">Cocos UX Spec · 预览</span>
