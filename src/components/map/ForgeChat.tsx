@@ -87,6 +87,13 @@ const PROMPT_SKILLS: PromptSkill[] = [
     keywords: ['字段', '依赖', '数据', '默认值'],
   },
   {
+    id: 'motion-integration',
+    label: '动效接入',
+    hint: 'Tween/Spine/粒子/Prefab/音效',
+    detail: '请按 Cocos 实际接入方式澄清当前节点的表现编排：先判断触发、分支、播放顺序、接入方式、资源、层级、控制、结束状态这 8 个槽位分别是已确认、AI 推断还是缺失；然后只问当前最阻塞实现的 1 个问题，并说明它卡住的是哪个槽位。接入方式请限定在 Tween、AnimationClip、Spine、ParticleSystem、Prefab、序列帧或音效联动。',
+    keywords: ['动效', '表现', '接入', 'Tween', 'Spine', '粒子', 'Prefab', '音效', 'AnimationClip'],
+  },
+  {
     id: 'acceptance',
     label: '验收门槛',
     hint: '步骤、期望、判定',

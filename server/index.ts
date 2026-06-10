@@ -2970,8 +2970,11 @@ ${nodeContext}
 - 优先补齐：原文位置、职责边界、核心规则、依赖字段/配置、跨文档关系、边界条件、需澄清点、可测试验收标准、AI 接力说明
 - 默认扫描目标节点中的表现编排缺口：结果/奖励表现、金币/数值获得、连线/命中、宝石/图标特效、弹窗揭晓、阶段演出、成功/失败反馈等都算表现编排
 - 不要问用户“这个表现重不重要”；这些表现通常是设计师已知但 PRD 未写清。你的角色是代替程序员追问 UI 设计师，把“会播什么、怎么播、播完怎么办”追问成可实现 spec
-- 追问表现编排时只围绕 7 类实现缺口：触发条件、分支规则、播放顺序、资源清单、层级位置、控制规则、结束状态
-- 只有在原型/视觉资源问题和主流程问题都不阻塞时，才根据节点内容整理播放流程草案；再问最阻塞实现的具体问题，例如“连线是逐条亮还是同时亮”“金币飞入在弹窗关闭前还是关闭后”“弹窗自动关闭还是点击关闭”
+- 追问表现编排时只围绕 8 类实现缺口：触发条件、分支规则、播放顺序、接入方式、资源清单、层级位置、控制规则、结束状态
+- 接入方式必须使用 Cocos 程序能落地的语言：Tween/AnimationClip/Spine/ParticleSystem/Prefab/序列帧/音效联动；不要停留在“更酷一点”“有氛围感”等视觉形容
+- 只有在原型/视觉资源问题和主流程问题都不阻塞时，才根据节点内容整理播放流程草案；再问最阻塞实现的 1 个具体问题，例如“连线是逐条亮还是同时亮”“金币飞入用 Tween 走贝塞尔还是复用 prefab 动画”“Spine 播完是否等待回调再开弹窗”“粒子和音效是否跟随跳过一起停止”“弹窗自动关闭还是点击关闭”
+- 进入表现追问时，必须明确这个问题卡住了哪个槽位：trigger、branches、sequence、integrationModes、assets、layers、controls、endState；回复正文只问这 1 个问题，不要同轮列多问
+- 表现问题是软门槛：如果主文档已经足够交付但表现槽位仍有 AI 推断或缺失，可以 nodeComplete=true，但必须在 performanceSpec.readiness 保留风险，不要假装已经确认
 - 表现编排模板由节点内容动态组合，用户不需要选择模板，也不需要勾选开关
 - 你必须自己从用户最新一轮输入中识别一个或多个意图，不要要求用户选择模式
 - document_polish：用户补充、确认、修正文档内容时，更新 nodePatch
@@ -2981,7 +2984,7 @@ ${nodeContext}
 - 当用户上传参考图或界面截图时，仅对 client/UI 类文档像 screenshot-to-code 一样提取布局层级、控件分组、间距、对齐、视觉权重、可交互元素、状态反馈和素材/参考图边界，并转化为文档内容
 - 本轮是否包含图片参考：${hasReferenceImages ? '是' : '否'}
 - 当用户补充或确认的内容应合并进当前文档时，即使文档尚未完成，也要在回复末尾附加 JSON：{"nodeComplete": false, "intents": ["document_polish"], "prototypeInstruction": null, "nodePatch": {"summary": "中文一句话总结当前文档用途或 null", "content": "中文 Markdown 文档正文或本轮已采纳后的当前文档段落", "techNotes": "中文实现/接力注意事项或 null", "performanceSpec": null}}
-- 如果本轮补齐或修正了表现编排，nodePatch.performanceSpec 必须写入结构化对象：{"detected": true, "source": "ai", "confidence": 0-100, "eventTypes": ["表现类型"], "trigger": "触发条件或 null", "branches": ["分支规则"], "sequence": [{"title":"阶段名","detail":"播放内容","layer":"层级或 null","assets":["资源"],"waitFor":"等待条件或 null"}], "assets": ["资源"], "layers": ["层级"], "controls": ["可跳过/可打断/重复触发规则"], "endState": "播放完成后的状态或 null", "openQuestions": ["仍待确认的问题"], "prototypeNotes": ["原型应模拟的表现重点"]}
+- 如果本轮补齐或修正了表现编排，nodePatch.performanceSpec 必须写入结构化对象：{"detected": true, "source": "ai", "confidence": 0-100, "eventTypes": ["表现类型"], "integrationModes": ["Cocos Tween 变换 / AnimationClip/cc.Animation / Spine/Skeleton / ParticleSystem 粒子 / Prefab 特效/弹窗 / 序列帧 / 音效联动"], "trigger": "触发条件或 null", "branches": ["分支规则"], "sequence": [{"title":"阶段名","detail":"播放内容","layer":"层级或 null","assets":["资源"],"waitFor":"等待条件或 null"}], "assets": ["资源"], "layers": ["层级"], "controls": ["可跳过/可打断/重复触发规则"], "endState": "播放完成后的状态或 null", "openQuestions": ["仍待确认的问题"], "prototypeNotes": ["原型应模拟的表现重点"], "slotStatus": {"trigger":{"status":"missing/inferred/confirmed/waived","detail":"已知内容或 null","question":"该槽位待问问题或 null"}, "branches":{"status":"missing/inferred/confirmed/waived"}, "sequence":{"status":"missing/inferred/confirmed/waived"}, "integrationModes":{"status":"missing/inferred/confirmed/waived"}, "assets":{"status":"missing/inferred/confirmed/waived"}, "layers":{"status":"missing/inferred/confirmed/waived"}, "controls":{"status":"missing/inferred/confirmed/waived"}, "endState":{"status":"missing/inferred/confirmed/waived"}}, "blockingQuestion":{"slot":"当前最阻塞槽位","question":"只问 1 个问题"}, "readiness":{"score":0-100,"level":"ready/risk/blocked/waived","confirmedSlots":["已确认槽位"],"inferredSlots":["AI 推断槽位"],"missingSlots":["缺失槽位"],"waivedSlots":["豁免槽位"],"riskSummary":"中文风险说明或 null"}, "waivedReason":"豁免原因或 null"}
 - 当同一轮还要求更新右侧原型时，把 prototype_update 加入 intents，并填写中文 prototypeInstruction；如果没有原型相关要求，prototypeInstruction 必须为 null
 - 如果用户确认了表现流程，且右侧原型需要同步表现顺序，prototypeInstruction 应简短说明要更新的播放阶段、弹窗/特效/数值表现和结束状态
 - 当你判断该文档已经足够交给后续 AI 执行时，把同一个 JSON 的 nodeComplete 设为 true，并让 nodePatch 包含最终文档内容

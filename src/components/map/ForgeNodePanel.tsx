@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { createNoSpecialPerformanceSpec, resolveNodePerformanceSpec } from '../../lib/performanceOrchestration'
+import { createNoSpecialPerformanceSpec, formatPerformanceSlotLabel, resolveNodePerformanceSpec } from '../../lib/performanceOrchestration'
 import { formatSpecLens, resolveNodeAudience, resolveNodeSpecLens } from '../../lib/prdNodeLens'
 import { useAppStore } from '../../store/appStore'
-import type { PrdNode } from '../../types/prdNode'
+import type { PrdNode, PrdPerformanceSlotKey, PrdPerformanceSlotStatusValue } from '../../types/prdNode'
 import { DocumentComparePreview, DocumentDiffPreview, DocumentPreview } from './DocumentPreview'
 
 interface ForgeNodePanelProps {
@@ -28,10 +28,46 @@ function audienceLabel(audience: ReturnType<typeof resolveNodeAudience>) {
   return '文档包'
 }
 
+function readinessLabel(level: NonNullable<NonNullable<PrdNode['performanceSpec']>['readiness']>['level']) {
+  if (level === 'ready') return '已确认'
+  if (level === 'risk') return '有风险'
+  if (level === 'blocked') return '阻塞较多'
+  return '已豁免'
+}
+
+function slotTone(status: PrdPerformanceSlotStatusValue) {
+  if (status === 'confirmed') return 'border-tertiary/40 bg-tertiary-container/30 text-tertiary'
+  if (status === 'waived') return 'border-outline-variant bg-surface-container-high text-on-surface-variant'
+  if (status === 'inferred') return 'border-secondary/40 bg-secondary-container/20 text-on-secondary-container'
+  return 'border-error/40 bg-error-container/20 text-error'
+}
+
+function slotStatusTitle(status: PrdPerformanceSlotStatusValue) {
+  if (status === 'confirmed') return '已确认'
+  if (status === 'waived') return '已豁免'
+  if (status === 'inferred') return 'AI 推断'
+  return '待确认'
+}
+
+function groupedSlots(
+  slotStatus: NonNullable<NonNullable<PrdNode['performanceSpec']>['slotStatus']> | undefined,
+  status: PrdPerformanceSlotStatusValue,
+) {
+  if (!slotStatus) return []
+  return (Object.keys(slotStatus) as PrdPerformanceSlotKey[]).filter((slot) => slotStatus[slot].status === status)
+}
+
 function PerformanceOrchestrationPanel({ node }: { node: PrdNode }) {
   const updateNode = useAppStore((state) => state.updateNode)
   const spec = resolveNodePerformanceSpec(node)
   const detected = Boolean(spec?.detected && !spec.disabled)
+  const hasBlockingQuestion = Boolean(spec?.blockingQuestion || spec?.openQuestions.length)
+
+  function markNoSpecialPerformance() {
+    const reason = window.prompt('请填写标记为无特殊表现的原因', '该节点只需要基础 UI/状态说明，无需额外特效或动效接入。')
+    if (reason === null) return
+    updateNode(node.id, { performanceSpec: createNoSpecialPerformanceSpec(reason.trim() || undefined) })
+  }
 
   return (
     <section className="mb-md border-b border-outline-variant pb-md">
@@ -62,6 +98,11 @@ function PerformanceOrchestrationPanel({ node }: { node: PrdNode }) {
           <p className="text-body-sm text-on-surface-variant">
             该节点已标记为基础 UI/状态说明，不再额外追问表现编排。
           </p>
+          {spec.waivedReason ? (
+            <p className="rounded border border-outline-variant bg-surface-container-high px-sm py-xs text-body-sm text-on-surface-variant">
+              豁免原因：{spec.waivedReason}
+            </p>
+          ) : null}
           <button
             type="button"
             onClick={() => updateNode(node.id, { performanceSpec: null })}
@@ -81,7 +122,38 @@ function PerformanceOrchestrationPanel({ node }: { node: PrdNode }) {
             <span className="rounded border border-outline-variant bg-surface-container-high px-sm py-xs text-label-md text-on-surface-variant">
               置信度 {spec.confidence}%
             </span>
+            {spec.readiness ? (
+              <span className={[
+                'rounded border px-sm py-xs text-label-md',
+                spec.readiness.level === 'ready'
+                  ? 'border-tertiary/40 bg-tertiary-container/30 text-tertiary'
+                  : spec.readiness.level === 'blocked'
+                    ? 'border-error/40 bg-error-container/30 text-error'
+                    : 'border-secondary/40 bg-secondary-container/20 text-on-secondary-container',
+              ].join(' ')}>
+                可实现度 {spec.readiness.score}% · {readinessLabel(spec.readiness.level)}
+              </span>
+            ) : null}
           </div>
+
+          {spec.readiness?.riskSummary ? (
+            <div className="rounded border border-secondary/30 bg-secondary-container/20 px-sm py-xs text-body-sm leading-relaxed text-on-secondary-container">
+              {spec.readiness.riskSummary}
+            </div>
+          ) : null}
+
+          {spec.integrationModes?.length ? (
+            <div className="space-y-xs">
+              <div className="text-label-md font-medium text-on-surface">接入方式建议</div>
+              <div className="flex flex-wrap gap-xs">
+                {spec.integrationModes.slice(0, 6).map((mode) => (
+                  <span key={mode} className="rounded border border-tertiary/30 bg-tertiary-container/30 px-sm py-xs text-label-md text-tertiary">
+                    {mode}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : null}
 
           {spec.sequence.length ? (
             <div className="space-y-xs">
@@ -96,27 +168,57 @@ function PerformanceOrchestrationPanel({ node }: { node: PrdNode }) {
             </div>
           ) : null}
 
-          {spec.openQuestions.length ? (
+          {hasBlockingQuestion ? (
             <div className="space-y-xs">
               <div className="text-label-md font-medium text-on-surface">待确认问题</div>
-              <ul className="list-disc space-y-xs pl-md text-body-sm leading-relaxed text-on-surface-variant">
-                {spec.openQuestions.slice(0, 4).map((question) => <li key={question}>{question}</li>)}
-              </ul>
+              <div className="rounded border border-secondary/30 bg-secondary-container/20 px-sm py-xs text-body-sm leading-relaxed text-on-secondary-container">
+                <span className="font-medium">当前最阻塞：</span>
+                {spec.blockingQuestion ? `[${formatPerformanceSlotLabel(spec.blockingQuestion.slot)}] ${spec.blockingQuestion.question}` : spec.openQuestions[0]}
+              </div>
+              {spec.openQuestions.length > 1 ? (
+                <ul className="list-disc space-y-xs pl-md text-body-sm leading-relaxed text-on-surface-variant">
+                  {spec.openQuestions.slice(1, 5).map((question) => <li key={question}>{question}</li>)}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
+
+          {spec.slotStatus ? (
+            <div className="space-y-xs">
+              <div className="text-label-md font-medium text-on-surface">确认槽位</div>
+              <div className="flex flex-wrap gap-xs">
+                {(['confirmed', 'inferred', 'missing', 'waived'] as const).flatMap((status) => (
+                  groupedSlots(spec.slotStatus, status).map((slot) => (
+                    <span key={`${status}-${slot}`} className={`rounded border px-sm py-xs text-label-md ${slotTone(status)}`}>
+                      {slotStatusTitle(status)} · {formatPerformanceSlotLabel(slot)}
+                    </span>
+                  ))
+                ))}
+              </div>
             </div>
           ) : null}
 
           <button
             type="button"
-            onClick={() => updateNode(node.id, { performanceSpec: createNoSpecialPerformanceSpec() })}
+            onClick={markNoSpecialPerformance}
             className="rounded border border-outline-variant px-sm py-xs text-label-md text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface"
           >
             标记为无特殊表现
           </button>
         </div>
       ) : (
-        <p className="text-body-sm leading-relaxed text-on-surface-variant">
-          当前节点没有明显表现编排信号。后续对话中如果补充“播放特效、弹窗、金币、连线、完成反馈”等内容，系统会自动进入表现澄清。
-        </p>
+        <div className="space-y-sm">
+          <p className="text-body-sm leading-relaxed text-on-surface-variant">
+            当前节点没有明显表现编排信号。后续对话中如果补充“播放特效、弹窗、金币、连线、完成反馈”等内容，系统会自动进入表现澄清。
+          </p>
+          <button
+            type="button"
+            onClick={markNoSpecialPerformance}
+            className="rounded border border-outline-variant px-sm py-xs text-label-md text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface"
+          >
+            标记为无特殊表现
+          </button>
+        </div>
       )}
     </section>
   )

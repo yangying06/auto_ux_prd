@@ -42,6 +42,39 @@ export interface PrdNodeReference {
 }
 
 export type PrdPerformanceSpecSource = 'auto' | 'ai' | 'user'
+export type PrdPerformanceSlotKey =
+  | 'trigger'
+  | 'branches'
+  | 'sequence'
+  | 'integrationModes'
+  | 'assets'
+  | 'layers'
+  | 'controls'
+  | 'endState'
+export type PrdPerformanceSlotStatusValue = 'missing' | 'inferred' | 'confirmed' | 'waived'
+
+export interface PrdPerformanceSlotStatus {
+  status: PrdPerformanceSlotStatusValue
+  detail?: string | null
+  question?: string | null
+}
+
+export type PrdPerformanceSlotStatusMap = Record<PrdPerformanceSlotKey, PrdPerformanceSlotStatus>
+
+export interface PrdPerformanceBlockingQuestion {
+  slot: PrdPerformanceSlotKey
+  question: string
+}
+
+export interface PrdPerformanceReadiness {
+  score: number
+  level: 'ready' | 'risk' | 'blocked' | 'waived'
+  confirmedSlots: PrdPerformanceSlotKey[]
+  inferredSlots: PrdPerformanceSlotKey[]
+  missingSlots: PrdPerformanceSlotKey[]
+  waivedSlots: PrdPerformanceSlotKey[]
+  riskSummary: string | null
+}
 
 export interface PrdPerformanceSequenceStep {
   id?: string | null
@@ -58,6 +91,7 @@ export interface PrdPerformanceSpec {
   source: PrdPerformanceSpecSource
   confidence: number
   eventTypes: string[]
+  integrationModes?: string[]
   trigger: string | null
   branches: string[]
   sequence: PrdPerformanceSequenceStep[]
@@ -67,6 +101,10 @@ export interface PrdPerformanceSpec {
   endState: string | null
   openQuestions: string[]
   prototypeNotes: string[]
+  slotStatus?: PrdPerformanceSlotStatusMap
+  blockingQuestion?: PrdPerformanceBlockingQuestion | null
+  readiness?: PrdPerformanceReadiness
+  waivedReason?: string | null
   updatedAt?: string | null
 }
 

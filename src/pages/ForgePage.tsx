@@ -229,6 +229,15 @@ export function ForgePage() {
 
   const node = prdTree?.[nodeId ?? ''] ?? null
   const messages = nodeChats[nodeId ?? ''] ?? []
+  const performanceSpec = node ? resolveNodePerformanceSpec(node) : null
+  const hasPerformanceRisk = Boolean(
+    nodeComplete
+    && performanceSpec?.detected
+    && !performanceSpec.disabled
+    && performanceSpec.readiness
+    && performanceSpec.readiness.level !== 'ready'
+    && performanceSpec.readiness.level !== 'waived',
+  )
 
   useEffect(() => {
     if (!node && nodeId) navigate('/')
@@ -540,9 +549,11 @@ export function ForgePage() {
           aria-pressed={nodeComplete}
           className={[
             'flex min-h-[44px] items-center gap-xs rounded-lg border px-md py-sm text-label-md font-medium transition-all',
-            nodeComplete
+            nodeComplete && !hasPerformanceRisk
               ? 'border-tertiary bg-tertiary-container text-on-tertiary-container active-glow'
-              : 'border-outline-variant bg-secondary-container text-on-secondary-container',
+              : hasPerformanceRisk
+                ? 'border-secondary bg-secondary-container text-on-secondary-container'
+                : 'border-outline-variant bg-secondary-container text-on-secondary-container',
           ].join(' ')}
         >
           <span
@@ -552,9 +563,9 @@ export function ForgePage() {
               fontVariationSettings: nodeComplete ? "'FILL' 1" : "'FILL' 0",
             }}
           >
-            {nodeComplete ? 'check_circle' : 'auto_awesome'}
+            {nodeComplete ? hasPerformanceRisk ? 'warning' : 'check_circle' : 'auto_awesome'}
           </span>
-          {nodeComplete ? '已完成' : '待打磨'}
+          {nodeComplete ? hasPerformanceRisk ? '已完成 · 表现风险' : '已完成' : '待打磨'}
         </button>
       </header>
 

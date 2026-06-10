@@ -1,148 +1,49 @@
-import type { PrdNode, PrdPerformanceSequenceStep, PrdPerformanceSpec } from '../types/prdNode'
+import type {
+  PrdNode,
+  PrdPerformanceBlockingQuestion,
+  PrdPerformanceReadiness,
+  PrdPerformanceSequenceStep,
+  PrdPerformanceSlotKey,
+  PrdPerformanceSlotStatus,
+  PrdPerformanceSlotStatusMap,
+  PrdPerformanceSlotStatusValue,
+  PrdPerformanceSpec,
+} from '../types/prdNode'
+import { COCOS_MOTION_INTEGRATION_MODES, COCOS_MOTION_RULES } from '../data/cocosMotionQuestionBank'
 
-interface SignalRule {
-  type: string
-  weight: number
-  pattern: RegExp
-  sequence: PrdPerformanceSequenceStep[]
-  questions: string[]
-  assets?: string[]
-  layers?: string[]
-  controls?: string[]
-  prototypeNotes?: string[]
-}
-
-const SIGNAL_RULES: SignalRule[] = [
-  {
-    type: '结果/奖励表现',
-    weight: 28,
-    pattern: /中奖|jackpot|抽中|抽奖|奖励|大奖|命中奖励|获得奖励|掉落|开箱|结算奖励|权益解锁|解锁奖励/i,
-    sequence: [
-      { title: '结果锁定', detail: '结果返回后先冻结当前演出对象，避免重复触发或提前刷新最终奖励。', layer: '逻辑结果层' },
-      { title: '主结果表现', detail: '播放中奖、获得、解锁或达成的主表现，确认不同结果等级是否分支。', layer: '主表现层' },
-    ],
-    questions: [
-      '这个结果由哪个字段或条件决定？不同等级是否播放不同表现？',
-      '如果同时命中多个结果，主表现优先级如何排序？',
-    ],
-    assets: ['中奖/结果主特效', '奖励图标或结果标题'],
-    layers: ['主表现层', '结果展示层'],
-    controls: ['表现播放期间是否允许再次触发同类事件待确认'],
-    prototypeNotes: ['原型需要展示结果锁定、主表现爆点和结果确认三个阶段。'],
-  },
-  {
-    type: '金币/数值获得',
-    weight: 24,
-    pattern: /金币|coin|gold|钻石|宝石|积分|货币|资产|余额|数量|数值|金额|score|point|reward amount/i,
-    sequence: [
-      { title: '数值揭示', detail: '展示获得的金币、宝石、积分或金额，确认是直接显示还是滚动到最终值。', layer: '数值层' },
-      { title: '资产归位', detail: '如需要，播放金币/图标飞入资产栏并在飞入结束后刷新最终数值。', layer: 'HUD 资产层' },
-    ],
-    questions: [
-      '数值是直接出现、滚动增长，还是先隐藏再揭晓？',
-      '金币/资产是否需要飞入顶部资产栏？刷新最终数值在飞入前还是飞入后？',
-    ],
-    assets: ['金币/资产图标', '数值滚动组件', '飞入粒子或轨迹'],
-    layers: ['数值层', 'HUD 资产层'],
-    controls: ['数值滚动期间是否可跳过待确认'],
-    prototypeNotes: ['原型需要做出数字滚动或资产飞入的占位表现。'],
-  },
-  {
-    type: '连线/命中表现',
-    weight: 22,
-    pattern: /连线|命中线|中奖线|line|棋盘|格子|组合|消除|匹配|高亮线|命中区域/i,
-    sequence: [
-      { title: '命中区域标记', detail: '高亮命中的线、格子或组合区域，确认逐条播放还是同时播放。', layer: '棋盘/内容层' },
-      { title: '命中特效', detail: '在命中区域播放对应特效，确认是否等待该特效播完再进入下一阶段。', layer: '特效层' },
-    ],
-    questions: [
-      '连线/命中区域是逐条播放还是所有命中项同时播放？',
-      '命中特效播放完成后是否必须等待，再进入弹窗或奖励表现？',
-    ],
-    assets: ['连线高亮特效', '命中区域特效'],
-    layers: ['棋盘/内容层', '特效层'],
-    prototypeNotes: ['原型需要把命中区域和后续表现的先后关系做出来。'],
-  },
-  {
-    type: '宝石/图标特效',
-    weight: 18,
-    pattern: /宝石|gem|图标|icon|符石|道具|碎片|item|道具特效|图标特效/i,
-    sequence: [
-      { title: '对象特效', detail: '在命中的宝石、图标或道具上播放专属特效，确认资源名和替换规则。', layer: '对象特效层' },
-    ],
-    questions: [
-      '不同宝石、图标或道具是否使用不同特效资源？资源命名或映射规则是什么？',
-      '对象特效是在原位置播放，还是复制到独立表现层播放？',
-    ],
-    assets: ['对象专属特效', '道具/宝石/图标资源'],
-    layers: ['对象特效层'],
-    prototypeNotes: ['原型需要标注哪个对象触发了哪类特效。'],
-  },
-  {
-    type: '弹窗/揭晓表现',
-    weight: 24,
-    pattern: /弹窗|popup|modal|面板|揭晓|展开|弹出|关闭|收起|结果窗|奖励窗|toast/i,
-    sequence: [
-      { title: '弹窗入场', detail: '结果弹窗或提示层入场，确认展开方向、遮罩、是否全屏以及入场前置特效。', layer: '弹窗层' },
-      { title: '确认与关闭', detail: '弹窗停留、自动关闭或等待用户点击关闭，确认关闭后是否继续播放收尾表现。', layer: '弹窗层' },
-    ],
-    questions: [
-      '弹窗是自动关闭还是必须用户点击关闭？如果自动关闭，关闭前停留多久？',
-      '弹窗入场前是否需要先播特效？关闭后是否还有收尾特效？',
-    ],
-    assets: ['弹窗 Prefab/面板', '遮罩', '入场/关闭特效'],
-    layers: ['弹窗层', '遮罩层'],
-    controls: ['弹窗展示期间是否允许跳过、关闭或重复点击待确认'],
-    prototypeNotes: ['原型需要模拟弹窗入场、停留和关闭后的状态回落。'],
-  },
-  {
-    type: '阶段演出/特效队列',
-    weight: 26,
-    pattern: /播放|特效|粒子|光效|音效|震屏|震动|动画|动效|展开|滚动|闪烁|高亮|飞入|播完|结束后|然后|随后|依次|阶段|队列/i,
-    sequence: [
-      { title: '前置表现', detail: '播放前置光效、音效、震屏或高亮，用来承接事件发生。', layer: '全局特效层' },
-      { title: '队列推进', detail: '按阶段播放展开、滚动、主特效和收尾特效，确认每段是否等待上一段完成。', layer: '表现队列' },
-    ],
-    questions: [
-      '完整播放顺序是什么？哪些阶段必须等上一个特效播完？',
-      '震屏、音效、粒子分别在哪个阶段触发？是否存在资源缺失时的兜底表现？',
-    ],
-    assets: ['粒子/光效', '音效', '震屏参数'],
-    layers: ['全局特效层', '表现队列'],
-    controls: ['表现队列是否可被跳过、打断、合并或重播待确认'],
-    prototypeNotes: ['原型需要用分阶段时间线表达播放顺序，而不是只画静态最终态。'],
-  },
-  {
-    type: '成功/完成反馈',
-    weight: 16,
-    pattern: /成功|完成|达成|提交成功|支付成功|上传完成|生成完成|领取成功|强化成功|升级成功/i,
-    sequence: [
-      { title: '完成反馈', detail: '展示成功、完成、达成或已生成的明确反馈。', layer: '反馈层' },
-      { title: '后续引导', detail: '表现结束后引导用户继续、查看详情、使用结果或返回原界面。', layer: '操作层' },
-    ],
-    questions: [
-      '完成反馈结束后，用户下一步是关闭、查看详情、继续操作还是跳转？',
-      '成功反馈是否需要和奖励、权益或数值变化串联播放？',
-    ],
-    assets: ['成功图标/完成态素材', '完成提示音'],
-    layers: ['反馈层', '操作层'],
-  },
-  {
-    type: '失败/风险提示',
-    weight: 16,
-    pattern: /失败|错误|异常|风险|警告|扣除|损失|强化失败|未命中|空奖|未中奖|error|warning/i,
-    sequence: [
-      { title: '异常提示', detail: '展示失败、风险、错误或未命中的结果提示，确认是否需要弱化或强调。', layer: '反馈层' },
-      { title: '恢复路径', detail: '提示用户重试、补足条件、返回或查看原因。', layer: '操作层' },
-    ],
-    questions: [
-      '失败或风险提示结束后，用户可以重试、返回还是必须确认？',
-      '是否需要展示原因、损失、补偿或下一步解决路径？',
-    ],
-    assets: ['失败/警告图标', '错误提示音'],
-    layers: ['反馈层', '操作层'],
-  },
+const PERFORMANCE_SLOT_DEFINITIONS: Array<{
+  key: PrdPerformanceSlotKey
+  label: string
+  question: string
+}> = [
+  { key: 'trigger', label: '触发', question: '这个表现由哪个用户动作、接口字段、状态变化或系统事件触发？' },
+  { key: 'branches', label: '分支', question: '不同结果、等级、道具、金额或异常状态是否使用不同表现？' },
+  { key: 'sequence', label: '播放顺序', question: '完整播放顺序是什么？哪些阶段必须等待上一段完成？' },
+  { key: 'integrationModes', label: '接入方式', question: '每段分别用 Tween、AnimationClip、Spine、ParticleSystem、Prefab、序列帧还是音效联动接入？' },
+  { key: 'assets', label: '资源', question: '表现资源分别使用哪些 Spine、AnimationClip、粒子、音效、图标、弹窗或文案？资源缺失时怎么兜底？' },
+  { key: 'layers', label: '层级', question: '表现播放在哪些层级上：原界面、内容层、HUD、UIEffect、PopUp、Dialog、Notify 还是 Guide？' },
+  { key: 'controls', label: '控制', question: '表现期间能否跳过、打断、重复触发、排队或合并多个结果？' },
+  { key: 'endState', label: '结束状态', question: '播放完成后界面回到哪里？哪些数值、按钮、列表或状态需要刷新？' },
 ]
+
+const PERFORMANCE_SLOT_KEYS = PERFORMANCE_SLOT_DEFINITIONS.map((definition) => definition.key)
+const PERFORMANCE_BLOCKING_SLOT_PRIORITY: PrdPerformanceSlotKey[] = [
+  'trigger',
+  'branches',
+  'integrationModes',
+  'sequence',
+  'assets',
+  'layers',
+  'controls',
+  'endState',
+]
+const PERFORMANCE_SLOT_LABELS = Object.fromEntries(
+  PERFORMANCE_SLOT_DEFINITIONS.map((definition) => [definition.key, definition.label]),
+) as Record<PrdPerformanceSlotKey, string>
+const PERFORMANCE_SLOT_QUESTIONS = Object.fromEntries(
+  PERFORMANCE_SLOT_DEFINITIONS.map((definition) => [definition.key, definition.question]),
+) as Record<PrdPerformanceSlotKey, string>
+const SLOT_STATUS_VALUES = new Set<PrdPerformanceSlotStatusValue>(['missing', 'inferred', 'confirmed', 'waived'])
 
 function unique(items: string[], limit = 12) {
   const seen = new Set<string>()
@@ -226,10 +127,220 @@ function normalizeStringArray(value: unknown): string[] {
   }))
 }
 
+function collectIntegrationModes(text: string, ruleModes: string[] = []) {
+  return unique([
+    ...ruleModes,
+    ...COCOS_MOTION_INTEGRATION_MODES.flatMap((mode) => (
+      mode.keywords.test(text) ? [mode.label] : []
+    )),
+  ], 10)
+}
+
 function nullableString(value: unknown): string | null {
   if (typeof value !== 'string') return null
   const text = value.trim()
   return text ? text : null
+}
+
+function normalizeSlotKey(value: unknown): PrdPerformanceSlotKey | null {
+  if (typeof value !== 'string') return null
+  return PERFORMANCE_SLOT_KEYS.includes(value as PrdPerformanceSlotKey) ? value as PrdPerformanceSlotKey : null
+}
+
+function normalizeSlotStatusValue(value: unknown): PrdPerformanceSlotStatusValue | null {
+  if (typeof value !== 'string') return null
+  return SLOT_STATUS_VALUES.has(value as PrdPerformanceSlotStatusValue) ? value as PrdPerformanceSlotStatusValue : null
+}
+
+function slotHasValue(spec: PrdPerformanceSpec, key: PrdPerformanceSlotKey) {
+  if (key === 'trigger') return Boolean(spec.trigger)
+  if (key === 'branches') return spec.branches.length > 0 || spec.eventTypes.length <= 1
+  if (key === 'sequence') return spec.sequence.length > 0
+  if (key === 'integrationModes') return Boolean(spec.integrationModes?.length)
+  if (key === 'assets') return spec.assets.length > 0
+  if (key === 'layers') return spec.layers.length > 0
+  if (key === 'controls') return spec.controls.length > 0
+  return Boolean(spec.endState)
+}
+
+function summarizeSlotValue(spec: PrdPerformanceSpec, key: PrdPerformanceSlotKey) {
+  if (key === 'trigger') return spec.trigger
+  if (key === 'branches') return spec.branches.join('；') || (spec.eventTypes.length <= 1 ? '当前未识别明显分支，按单一表现流程处理。' : null)
+  if (key === 'sequence') return spec.sequence.map((step) => step.title).join(' → ') || null
+  if (key === 'integrationModes') return spec.integrationModes?.join('、') || null
+  if (key === 'assets') return spec.assets.join('、') || null
+  if (key === 'layers') return spec.layers.join('、') || null
+  if (key === 'controls') return spec.controls.join('；') || null
+  return spec.endState
+}
+
+function normalizeSlotStatusItem(value: unknown, spec: PrdPerformanceSpec, key: PrdPerformanceSlotKey): PrdPerformanceSlotStatus {
+  const fallbackStatus: PrdPerformanceSlotStatusValue = spec.disabled
+    ? 'waived'
+    : slotHasValue(spec, key)
+      ? spec.source === 'user' ? 'confirmed' : 'inferred'
+      : 'missing'
+  const fallbackQuestion = PERFORMANCE_SLOT_QUESTIONS[key]
+
+  if (typeof value === 'string') {
+    const status = normalizeSlotStatusValue(value) ?? fallbackStatus
+    return {
+      status,
+      detail: status === 'missing' ? null : summarizeSlotValue(spec, key),
+      question: status === 'missing' || status === 'inferred' ? fallbackQuestion : null,
+    }
+  }
+
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const candidate = value as Record<string, unknown>
+    const status = normalizeSlotStatusValue(candidate.status) ?? fallbackStatus
+    return {
+      status,
+      detail: nullableString(candidate.detail) ?? (status === 'missing' ? null : summarizeSlotValue(spec, key)),
+      question: nullableString(candidate.question) ?? (status === 'missing' || status === 'inferred' ? fallbackQuestion : null),
+    }
+  }
+
+  return {
+    status: fallbackStatus,
+    detail: fallbackStatus === 'missing' ? null : summarizeSlotValue(spec, key),
+    question: fallbackStatus === 'missing' || fallbackStatus === 'inferred' ? fallbackQuestion : null,
+  }
+}
+
+function normalizeSlotStatusMap(value: unknown, spec: PrdPerformanceSpec): PrdPerformanceSlotStatusMap {
+  const source = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+  return Object.fromEntries(PERFORMANCE_SLOT_KEYS.map((key) => [
+    key,
+    normalizeSlotStatusItem(source[key], spec, key),
+  ])) as PrdPerformanceSlotStatusMap
+}
+
+function calculateReadiness(slotStatus: PrdPerformanceSlotStatusMap, disabled = false): PrdPerformanceReadiness {
+  const confirmedSlots = PERFORMANCE_SLOT_KEYS.filter((key) => slotStatus[key].status === 'confirmed')
+  const inferredSlots = PERFORMANCE_SLOT_KEYS.filter((key) => slotStatus[key].status === 'inferred')
+  const missingSlots = PERFORMANCE_SLOT_KEYS.filter((key) => slotStatus[key].status === 'missing')
+  const waivedSlots = PERFORMANCE_SLOT_KEYS.filter((key) => slotStatus[key].status === 'waived')
+  const score = Math.round(PERFORMANCE_SLOT_KEYS.reduce((sum, key) => {
+    const status = slotStatus[key].status
+    if (status === 'confirmed' || status === 'waived') return sum + 100
+    if (status === 'inferred') return sum + 65
+    return sum
+  }, 0) / PERFORMANCE_SLOT_KEYS.length)
+  const level: PrdPerformanceReadiness['level'] = disabled || waivedSlots.length === PERFORMANCE_SLOT_KEYS.length
+    ? 'waived'
+    : missingSlots.length === 0 && inferredSlots.length === 0
+      ? 'ready'
+      : score >= 60
+        ? 'risk'
+        : 'blocked'
+  const unresolvedSlots = [...missingSlots, ...inferredSlots]
+  const riskSummary = level === 'ready'
+    ? null
+    : level === 'waived'
+      ? '该节点已标记为无特殊表现或表现问题已被豁免。'
+      : `表现仍有 ${unresolvedSlots.length} 个槽位未由设计师明确确认：${unresolvedSlots.map(formatPerformanceSlotLabel).join('、')}。`
+
+  return {
+    score,
+    level,
+    confirmedSlots,
+    inferredSlots,
+    missingSlots,
+    waivedSlots,
+    riskSummary,
+  }
+}
+
+function normalizeReadiness(value: unknown, fallback: PrdPerformanceReadiness): PrdPerformanceReadiness {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return fallback
+  const candidate = value as Record<string, unknown>
+  const rawLevel = candidate.level === 'ready' || candidate.level === 'risk' || candidate.level === 'blocked' || candidate.level === 'waived'
+    ? candidate.level
+    : null
+  const rawRiskSummary = nullableString(candidate.riskSummary ?? candidate.risk_summary)
+
+  // Readiness is a derived protocol state. AI may supply a summary, but score,
+  // level and slot lists must stay consistent with the normalized 8-slot map.
+  return {
+    ...fallback,
+    riskSummary: rawLevel === fallback.level && rawRiskSummary ? rawRiskSummary : fallback.riskSummary,
+  }
+}
+
+function normalizeBlockingQuestion(value: unknown, slotStatus: PrdPerformanceSlotStatusMap): PrdPerformanceBlockingQuestion | null {
+  const firstMissing = PERFORMANCE_BLOCKING_SLOT_PRIORITY.find((key) => slotStatus[key].status === 'missing')
+  const firstInferred = PERFORMANCE_BLOCKING_SLOT_PRIORITY.find((key) => slotStatus[key].status === 'inferred')
+  const fallbackSlot = firstMissing ?? firstInferred ?? null
+  const fallbackQuestion = fallbackSlot
+    ? slotStatus[fallbackSlot].question ?? PERFORMANCE_SLOT_QUESTIONS[fallbackSlot]
+    : null
+
+  if (typeof value === 'string') {
+    const question = value.trim()
+    return question && fallbackSlot ? { slot: fallbackSlot, question } : null
+  }
+
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const candidate = value as Record<string, unknown>
+    const slot = normalizeSlotKey(candidate.slot) ?? fallbackSlot
+    const question = nullableString(candidate.question) ?? (slot ? fallbackQuestion : null)
+    if (slot && question) return { slot, question }
+  }
+
+  return fallbackSlot && fallbackQuestion ? { slot: fallbackSlot, question: fallbackQuestion } : null
+}
+
+function inferQuestionSlot(question: string): PrdPerformanceSlotKey {
+  if (/字段|条件|触发|状态/.test(question)) return 'trigger'
+  if (/等级|分支|不同|优先级|多个结果|同时命中/.test(question)) return 'branches'
+  if (/顺序|先后|阶段|播完|播放完成|等待|自动关闭|点击关闭|飞入|路径|数量|间隔|滚动/.test(question)) return 'sequence'
+  if (/Tween|Spine|粒子|Particle|AnimationClip|Prefab|prefab|序列帧|音效|接入/.test(question)) return 'integrationModes'
+  if (/资源|素材|动画名|clip|音效名|命名|映射/.test(question)) return 'assets'
+  if (/层级|layer|原位置|独立表现层|UIEffect|PopUp|Dialog/.test(question)) return 'layers'
+  if (/跳过|打断|重复|合并|重播|防重|停止|允许/.test(question)) return 'controls'
+  if (/结束后|播放完成后|刷新|回到|关闭后|下一步|恢复/.test(question)) return 'endState'
+  return 'sequence'
+}
+
+function selectBlockingQuestion(
+  questions: string[],
+  slotPriority: PrdPerformanceSlotKey[],
+): PrdPerformanceBlockingQuestion | null {
+  if (!questions.length) return null
+  const uniqueQuestions = unique(questions, 24)
+  const priority = slotPriority.length ? slotPriority : PERFORMANCE_SLOT_KEYS
+
+  for (const slot of priority) {
+    const question = uniqueQuestions.find((item) => inferQuestionSlot(item) === slot)
+    if (question) return { slot, question }
+  }
+
+  const question = uniqueQuestions[0]
+  return question ? { slot: inferQuestionSlot(question), question } : null
+}
+
+function applyPerformanceProtocol(spec: PrdPerformanceSpec, raw?: Record<string, unknown>): PrdPerformanceSpec {
+  const slotStatus = normalizeSlotStatusMap(raw?.slotStatus ?? raw?.slot_status, spec)
+  const calculatedReadiness = calculateReadiness(slotStatus, spec.disabled === true)
+  const readiness = normalizeReadiness(raw?.readiness, calculatedReadiness)
+  const blockingQuestion = spec.disabled
+    ? null
+    : normalizeBlockingQuestion(raw?.blockingQuestion ?? raw?.blocking_question, slotStatus)
+
+  return {
+    ...spec,
+    slotStatus,
+    blockingQuestion,
+    readiness,
+    waivedReason: nullableString(raw?.waivedReason ?? raw?.waived_reason) ?? spec.waivedReason ?? null,
+  }
+}
+
+export function formatPerformanceSlotLabel(slot: PrdPerformanceSlotKey) {
+  return PERFORMANCE_SLOT_LABELS[slot]
 }
 
 export function normalizePerformanceSpec(value: unknown): PrdPerformanceSpec | null {
@@ -241,12 +352,13 @@ export function normalizePerformanceSpec(value: unknown): PrdPerformanceSpec | n
     ? candidate.source
     : 'ai'
 
-  return {
+  const spec: PrdPerformanceSpec = {
     detected,
     disabled,
     source,
     confidence: clampConfidence(typeof candidate.confidence === 'number' ? candidate.confidence : detected ? 70 : 0),
     eventTypes: normalizeStringArray(candidate.eventTypes ?? candidate.event_types ?? candidate.types),
+    integrationModes: normalizeStringArray(candidate.integrationModes ?? candidate.integration_modes ?? candidate.integrations),
     trigger: nullableString(candidate.trigger ?? candidate.triggerCondition ?? candidate.trigger_condition),
     branches: normalizeStringArray(candidate.branches ?? candidate.branchRules ?? candidate.branch_rules),
     sequence: normalizeSequence(candidate.sequence ?? candidate.flow ?? candidate.steps),
@@ -256,38 +368,61 @@ export function normalizePerformanceSpec(value: unknown): PrdPerformanceSpec | n
     endState: nullableString(candidate.endState ?? candidate.end_state),
     openQuestions: normalizeStringArray(candidate.openQuestions ?? candidate.open_questions ?? candidate.questions),
     prototypeNotes: normalizeStringArray(candidate.prototypeNotes ?? candidate.prototype_notes ?? candidate.prototype),
+    waivedReason: nullableString(candidate.waivedReason ?? candidate.waived_reason),
     updatedAt: nullableString(candidate.updatedAt ?? candidate.updated_at),
   }
+  return applyPerformanceProtocol(spec, candidate)
 }
 
 export function inferPerformanceSpecFromNode(node: PrdNode): PrdPerformanceSpec | null {
   const text = collectNodeText(node)
   if (!text.trim()) return null
 
-  const matches = SIGNAL_RULES.filter((rule) => rule.pattern.test(text))
+  const matches = COCOS_MOTION_RULES.filter((rule) => rule.pattern.test(text))
   if (!matches.length) return null
 
   const confidence = clampConfidence(35 + matches.reduce((sum, rule) => sum + rule.weight, 0))
   const sequence = matches.flatMap((rule) => rule.sequence)
   const eventTypes = unique(matches.map((rule) => rule.type), 8)
-  const hasSequentialWords = /然后|随后|依次|播完|结束后|阶段|队列/.test(text)
-  const hasResultWords = /中奖|jackpot|奖励|成功|完成|解锁|获得|失败|错误/.test(text)
+  const integrationModes = collectIntegrationModes(text, matches.flatMap((rule) => rule.integrationModes))
+  const hasSequentialWords = /然后|随后|依次|播完|结束后|阶段|队列|sequence|loop|out/.test(text)
+  const hasResultWords = /中奖|jackpot|bigwin|bonus|free|奖励|成功|完成|解锁|获得|失败|错误/.test(text)
+  const modeQuestions = integrationModes.length
+    ? [`这段表现建议按 ${integrationModes.join('、')} 接入；哪些已有资源可以直接复用，哪些需要程序用占位或 Tween 补齐？`]
+    : []
+  const blockingQuestion = selectBlockingQuestion(
+    [
+      ...matches.flatMap((rule) => rule.questions),
+      ...modeQuestions,
+      ...COCOS_MOTION_INTEGRATION_MODES.flatMap((mode) => (
+        mode.keywords.test(text) ? mode.designerQuestions : []
+      )),
+    ],
+    unique([
+      ...matches.flatMap((rule) => rule.slotPriority ?? []),
+      ...COCOS_MOTION_INTEGRATION_MODES.flatMap((mode) => (
+        mode.keywords.test(text) ? mode.slotPriority ?? [] : []
+      )),
+    ], PERFORMANCE_SLOT_KEYS.length) as PrdPerformanceSlotKey[],
+  )
 
   const openQuestions = unique([
     hasResultWords ? '触发这个表现的结果字段、状态或条件是什么？' : '这个表现由哪个用户动作、系统事件或状态变化触发？',
     ...matches.flatMap((rule) => rule.questions),
+    ...modeQuestions,
     hasSequentialWords ? 'PRD 中提到的“然后/结束后”是否必须严格等待上一段播放完成？' : '完整播放顺序是什么？哪些阶段需要等待上一段完成？',
-    '表现资源分别使用哪些特效、音效、图标、弹窗或文案？资源缺失时怎么兜底？',
+    '表现资源分别使用哪些 Spine、AnimationClip、粒子、音效、图标、弹窗或文案？资源缺失时怎么兜底？',
     '表现播放在哪些层级上：原界面、内容层、HUD、弹窗层、全屏遮罩还是全局特效层？',
     '表现期间能否跳过、打断、重复触发或合并多个结果？',
     '播放完成后界面回到哪里？哪些数值、按钮、列表或状态需要刷新？',
   ], 7)
 
-  return {
+  const spec: PrdPerformanceSpec = {
     detected: true,
     source: 'auto',
     confidence,
     eventTypes,
+    integrationModes,
     trigger: hasResultWords
       ? '根据结果返回、命中条件或完成状态触发，具体字段待确认。'
       : '根据节点中的表现事件触发，具体触发条件待确认。',
@@ -302,6 +437,7 @@ export function inferPerformanceSpecFromNode(node: PrdNode): PrdPerformanceSpec 
     openQuestions,
     prototypeNotes: unique(matches.flatMap((rule) => rule.prototypeNotes ?? []), 6),
   }
+  return applyPerformanceProtocol(spec, blockingQuestion ? { blockingQuestion } : undefined)
 }
 
 function uniqueSequence(steps: PrdPerformanceSequenceStep[]) {
@@ -316,13 +452,14 @@ function uniqueSequence(steps: PrdPerformanceSequenceStep[]) {
   return result.slice(0, 8)
 }
 
-export function createNoSpecialPerformanceSpec(): PrdPerformanceSpec {
-  return {
+export function createNoSpecialPerformanceSpec(reason = '用户标记该节点无特殊表现，只按基础 UI/状态说明交付。'): PrdPerformanceSpec {
+  const spec: PrdPerformanceSpec = {
     detected: false,
     disabled: true,
     source: 'user',
     confidence: 100,
     eventTypes: [],
+    integrationModes: [],
     trigger: null,
     branches: [],
     sequence: [],
@@ -332,8 +469,10 @@ export function createNoSpecialPerformanceSpec(): PrdPerformanceSpec {
     endState: null,
     openQuestions: [],
     prototypeNotes: [],
+    waivedReason: reason,
     updatedAt: new Date().toISOString(),
   }
+  return applyPerformanceProtocol(spec)
 }
 
 export function resolveNodePerformanceSpec(node: PrdNode): PrdPerformanceSpec | null {
@@ -350,7 +489,14 @@ export function hasActionablePerformanceSpec(node: PrdNode) {
 
 export function formatPerformanceSpecMarkdown(spec: PrdPerformanceSpec | null) {
   if (!spec) return ''
-  if (spec.disabled) return '## 表现编排\n\n已标记为无特殊表现；该节点只按基础 UI/状态说明交付。'
+  if (spec.disabled) {
+    return [
+      '## 表现编排',
+      '',
+      '已标记为无特殊表现；该节点只按基础 UI/状态说明交付。',
+      spec.waivedReason ? `豁免原因：${spec.waivedReason}` : null,
+    ].filter((line): line is string => line !== null).join('\n')
+  }
   if (!spec.detected) return ''
 
   const lines = [
@@ -358,12 +504,35 @@ export function formatPerformanceSpecMarkdown(spec: PrdPerformanceSpec | null) {
     '',
     `**识别来源：** ${spec.source === 'auto' ? '系统自动扫描' : spec.source === 'ai' ? 'AI 打磨' : '用户确认'}`,
     `**置信度：** ${spec.confidence}%`,
+    spec.readiness ? `**表现可实现度：** ${spec.readiness.score}%（${spec.readiness.level === 'ready' ? '已确认' : spec.readiness.level === 'risk' ? '有风险' : spec.readiness.level === 'blocked' ? '阻塞较多' : '已豁免'}）` : null,
     spec.eventTypes.length ? `**表现类型：** ${spec.eventTypes.join('、')}` : null,
+    spec.integrationModes?.length ? `**接入方式建议：** ${spec.integrationModes.join('、')}` : null,
+    spec.blockingQuestion ? `**当前最阻塞：** [${formatPerformanceSlotLabel(spec.blockingQuestion.slot)}] ${spec.blockingQuestion.question}` : null,
     '',
     '### 触发条件',
     '',
     spec.trigger ?? '待确认。',
   ].filter((line): line is string => line !== null)
+
+  if (spec.readiness || spec.slotStatus) {
+    const slotStatus = spec.slotStatus
+    const readiness = spec.readiness
+    lines.push('', '### 表现确认状态', '')
+    if (readiness?.riskSummary) lines.push(readiness.riskSummary)
+    if (slotStatus) {
+      const byStatus = (status: PrdPerformanceSlotStatusValue) => PERFORMANCE_SLOT_KEYS
+        .filter((key) => slotStatus[key].status === status)
+        .map((key) => formatPerformanceSlotLabel(key))
+      const confirmed = byStatus('confirmed')
+      const inferred = byStatus('inferred')
+      const missing = byStatus('missing')
+      const waived = byStatus('waived')
+      if (confirmed.length) lines.push(`- 设计师已确认：${confirmed.join('、')}`)
+      if (inferred.length) lines.push(`- AI 推断待确认：${inferred.join('、')}`)
+      if (missing.length) lines.push(`- 仍待确认：${missing.join('、')}`)
+      if (waived.length) lines.push(`- 已豁免：${waived.join('、')}`)
+    }
+  }
 
   if (spec.branches.length) {
     lines.push('', '### 分支规则', '', ...spec.branches.map((item) => `- ${item}`))
@@ -380,6 +549,7 @@ export function formatPerformanceSpecMarkdown(spec: PrdPerformanceSpec | null) {
   }
 
   if (spec.assets.length) lines.push('', '### 资源清单', '', ...spec.assets.map((item) => `- ${item}`))
+  if (spec.integrationModes?.length) lines.push('', '### 接入方式', '', ...spec.integrationModes.map((item) => `- ${item}`))
   if (spec.layers.length) lines.push('', '### 层级规则', '', ...spec.layers.map((item) => `- ${item}`))
   if (spec.controls.length) lines.push('', '### 控制规则', '', ...spec.controls.map((item) => `- ${item}`))
 
