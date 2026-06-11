@@ -203,7 +203,7 @@ export function AddNodeModal({
                   ref={fileInputRef}
                   type="file"
                   multiple
-                  accept=".md,.txt,.json,.csv,.log,.xml,.yaml,.yml"
+                  accept=".md,.txt,.json,.jsonc,.csv,.log,.xml,.yaml,.yml"
                   className="hidden"
                   onChange={handleFilesSelected}
                 />
@@ -243,7 +243,7 @@ export function AddNodeModal({
           )}
 
           {assistantReply && (
-            <div className="mt-md rounded-lg border border-primary/30 bg-primary-container/20 p-sm text-body-sm text-on-surface-variant">
+            <div className="mt-md break-words rounded-lg border border-primary/30 bg-primary-container/20 p-sm text-body-sm text-on-surface-variant [overflow-wrap:anywhere]">
               {assistantReply}
             </div>
           )}
@@ -269,7 +269,7 @@ export function AddNodeModal({
           )}
 
           {(fileError || error) && (
-            <div className="mt-md rounded-lg border border-error/40 bg-error/10 p-sm text-body-sm text-error">
+            <div className="mt-md break-words rounded-lg border border-error/40 bg-error/10 p-sm text-body-sm text-error [overflow-wrap:anywhere]">
               {fileError ?? error}
             </div>
           )}

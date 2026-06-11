@@ -30,6 +30,9 @@ archive/
 # TypeScript graph cache
 .ts-graph/
 
+# Local runtime caches
+.cache/
+
 # Python
 __pycache__/
 *.pyc

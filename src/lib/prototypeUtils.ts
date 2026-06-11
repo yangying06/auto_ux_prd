@@ -2,6 +2,413 @@ const TAILWIND_CDN = 'https://cdn.tailwindcss.com'
 export const PROTOTYPE_DESIGN_WIDTH = 375
 export const PROTOTYPE_DESIGN_HEIGHT = 812
 
+const PROTOTYPE_ANNOTATION_STRIP_STYLE = `<style>
+  [data-prototype-annotation],
+  [data-annotation],
+  [data-ux-annotation],
+  [data-role="annotation"],
+  .prototype-annotation,
+  .prototype-callout,
+  .prototype-note,
+  .component-annotation,
+  .component-label,
+  .component-note,
+  .hotspot-label,
+  .hint-label,
+  .interaction-note,
+  .spec-annotation,
+  .spec-label,
+  .spec-note,
+  .ui-annotation,
+  .ui-callout,
+  .ui-note,
+  .ux-annotation,
+  .ux-callout,
+  .ux-note,
+  .annotation,
+  .annot,
+  .callout,
+  .tooltip {
+    display: none !important;
+    visibility: hidden !important;
+    pointer-events: none !important;
+  }
+</style>`
+
+const PROTOTYPE_ANNOTATION_STRIP_SCRIPT = `<script>
+  (() => {
+    const stripAnnotationSelector = [
+      '[data-prototype-annotation]',
+      '[data-annotation]',
+      '[data-ux-annotation]',
+      '[data-role="annotation"]',
+      '[data-prototype-externalized-annotation]',
+      '#__prototype_annotation_guides',
+      '.prototype-annotation',
+      '.prototype-callout',
+      '.prototype-note',
+      '.component-annotation',
+      '.component-label',
+      '.component-note',
+      '.hotspot-label',
+      '.hint-label',
+      '.interaction-note',
+      '.spec-annotation',
+      '.spec-label',
+      '.spec-note',
+      '.ui-annotation',
+      '.ui-callout',
+      '.ui-note',
+      '.ux-annotation',
+      '.ux-callout',
+      '.ux-note',
+      '.annotation',
+      '.annot',
+      '.callout',
+      '.tooltip'
+    ].join(',');
+    const stripAnnotationTextPattern = /^(?:组件|状态|动效|动画|参数|说明|注释|标注|提示)\\s*[:：]/;
+    const stripInteractiveSelector = [
+      'a[href]',
+      'button',
+      'input',
+      'textarea',
+      'select',
+      'summary',
+      'label',
+      '[contenteditable="true"]',
+      '[onclick]',
+      '[role="button"]',
+      '[role="checkbox"]',
+      '[role="link"]',
+      '[role="menuitem"]',
+      '[role="switch"]',
+      '[role="tab"]',
+      '[tabindex]:not([tabindex="-1"])'
+    ].join(',');
+    const removePrototypeAnnotations = () => {
+      document.documentElement.classList.remove('prototype-annotations-externalized');
+      document.body?.classList.remove('prototype-annotations-externalized');
+      for (const name of [
+        '--prototype-annotation-total-width',
+        '--prototype-annotation-screen-offset',
+        '--prototype-annotation-left-rail-left',
+        '--prototype-annotation-right-rail-left',
+        '--prototype-annotation-rail-width'
+      ]) {
+        document.documentElement.style.removeProperty(name);
+      }
+      for (const el of Array.from(document.querySelectorAll(stripAnnotationSelector))) {
+        el.remove();
+      }
+      for (const el of Array.from(document.querySelectorAll('body *'))) {
+        if (!(el instanceof HTMLElement)) continue;
+        if (el.matches(stripInteractiveSelector) || el.closest(stripInteractiveSelector) || el.querySelector(stripInteractiveSelector)) continue;
+        const text = (el.textContent || '').trim();
+        const rect = el.getBoundingClientRect();
+        const isCompact = rect.width > 0 && rect.height > 0 && rect.width <= 240 && rect.height <= 64;
+        if (isCompact && stripAnnotationTextPattern.test(text)) el.remove();
+      }
+    };
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', removePrototypeAnnotations, { once: true });
+    } else {
+      removePrototypeAnnotations();
+    }
+    window.addEventListener('load', removePrototypeAnnotations);
+    requestAnimationFrame(removePrototypeAnnotations);
+    setTimeout(removePrototypeAnnotations, 120);
+    setTimeout(removePrototypeAnnotations, 500);
+    return;
+    const annotationMarkerPattern = /(^|[-_\\s])(?:annotation|annot|callout|tooltip|hint|hotspot-label|component[-_\\s]?(?:annotation|label|note|tag)|interaction[-_\\s]?note|prototype[-_\\s]?(?:annotation|callout|note)|spec[-_\\s]?(?:annotation|label|note|tag)|ui[-_\\s]?(?:annotation|callout|note)|ux[-_\\s]?(?:annotation|callout|note))($|[-_\\s])/i;
+    const annotationTextPattern = /^(?:组件|状态|动效|动画|参数|说明|注释|标注|提示)\\s*[:：]/;
+    const annotationSelector = [
+      '[data-prototype-annotation]',
+      '[data-annotation]',
+      '[data-ux-annotation]',
+      '[data-role="annotation"]',
+      '.prototype-annotation',
+      '.prototype-callout',
+      '.prototype-note',
+      '.component-annotation',
+      '.component-label',
+      '.component-note',
+      '.hotspot-label',
+      '.hint-label',
+      '.interaction-note',
+      '.spec-annotation',
+      '.spec-label',
+      '.spec-note',
+      '.ui-annotation',
+      '.ui-callout',
+      '.ui-note',
+      '.ux-annotation',
+      '.ux-callout',
+      '.ux-note',
+      '.annotation',
+      '.annot',
+      '.callout',
+      '.tooltip'
+    ].join(',');
+    const interactiveSelector = [
+      'a[href]',
+      'button',
+      'input',
+      'textarea',
+      'select',
+      'summary',
+      'label',
+      '[contenteditable="true"]',
+      '[onclick]',
+      '[role="button"]',
+      '[role="checkbox"]',
+      '[role="link"]',
+      '[role="menuitem"]',
+      '[role="switch"]',
+      '[role="tab"]',
+      '[tabindex]:not([tabindex="-1"])'
+    ].join(',');
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+    const toFiniteNumber = (value) => {
+      const number = Number.parseFloat(String(value ?? ''));
+      return Number.isFinite(number) ? number : null;
+    };
+
+    const readMarkers = (el) => [
+      el.id,
+      String(el.className || ''),
+      el.getAttribute('data-prototype-annotation'),
+      el.getAttribute('data-annotation'),
+      el.getAttribute('data-ux-annotation'),
+      el.getAttribute('data-role'),
+      el.getAttribute('aria-label'),
+      el.getAttribute('title')
+    ].filter(Boolean).join(' ');
+
+    const hasInteractiveRole = (el) => (
+      el.matches(interactiveSelector)
+      || Boolean(el.closest(interactiveSelector))
+      || Boolean(el.querySelector(interactiveSelector))
+    );
+
+    const isLikelyOverlayAnnotation = (el) => {
+      if (!(el instanceof HTMLElement) || el.id === '__prototype_annotation_guides' || hasInteractiveRole(el)) return false;
+      const markers = readMarkers(el);
+      const text = (el.textContent || '').trim();
+      const hasAnnotationMarker = el.matches(annotationSelector) || annotationMarkerPattern.test(markers);
+      if (!hasAnnotationMarker && !annotationTextPattern.test(text)) return false;
+
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      const hasAnchor = toFiniteNumber(el.getAttribute('data-anchor-x') ?? el.getAttribute('data-target-x')) !== null
+        && toFiniteNumber(el.getAttribute('data-anchor-y') ?? el.getAttribute('data-target-y')) !== null;
+      const isOverlay = style.position === 'absolute' || style.position === 'fixed' || style.position === 'sticky' || style.zIndex !== 'auto';
+      const isCompact = rect.width > 0 && rect.height > 0 && rect.width <= 220 && rect.height <= 48;
+      return hasAnnotationMarker || hasAnchor || isOverlay || isCompact;
+    };
+
+    const resolveScreenWidth = () => {
+      const cssWidth = toFiniteNumber(window.getComputedStyle(document.documentElement).getPropertyValue('--prototype-design-width'));
+      if (cssWidth) return cssWidth;
+      const stage = document.querySelector('.pf-shell, [data-prototype-screen], .prototype-root, .game-container, .mobile-container, .phone-container, .screen-container, .phone, .screen, main, #root > *, #app > *');
+      const rect = stage instanceof HTMLElement ? stage.getBoundingClientRect() : null;
+      if (rect && rect.width > 0) return Math.round(rect.width);
+      return 375;
+    };
+
+    const resolveAnchor = (el, fallbackRect, screenWidth) => {
+      const currentScreenOffset = toFiniteNumber(window.getComputedStyle(document.documentElement).getPropertyValue('--prototype-annotation-screen-offset')) ?? 0;
+      const selector = el.getAttribute('data-target-selector');
+      if (selector) {
+        try {
+          const target = document.querySelector(selector);
+          if (target instanceof HTMLElement || target instanceof SVGElement) {
+            const rect = target.getBoundingClientRect();
+            if (rect.width > 0 || rect.height > 0) {
+              return {
+                x: clamp(rect.left + window.scrollX + rect.width / 2 - currentScreenOffset, 8, screenWidth - 8),
+                y: Math.max(8, rect.top + window.scrollY + rect.height / 2)
+              };
+            }
+          }
+        } catch {}
+      }
+
+      const attrX = toFiniteNumber(el.getAttribute('data-anchor-x') ?? el.getAttribute('data-target-x'));
+      const attrY = toFiniteNumber(el.getAttribute('data-anchor-y') ?? el.getAttribute('data-target-y'));
+      if (attrX !== null && attrY !== null) {
+        return {
+          x: clamp(attrX, 8, screenWidth - 8),
+          y: Math.max(8, attrY)
+        };
+      }
+
+      return {
+        x: clamp(fallbackRect.left + window.scrollX + fallbackRect.width / 2 - currentScreenOffset, 8, screenWidth - 8),
+        y: Math.max(8, fallbackRect.top + window.scrollY + fallbackRect.height / 2)
+      };
+    };
+
+    const ensureGuideLayer = (width, height) => {
+      let layer = document.getElementById('__prototype_annotation_guides');
+      if (!(layer instanceof SVGSVGElement)) {
+        layer = document.createElementNS(SVG_NS, 'svg');
+        layer.id = '__prototype_annotation_guides';
+        layer.setAttribute('aria-hidden', 'true');
+        document.body.appendChild(layer);
+      }
+      layer.setAttribute('width', String(width));
+      layer.setAttribute('height', String(height));
+      layer.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+      layer.style.width = width + 'px';
+      layer.style.height = height + 'px';
+      while (layer.firstChild) layer.removeChild(layer.firstChild);
+      return layer;
+    };
+
+    const drawLeader = (layer, screenLeft, screenWidth, entry, railWidth) => {
+      const anchor = {
+        x: screenLeft + entry.anchor.x,
+        y: entry.anchor.y
+      };
+      const labelMidY = entry.top + entry.height / 2;
+      const dot = document.createElementNS(SVG_NS, 'circle');
+      dot.setAttribute('cx', String(anchor.x));
+      dot.setAttribute('cy', String(anchor.y));
+      dot.setAttribute('r', '3.5');
+      dot.setAttribute('data-prototype-leader-dot', 'true');
+
+      const path = document.createElementNS(SVG_NS, 'path');
+      if (entry.side === 'left') {
+        const labelEdgeX = entry.labelLeft + railWidth + 8;
+        const elbowX = Math.min(screenLeft - 10, entry.labelLeft + railWidth + 28);
+        path.setAttribute('d', 'M ' + anchor.x + ' ' + anchor.y + ' C ' + elbowX + ' ' + anchor.y + ', ' + elbowX + ' ' + labelMidY + ', ' + labelEdgeX + ' ' + labelMidY);
+      } else {
+        const labelEdgeX = entry.labelLeft - 8;
+        const elbowX = Math.max(screenLeft + screenWidth + 10, entry.labelLeft - 28);
+        path.setAttribute('d', 'M ' + anchor.x + ' ' + anchor.y + ' C ' + elbowX + ' ' + anchor.y + ', ' + elbowX + ' ' + labelMidY + ', ' + labelEdgeX + ' ' + labelMidY);
+      }
+      path.setAttribute('data-prototype-leader-line', 'true');
+
+      layer.appendChild(path);
+      layer.appendChild(dot);
+    };
+
+    const externalizeAnnotations = () => {
+      if (!document.body) return;
+      const candidates = Array.from(document.querySelectorAll('body *')).filter((el) => isLikelyOverlayAnnotation(el));
+      if (!candidates.length) return;
+
+      const screenWidth = resolveScreenWidth();
+      const railGap = 24;
+      const railWidth = 220;
+      const outerMargin = 12;
+
+      const normalizeSide = (value, anchorX) => {
+        const text = String(value ?? '').trim().toLowerCase();
+        if (text === 'left' || text === 'right') return text;
+        return anchorX <= screenWidth / 2 ? 'left' : 'right';
+      };
+
+      const entries = [];
+      for (const el of candidates) {
+        if (!(el instanceof HTMLElement)) continue;
+        const fallbackRect = el.getBoundingClientRect();
+        if (!el.dataset.prototypeAnnotationAnchorX || !el.dataset.prototypeAnnotationAnchorY) {
+          const anchor = resolveAnchor(el, fallbackRect, screenWidth);
+          el.dataset.prototypeAnnotationAnchorX = String(anchor.x);
+          el.dataset.prototypeAnnotationAnchorY = String(anchor.y);
+        }
+        const anchor = {
+          x: toFiniteNumber(el.dataset.prototypeAnnotationAnchorX) ?? 8,
+          y: toFiniteNumber(el.dataset.prototypeAnnotationAnchorY) ?? 8
+        };
+        const side = normalizeSide(el.getAttribute('data-annotation-side') ?? el.getAttribute('data-callout-side'), anchor.x);
+
+        if (el.parentElement !== document.body) document.body.appendChild(el);
+        el.setAttribute('data-prototype-externalized-annotation', 'true');
+        el.setAttribute('data-prototype-annotation-side', side);
+        el.setAttribute('data-prototype-nonblocking-annotation', 'true');
+        el.style.left = '0px';
+        el.style.top = '0px';
+        el.style.width = railWidth + 'px';
+        el.style.pointerEvents = 'none';
+
+        const measured = el.getBoundingClientRect();
+        entries.push({
+          el,
+          anchor,
+          side,
+          labelLeft: 0,
+          top: 0,
+          height: Math.max(24, Math.ceil(measured.height || fallbackRect.height || 24))
+        });
+      }
+
+      const hasLeftRail = entries.some((entry) => entry.side === 'left');
+      const hasRightRail = entries.some((entry) => entry.side === 'right');
+      const leftRailLeft = outerMargin;
+      const screenLeft = hasLeftRail ? outerMargin + railWidth + railGap : 0;
+      const rightRailLeft = screenLeft + screenWidth + railGap;
+      const totalWidth = screenLeft + screenWidth + (hasRightRail ? railGap + railWidth + outerMargin : 0);
+
+      document.documentElement.classList.add('prototype-annotations-externalized');
+      document.body.classList.add('prototype-annotations-externalized');
+      document.documentElement.style.setProperty('--prototype-design-width', screenWidth + 'px');
+      document.documentElement.style.setProperty('--prototype-annotation-total-width', totalWidth + 'px');
+      document.documentElement.style.setProperty('--prototype-annotation-screen-offset', screenLeft + 'px');
+      document.documentElement.style.setProperty('--prototype-annotation-left-rail-left', leftRailLeft + 'px');
+      document.documentElement.style.setProperty('--prototype-annotation-right-rail-left', rightRailLeft + 'px');
+      document.documentElement.style.setProperty('--prototype-annotation-rail-width', railWidth + 'px');
+      document.body.style.minWidth = totalWidth + 'px';
+
+      const layoutSide = (side, railLeft) => {
+        const sideEntries = entries
+          .filter((entry) => entry.side === side)
+          .sort((a, b) => a.anchor.y - b.anchor.y);
+        let nextTop = 12;
+        for (const entry of sideEntries) {
+          const desiredTop = Math.max(12, entry.anchor.y - entry.height / 2);
+          const top = Math.max(desiredTop, nextTop);
+          entry.el.style.left = railLeft + 'px';
+          entry.el.style.top = top + 'px';
+          entry.labelLeft = railLeft;
+          entry.top = top;
+          nextTop = top + entry.height + 10;
+        }
+        return nextTop;
+      };
+
+      const leftBottom = hasLeftRail ? layoutSide('left', leftRailLeft) : 12;
+      const rightBottom = hasRightRail ? layoutSide('right', rightRailLeft) : 12;
+
+      const contentHeight = Math.ceil(Math.max(
+        document.documentElement.scrollHeight,
+        document.body.scrollHeight,
+        window.innerHeight,
+        leftBottom + 16,
+        rightBottom + 16
+      ));
+      const layer = ensureGuideLayer(totalWidth, contentHeight);
+      for (const entry of entries) {
+        drawLeader(layer, screenLeft, screenWidth, entry, railWidth);
+      }
+    };
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', externalizeAnnotations, { once: true });
+    } else {
+      externalizeAnnotations();
+    }
+    window.addEventListener('load', externalizeAnnotations);
+    window.addEventListener('resize', externalizeAnnotations);
+    requestAnimationFrame(externalizeAnnotations);
+    setTimeout(externalizeAnnotations, 120);
+    setTimeout(externalizeAnnotations, 500);
+  })();
+</script>`
+
 function stripFrontmatter(input: string) {
   return input.replace(/^---[\s\S]*?---\s*/u, '').trim()
 }
@@ -72,6 +479,10 @@ function hasViewport(html: string) {
   return /<meta[^>]+name=["']viewport["']/iu.test(html)
 }
 
+function isFigma2PrefabPrototypeHtml(html: string) {
+  return /data-generator=["']figma2prefab["']/iu.test(html)
+}
+
 function injectIntoHead(html: string, snippet: string) {
   if (/<\/head>/iu.test(html)) {
     return html.replace(/<\/head>/iu, `${snippet}\n</head>`)
@@ -99,6 +510,7 @@ export function normalizeGeneratedPrototypeHtml(raw: string) {
 export function normalizePrototypeHtml(raw: string) {
   const parsed = parsePrototypeMarkdown(raw)
   const isFullDocument = /<!doctype\s+html|<html[\s>]/iu.test(parsed)
+  const isFigma2Prefab = isFigma2PrefabPrototypeHtml(parsed)
   const viewport = hasViewport(parsed)
     ? ''
     : '<meta name="viewport" content="width=device-width, initial-scale=1.0" />'
@@ -236,7 +648,9 @@ export function normalizePrototypeHtml(raw: string) {
     setTimeout(fitRoots, 500);
   })();
 </script>`
-  const headAdditions = [viewport, storageShim, tailwind, baseStyle, fitRootScript].filter(Boolean).join('\n')
+  const headAdditions = isFigma2Prefab
+    ? [viewport, storageShim, PROTOTYPE_ANNOTATION_STRIP_STYLE, PROTOTYPE_ANNOTATION_STRIP_SCRIPT].filter(Boolean).join('\n')
+    : [viewport, storageShim, tailwind, baseStyle, PROTOTYPE_ANNOTATION_STRIP_STYLE, fitRootScript, PROTOTYPE_ANNOTATION_STRIP_SCRIPT].filter(Boolean).join('\n')
 
   if (isFullDocument) {
     return injectIntoHead(parsed, headAdditions).trim()

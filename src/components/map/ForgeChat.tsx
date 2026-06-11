@@ -1,17 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import type { FigmaFrameImportResponse } from '../../lib/api'
+import { findLatestUserMessageIndex, getTextFromMessage } from '../../lib/chatRecall'
+import { getClipboardImageFiles, readImageFileAsClipboardAttachment } from '../../lib/clipboardImages'
 import type { PrototypeVersion } from '../../store/appStore'
 import type {
   ChatMessage,
   ContentBlock,
+  DocumentBlock,
   ImageBlock,
   ReferenceImageClassificationRequest,
   ReferenceImageClassificationResponse,
   ReferenceImageRole,
 } from '../../types/chat'
 import type { PrototypeVariant } from '../../types/prototypeVariant'
-import type { PrdNodeOperationSuggestion } from '../../types/prdNode'
+import type { PrdNodeOperationSuggestion, PrdPerformanceBlockingQuestion, PrdPerformanceSpec } from '../../types/prdNode'
 import { NodeOperationReview } from './NodeOperationReview'
 import { PrototypeBoard } from '../state/PrototypeBoard'
 import { PrototypeVariants } from '../state/PrototypeVariants'
@@ -26,16 +29,18 @@ interface ForgeChatProps {
   selectedVariantIndex: number
   isGeneratingPrototype: boolean
   nodeOperationSuggestions: PrdNodeOperationSuggestion[]
-  onSend: (content: ChatMessage['content']) => void | Promise<void>
-  onSuggestNodeOperations: (input: { supplementText: string; sources: SupplementSource[] }) => void | Promise<void>
+  performanceSpec: PrdPerformanceSpec | null
+  blockingQuestion: PrdPerformanceBlockingQuestion | null
+  onSend: (content: ChatMessage['content'], options?: ForgeChatSendOptions) => void | Promise<void>
   onClassifyImageAttachment: (input: ReferenceImageClassificationRequest) => Promise<ReferenceImageClassificationResponse>
   onImportFigmaFrame: (input: { url: string }) => Promise<FigmaFrameImportResponse>
   onApplyNodeOperationSuggestion: (suggestionId: string) => void
   onDismissNodeOperationSuggestion: (suggestionId: string) => void
-  onGeneratePrototype: (instruction?: string, options?: { singlePrototypeOnly?: boolean; recordInstruction?: boolean; evidenceContent?: ChatMessage['content'] }) => void | Promise<void>
+  onGeneratePrototype: (instruction?: string, options?: { singlePrototypeOnly?: boolean; recordInstruction?: boolean; evidenceContent?: ChatMessage['content']; currentTurnOnly?: boolean }) => boolean | Promise<boolean>
   onRestorePrototype: (id: string) => void
   onClearPrototypeHistory: () => void
   onSelectVariant: (index: number) => void
+  onRemoveLastTurn: () => ChatMessage | null
   onClearChat: () => void
 }
 
@@ -57,12 +62,18 @@ interface ImageAttachment {
   previewUrl: string
 }
 
-interface SupplementSource {
-  id: string
-  name: string
-  sourceKind: 'upload'
+interface QuestionReply {
+  label: string
   text: string
 }
+
+interface ForgeChatSendOptions {
+  performancePolishMode?: boolean
+  suppressUserEcho?: boolean
+}
+
+const CHAT_WRAP_ANYWHERE_CLASS = 'break-words [overflow-wrap:anywhere]'
+const CHAT_CODE_BLOCK_CLASS = `max-w-full overflow-x-auto whitespace-pre-wrap rounded-lg bg-zinc-950 p-sm font-mono text-[11px] leading-relaxed text-zinc-100 ${CHAT_WRAP_ANYWHERE_CLASS}`
 
 const PROMPT_SKILLS: PromptSkill[] = [
   {
@@ -146,6 +157,92 @@ const PROMPT_SKILLS: PromptSkill[] = [
 const MAX_ATTACHMENTS = 6
 const MAX_IMAGE_SIZE = 4 * 1024 * 1024
 
+interface FigmaImportProgress {
+  value: number
+  status: string
+  detail: string
+}
+
+const FIGMA_IMPORT_STAGES = [
+  { value: 8, status: '解析 Figma Frame 链接', detail: '正在确认 file key、node id 和服务参数。' },
+  { value: 24, status: '读取 Figma 节点树', detail: '正在从 Figma 直接获取选中 Frame 和可见子节点。' },
+  { value: 42, status: '导出 Figma 子图', detail: '正在逐张渲染 Frame、模块和大面积视觉层，并去除示例数值。' },
+  { value: 62, status: '下载视觉证据', detail: '正在把临时图片转为当前节点可用的参考图。' },
+  { value: 82, status: '结合 PRD 生成 HTML', detail: '正在把 Figma 子图和节点文档一起交给原型生成。' },
+  { value: 88, status: '等待 Figma 返回', detail: '复杂 Frame 可能需要降倍率重试，成功后会继续流式刷新右侧预览。' },
+]
+
+function buildFigmaImportProgress(elapsedMs: number): FigmaImportProgress {
+  if (elapsedMs > 90000) {
+    return {
+      value: 93,
+      status: 'Figma 仍在处理',
+      detail: '正在保留已成功的子图并跳过超时节点；如果失败，请选中更小的 Frame 重试。',
+    }
+  }
+  if (elapsedMs > 45000) {
+    return {
+      value: 91,
+      status: 'Figma 渲染较慢',
+      detail: '正在逐张导出并自动降低倍率，避免大图超时拖垮整次导入。',
+    }
+  }
+  const value = Math.min(88, Math.round(8 + elapsedMs / 260))
+  let stage = FIGMA_IMPORT_STAGES[0]
+  for (const item of FIGMA_IMPORT_STAGES) {
+    if (value >= item.value) stage = item
+  }
+  return { ...stage, value }
+}
+
+function AnimatedGeneratingText() {
+  const [dotCount, setDotCount] = useState(1)
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setDotCount((current) => current >= 3 ? 1 : current + 1)
+    }, 420)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  return (
+    <span className="inline-flex min-w-[72px] font-semibold text-primary">
+      生成中{'.'.repeat(dotCount)}
+    </span>
+  )
+}
+
+function FigmaImportProgressPanel({ progress, sourceUrl }: { progress: FigmaImportProgress; sourceUrl: string }) {
+  return (
+    <div className="mb-sm shrink-0 rounded-lg border border-primary/30 bg-primary/10 px-md py-sm">
+      <div className="flex items-start justify-between gap-sm">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-xs text-label-md font-semibold text-primary">
+            <span className="material-symbols-outlined animate-spin" style={{ fontSize: '16px' }}>sync</span>
+            <AnimatedGeneratingText />
+          </div>
+          <div className="mt-1 truncate text-body-sm text-on-surface-variant">
+            {progress.status} · {progress.detail}
+          </div>
+          <div className={`mt-xs font-mono text-[10px] text-on-surface-variant ${CHAT_WRAP_ANYWHERE_CLASS}`} title={sourceUrl}>
+            {sourceUrl || '等待 Figma Frame 链接'}
+          </div>
+        </div>
+        <span className="shrink-0 font-mono text-[11px] text-primary">{progress.value}%</span>
+      </div>
+
+      <div className="mt-sm">
+        <div className="h-2 overflow-hidden rounded-full bg-surface-container-high">
+          <div
+            className="h-full rounded-full bg-primary transition-all duration-500"
+            style={{ width: `${progress.value}%` }}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
 
 
 function roleLabel(role: ReferenceImageRole) {
@@ -182,7 +279,7 @@ function renderInlineMarkdown(text: string) {
       return <strong key={index} className="font-semibold text-on-surface">{part.slice(2, -2)}</strong>
     }
     if (part.startsWith('`') && part.endsWith('`')) {
-      return <code key={index} className="rounded bg-surface-container-high px-1 py-0.5 font-mono text-[0.85em]">{part.slice(1, -1)}</code>
+      return <code key={index} className="break-all rounded bg-surface-container-high px-1 py-0.5 font-mono text-[0.85em]">{part.slice(1, -1)}</code>
     }
     return part
   })
@@ -199,7 +296,7 @@ function renderMarkdownText(text: string) {
   function flushParagraph() {
     if (!paragraph.length) return
     blocks.push(
-      <p key={`p-${blocks.length}`} className="leading-relaxed">
+      <p key={`p-${blocks.length}`} className={`leading-relaxed ${CHAT_WRAP_ANYWHERE_CLASS}`}>
         {renderInlineMarkdown(paragraph.join(' '))}
       </p>,
     )
@@ -210,7 +307,7 @@ function renderMarkdownText(text: string) {
     if (!list.length) return
     const Tag = orderedList ? 'ol' : 'ul'
     blocks.push(
-      <Tag key={`list-${blocks.length}`} className={`space-y-1 pl-md leading-relaxed ${orderedList ? 'list-decimal' : 'list-disc'}`}>
+      <Tag key={`list-${blocks.length}`} className={`space-y-1 pl-md leading-relaxed ${orderedList ? 'list-decimal' : 'list-disc'} ${CHAT_WRAP_ANYWHERE_CLASS}`}>
         {list.map((item, index) => <li key={index}>{renderInlineMarkdown(item)}</li>)}
       </Tag>,
     )
@@ -222,7 +319,7 @@ function renderMarkdownText(text: string) {
     if (trimmed.startsWith('```')) {
       if (codeLines) {
         blocks.push(
-          <pre key={`code-${blocks.length}`} className="overflow-x-auto rounded-lg bg-zinc-950 p-sm font-mono text-[11px] leading-relaxed text-zinc-100">
+          <pre key={`code-${blocks.length}`} className={CHAT_CODE_BLOCK_CLASS}>
             <code>{codeLines.join('\n')}</code>
           </pre>,
         )
@@ -253,7 +350,7 @@ function renderMarkdownText(text: string) {
       const level = heading[1].length
       const className = level === 1 ? 'text-title-md' : level === 2 ? 'text-label-lg' : 'text-label-md'
       blocks.push(
-        <div key={`h-${blocks.length}`} className={`${className} font-semibold text-on-surface`}>
+        <div key={`h-${blocks.length}`} className={`${className} font-semibold text-on-surface ${CHAT_WRAP_ANYWHERE_CLASS}`}>
           {renderInlineMarkdown(heading[2])}
         </div>,
       )
@@ -279,13 +376,13 @@ function renderMarkdownText(text: string) {
   const trailingCodeLines = codeLines as string[] | null
   if (trailingCodeLines) {
     blocks.push(
-      <pre key={`code-${blocks.length}`} className="overflow-x-auto rounded-lg bg-zinc-950 p-sm font-mono text-[11px] leading-relaxed text-zinc-100">
+      <pre key={`code-${blocks.length}`} className={CHAT_CODE_BLOCK_CLASS}>
         <code>{trailingCodeLines.join('\n')}</code>
       </pre>,
     )
   }
 
-  return <div className="flex flex-col gap-xs whitespace-normal">{blocks}</div>
+  return <div className={`flex flex-col gap-xs whitespace-normal ${CHAT_WRAP_ANYWHERE_CLASS}`}>{blocks}</div>
 }
 
 function renderMessageContent(content: ChatMessage['content']) {
@@ -293,12 +390,28 @@ function renderMessageContent(content: ChatMessage['content']) {
 
   const textBlocks = content.filter((b): b is ContentBlock & { type: 'text' } => b.type === 'text')
   const imageBlocks = content.filter((b): b is ImageBlock => b.type === 'image')
+  const documentBlocks = content.filter((b): b is DocumentBlock => b.type === 'document')
 
   return (
-    <div className="flex flex-col gap-sm">
+    <div className={`flex min-w-0 max-w-full flex-col gap-sm ${CHAT_WRAP_ANYWHERE_CLASS}`}>
       {textBlocks.map((block, index) => (
-        <div key={`text-${index}`}>{renderMarkdownText(block.text)}</div>
+        <div key={`text-${index}`} className={`min-w-0 max-w-full ${CHAT_WRAP_ANYWHERE_CLASS}`}>{renderMarkdownText(block.text)}</div>
       ))}
+      {documentBlocks.length > 0 ? (
+        <div className="flex flex-col gap-xs">
+          {documentBlocks.map((block, index) => (
+            <div key={`document-${index}`} className="flex min-w-0 items-start gap-xs rounded-lg border border-outline-variant/50 bg-surface-container-low px-sm py-xs text-label-md">
+              <span className="material-symbols-outlined shrink-0 text-on-surface-variant" style={{ fontSize: '18px' }}>description</span>
+              <div className="min-w-0">
+                <div className={`font-medium text-on-surface ${CHAT_WRAP_ANYWHERE_CLASS}`}>{block.title}</div>
+                {block.context ? (
+                  <div className={`text-[11px] text-on-surface-variant ${CHAT_WRAP_ANYWHERE_CLASS}`}>{block.context}</div>
+                ) : null}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
       {imageBlocks.length > 0 ? (
         <div className="grid grid-cols-2 gap-xs">
           {imageBlocks.map((block, index) => (
@@ -315,17 +428,47 @@ function renderMessageContent(content: ChatMessage['content']) {
   )
 }
 
-function MessageBubble({ msg }: { msg: ChatMessage }) {
+function MessageBubble({
+  msg,
+  canRemove,
+  onRecall,
+  onClear,
+}: {
+  msg: ChatMessage
+  canRemove?: boolean
+  onRecall?: () => void
+  onClear?: () => void
+}) {
   if (msg.role === 'user') {
     return (
-      <div className="max-w-[78%] self-end rounded-2xl rounded-tr-sm bg-secondary-container px-md py-sm text-body-md text-on-secondary-container">
+      <div className={`min-w-0 max-w-[78%] self-end rounded-2xl rounded-tr-sm bg-secondary-container px-md py-sm text-body-md text-on-secondary-container ${CHAT_WRAP_ANYWHERE_CLASS}`}>
         {renderMessageContent(msg.content)}
+        {canRemove ? (
+          <div className="mt-xs flex justify-end gap-xs border-t border-secondary/20 pt-xs">
+            <button
+              type="button"
+              onClick={onRecall}
+              className="rounded px-xs py-[2px] text-[11px] text-on-secondary-container/70 transition-colors hover:bg-secondary/10 hover:text-secondary"
+              title="撤回这条消息并回填到输入框"
+            >
+              撤回
+            </button>
+            <button
+              type="button"
+              onClick={onClear}
+              className="rounded px-xs py-[2px] text-[11px] text-on-secondary-container/70 transition-colors hover:bg-error/10 hover:text-error"
+              title="清理这条消息"
+            >
+              清理
+            </button>
+          </div>
+        ) : null}
       </div>
     )
   }
 
   return (
-    <div className="max-w-[84%] self-start rounded-2xl rounded-tl-sm bg-surface-container px-md py-sm text-body-md text-on-surface animate-fade-in">
+    <div className={`min-w-0 max-w-[84%] self-start rounded-2xl rounded-tl-sm bg-surface-container px-md py-sm text-body-md text-on-surface animate-fade-in ${CHAT_WRAP_ANYWHERE_CLASS}`}>
       {renderMessageContent(msg.content)}
     </div>
   )
@@ -347,13 +490,17 @@ function LoadingIndicator() {
 
 function ErrorBanner({ error, onDismiss }: { error: string; onDismiss: () => void }) {
   return (
-    <div className="flex items-center justify-between gap-sm rounded-lg bg-error-container px-md py-sm text-body-md text-on-error-container">
-      <span>{error}</span>
+    <div className="flex min-w-0 items-center justify-between gap-sm rounded-lg bg-error-container px-md py-sm text-body-md text-on-error-container">
+      <span className={`min-w-0 ${CHAT_WRAP_ANYWHERE_CLASS}`}>{error}</span>
       <button onClick={onDismiss} className="shrink-0 font-bold text-on-error-container hover:opacity-80">
         ×
       </button>
     </div>
   )
+}
+
+function errorMessageFromUnknown(error: unknown, fallback = '原型更新失败，请重试。') {
+  return error instanceof Error && error.message ? error.message : fallback
 }
 
 function countMessageImages(messages: ChatMessage[]) {
@@ -366,11 +513,203 @@ function countMessageImages(messages: ChatMessage[]) {
 function messageText(content: ChatMessage['content']) {
   if (typeof content === 'string') return content.trim()
   return content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text.trim())
+    .map((block) => {
+      if (block.type === 'text') return block.text.trim()
+      if (block.type === 'document') return [`附件：${block.title}`, block.context].filter(Boolean).join('\n')
+      return ''
+    })
     .filter(Boolean)
     .join('\n')
     .trim()
+}
+
+function messageImages(content: ChatMessage['content']) {
+  if (typeof content === 'string') return []
+  return content.filter((block): block is ImageBlock => block.type === 'image')
+}
+
+function roleFromRecalledLine(line: string): ReferenceImageRole {
+  if (line.includes('asset_reuse')) return 'asset_reuse'
+  if (line.includes('state_screenshot')) return 'state_screenshot'
+  if (line.includes('negative_reference')) return 'negative_reference'
+  return 'layout_reference'
+}
+
+function stripRecalledAttachmentLines(text: string) {
+  return text
+    .replace(/\n\n[^\n]*(?:layout_reference|asset_reuse|state_screenshot|negative_reference)[\s\S]*$/u, '')
+    .trim()
+}
+
+function recalledImageAttachments(content: ChatMessage['content']): ImageAttachment[] {
+  const text = getTextFromMessage(content)
+  const roleLines = text.split('\n').filter((line) => /^\s*\d+\.\s/.test(line))
+  return messageImages(content).map((block, index) => ({
+    id: `recalled-forge-${Date.now()}-${index}`,
+    name: `recalled-forge-image-${index + 1}`,
+    role: roleFromRecalledLine(roleLines[index] ?? ''),
+    reason: '',
+    mediaType: block.source.media_type,
+    data: block.source.data,
+    previewUrl: `data:${block.source.media_type};base64,${block.source.data}`,
+  }))
+}
+
+function latestAssistantText(messages: ChatMessage[]) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message.role !== 'assistant') continue
+    const text = messageText(message.content)
+    if (text) return text
+  }
+  return ''
+}
+
+function visualResourceReplies(latestAssistant: string, hasPrototype: boolean): QuestionReply[] {
+  if (!/(原型|Figma|参考图|截图|视觉稿|视觉资源)/i.test(latestAssistant)) return []
+  if (!/(上传|粘贴|提供|可以作为|作为当前界面)/.test(latestAssistant)) return []
+
+  if (hasPrototype) {
+    return [
+      { label: '可作依据', text: '右侧原型可以作为当前界面的视觉依据，请继续打磨主流程、状态边界和验收标准。' },
+      { label: '仅作参考', text: '右侧原型只作为布局参考，交互逻辑仍以 PRD 文本为准。' },
+      { label: '稍后补图', text: '我稍后补充更准确的视觉参考图，请先按文字继续打磨。' },
+    ]
+  }
+
+  return [
+    { label: '没有资源', text: '没有原型资源，先按当前 PRD 文字打磨。' },
+    { label: '稍后上传', text: '我稍后上传参考图，先不要进入表现编排。' },
+    { label: '按文字推进', text: '先按当前 PRD 文本推进，视觉细节后续补充。' },
+  ]
+}
+
+function performanceReplies(blockingQuestion: PrdPerformanceBlockingQuestion | null): QuestionReply[] {
+  if (!blockingQuestion) return []
+
+  const bySlot: Record<PrdPerformanceBlockingQuestion['slot'], QuestionReply[]> = {
+    trigger: [
+      { label: '接口返回后', text: '这个表现由接口/结算结果返回后触发。' },
+      { label: '用户点击后', text: '这个表现由用户点击当前操作按钮后触发。' },
+      { label: '状态变化后', text: '这个表现由页面状态或字段变化自动触发。' },
+      { label: '我来描述', text: '触发条件我补充如下：' },
+    ],
+    branches: [
+      { label: '统一流程', text: '不同结果先复用同一套表现流程。' },
+      { label: '按等级分支', text: '按结果等级/奖励档位播放不同表现。' },
+      { label: '异常单独处理', text: '成功、失败和异常状态需要拆成不同表现。' },
+      { label: '我来描述', text: '分支规则我补充如下：' },
+    ],
+    sequence: [
+      { label: '高亮后弹窗', text: '播放顺序是先高亮命中/目标区域，再打开结果弹窗。' },
+      { label: '数值后飞入', text: '播放顺序是先展示数值变化，再播放资源飞入并刷新终态。' },
+      { label: '逐段等待', text: '各阶段需要按顺序播放，上一段完成后再进入下一段。' },
+      { label: '并行后收尾', text: '主要表现可以并行播放，全部结束后统一进入收尾状态。' },
+    ],
+    integrationModes: [
+      { label: 'Tween+粒子', text: '接入方式优先使用 Cocos Tween 控制位移/缩放，并叠加 ParticleSystem 粒子。' },
+      { label: 'Animation/Spine', text: '核心表现使用 AnimationClip 或 Spine/Skeleton 资源播放。' },
+      { label: 'Prefab 承载', text: '表现由独立 Prefab/弹窗承载，实例化到指定 UI 层级。' },
+      { label: '先占位', text: '资源未定，先用占位动画实现，后续替换正式资源。' },
+    ],
+    assets: [
+      { label: '资源已准备', text: '表现资源已准备，资源名/路径如下：' },
+      { label: '资源待补', text: '表现资源还未确认，当前先用占位资源并在文档中标记待补。' },
+      { label: '复用现有', text: '优先复用项目内已有的 prefab/动画/音效资源。' },
+      { label: '缺失降级', text: '资源缺失时降级为静态高亮或简化动效。' },
+    ],
+    layers: [
+      { label: 'UIEffect', text: '表现播放在 UIEffect 层，避免影响原界面布局。' },
+      { label: '原界面内', text: '表现直接在原界面组件位置播放。' },
+      { label: 'PopUp/Dialog', text: '弹窗类表现放在 PopUp/Dialog 层。' },
+      { label: 'HUD 层', text: '资产/数值飞入类表现落到 HUD 资产层。' },
+    ],
+    controls: [
+      { label: '禁止重复', text: '表现播放期间禁止重复触发同类操作。' },
+      { label: '合并触发', text: '重复触发时合并结果，只播放一条连续表现。' },
+      { label: '允许跳过', text: '允许用户跳过表现，跳过后直接进入最终状态。' },
+      { label: '打断回滚', text: '表现被打断时停止播放并回滚到可操作状态。' },
+    ],
+    endState: [
+      { label: '结束后刷新', text: '全部表现播放完成后刷新数值、按钮和列表状态。' },
+      { label: '关闭后刷新', text: '用户关闭弹窗/结果层后再刷新页面状态。' },
+      { label: '先刷新再播', text: '先刷新最终数值，再播放表现作为反馈。' },
+      { label: '保持当前页', text: '播放完成后保持当前页面，不自动跳转。' },
+    ],
+  }
+
+  return bySlot[blockingQuestion.slot]
+}
+
+function clampUnderstandingScore(value: number) {
+  if (!Number.isFinite(value)) return 0
+  return Math.max(0, Math.min(100, Math.round(value)))
+}
+
+function performanceUnderstandingLabel(spec: PrdPerformanceSpec | null) {
+  if (!spec) return '表现未开始'
+  if (spec.disabled || spec.readiness?.level === 'waived') return '表现已豁免'
+  if (spec.readiness?.level === 'ready') return '表现已确认'
+  if (spec.readiness?.level === 'risk') return '表现有风险'
+  if (spec.readiness?.level === 'blocked') return '表现阻塞'
+  return spec.detected ? '表现评估中' : '表现未识别'
+}
+
+function getOverallUnderstanding(input: {
+  messages: ChatMessage[]
+  nodeComplete: boolean
+  imageEvidenceCount: number
+  prototypeHtml: string | null
+  performanceSpec: PrdPerformanceSpec | null
+}) {
+  const documentScore = input.nodeComplete
+    ? 88
+    : input.messages.length > 2
+      ? 68
+      : input.messages.length > 1
+        ? 52
+        : 34
+  const visualScore = Math.max(
+    input.imageEvidenceCount > 0 ? 76 : 38,
+    input.prototypeHtml ? 72 : 0,
+  )
+  const performanceScore = clampUnderstandingScore(
+    input.performanceSpec?.readiness?.score ?? input.performanceSpec?.confidence ?? 45,
+  )
+  const score = clampUnderstandingScore(
+    documentScore * 0.45 + visualScore * 0.25 + performanceScore * 0.3,
+  )
+  const confirmedCount = input.performanceSpec?.readiness?.confirmedSlots.length ?? 0
+  const unresolvedCount = input.performanceSpec?.readiness
+    ? input.performanceSpec.readiness.inferredSlots.length + input.performanceSpec.readiness.missingSlots.length
+    : 0
+  const label = score >= 80
+    ? '整体清晰'
+    : score >= 60
+      ? '可继续打磨'
+      : '需要补证据'
+
+  return {
+    score,
+    label,
+    confirmedCount,
+    unresolvedCount,
+    detail: `文档 ${documentScore}% / 视觉 ${visualScore}% / ${performanceUnderstandingLabel(input.performanceSpec)} ${performanceScore}%`,
+  }
+}
+
+function performanceSlotLabel(slot: PrdPerformanceBlockingQuestion['slot']) {
+  const labels: Record<PrdPerformanceBlockingQuestion['slot'], string> = {
+    trigger: '触发条件',
+    branches: '分支规则',
+    sequence: '播放顺序',
+    integrationModes: '接入方式',
+    assets: '资源清单',
+    layers: '层级位置',
+    controls: '控制规则',
+    endState: '结束状态',
+  }
+  return labels[slot]
 }
 
 function latestUserPrototypeInstruction(messages: ChatMessage[]) {
@@ -392,13 +731,17 @@ function readFileAsText(file: File) {
   })
 }
 
-function readFileAsDataUrl(file: File) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = (event) => resolve(String(event.target?.result ?? ''))
-    reader.onerror = () => reject(new Error(`读取 ${file.name} 失败。`))
-    reader.readAsDataURL(file)
-  })
+function buildDocumentAttachment(fileName: string, text: string): DocumentBlock {
+  return {
+    type: 'document',
+    title: fileName,
+    context: 'User-uploaded polishing material. Read it as attached evidence; do not pre-parse it as a map adjustment task.',
+    source: {
+      type: 'text',
+      media_type: 'text/plain',
+      data: text,
+    },
+  }
 }
 
 function isSupportedImageMediaType(type: string): type is ImageBlock['source']['media_type'] {
@@ -415,8 +758,9 @@ export function ForgeChat({
   selectedVariantIndex,
   isGeneratingPrototype,
   nodeOperationSuggestions,
+  performanceSpec,
+  blockingQuestion,
   onSend,
-  onSuggestNodeOperations,
   onClassifyImageAttachment,
   onImportFigmaFrame,
   onApplyNodeOperationSuggestion,
@@ -425,6 +769,7 @@ export function ForgeChat({
   onRestorePrototype,
   onClearPrototypeHistory,
   onSelectVariant,
+  onRemoveLastTurn,
   onClearChat,
 }: ForgeChatProps) {
   const [draft, setDraft] = useState('')
@@ -434,10 +779,12 @@ export function ForgeChat({
   const [isSuggesting, setIsSuggesting] = useState(false)
   const [isClassifying, setIsClassifying] = useState(false)
   const [variantView, setVariantView] = useState<'grid' | 'single'>('single')
-  const [singlePrototypeOnly, setSinglePrototypeOnly] = useState(false)
+  const [singlePrototypeOnly, setSinglePrototypeOnly] = useState(true)
+  const [performancePolishMode, setPerformancePolishMode] = useState(false)
   const [showFigmaImporter, setShowFigmaImporter] = useState(false)
   const [figmaUrl, setFigmaUrl] = useState('')
   const [isImportingFigma, setIsImportingFigma] = useState(false)
+  const [figmaImportProgress, setFigmaImportProgress] = useState<FigmaImportProgress | null>(null)
 
   const hasMultipleVariants = prototypeVariants.length > 1
   const selectedPrototypeHtml = prototypeVariants.find((variant) => variant.index === selectedVariantIndex)?.html ?? prototypeHtml
@@ -465,8 +812,24 @@ export function ForgeChat({
       ? []
       : PROMPT_SKILLS.filter((skill) => skillMatchesQuery(skill, slashQuery)).slice(0, 8)
   ), [slashQuery])
+  const overallUnderstanding = useMemo(() => getOverallUnderstanding({
+    messages,
+    nodeComplete,
+    imageEvidenceCount,
+    prototypeHtml,
+    performanceSpec,
+  }), [imageEvidenceCount, messages, nodeComplete, performanceSpec, prototypeHtml])
+  const questionReplies = useMemo(() => {
+    if (performancePolishMode) return performanceReplies(blockingQuestion)
+    const assistantText = latestAssistantText(messages)
+    const visualReplies = visualResourceReplies(assistantText, Boolean(prototypeHtml))
+    if (visualReplies.length > 0) return visualReplies
+    return performanceReplies(blockingQuestion)
+  }, [blockingQuestion, messages, performancePolishMode, prototypeHtml])
   const [highlightedSkillIndex, setHighlightedSkillIndex] = useState(0)
   const showPromptSkills = slashQuery !== null && promptSkills.length > 0
+  const lastUserIndex = findLatestUserMessageIndex(messages)
+  const canRemoveLastTurn = lastUserIndex !== -1 && !isSending && !isClassifying && !isImportingFigma
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -480,11 +843,9 @@ export function ForgeChat({
     setAttachments((current) => current.filter((item) => item.id !== id))
   }
 
-  async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+  async function addImageFiles(selectedFiles: File[], fallbackNamePrefix: string) {
     const availableSlots = Math.max(0, MAX_ATTACHMENTS - attachments.length)
-    const selectedFiles = Array.from(event.target.files ?? [])
     const files = selectedFiles.slice(0, availableSlots)
-    event.target.value = ''
     if (selectedFiles.length > availableSlots) {
       setError(`一次最多保留 ${MAX_ATTACHMENTS} 张参考图。`)
     }
@@ -504,11 +865,11 @@ export function ForgeChat({
           continue
         }
 
-        const dataUrl = await readFileAsDataUrl(file)
-        const base64 = dataUrl.split(',')[1]
+        const image = await readImageFileAsClipboardAttachment(file, `${fallbackNamePrefix}-${Date.now()}.png`)
+        const base64 = image.data
         if (!base64) continue
         const classification = await onClassifyImageAttachment({
-          name: file.name,
+          name: image.name,
           mediaType,
           data: base64,
         })
@@ -516,13 +877,13 @@ export function ForgeChat({
         setAttachments((current) => [
           ...current,
           {
-            id: `pending-${Date.now()}-${file.name}-${current.length}`,
-            name: file.name,
+            id: `pending-${Date.now()}-${image.name}-${current.length}`,
+            name: image.name,
             role: classification.role,
             reason: classification.reason,
             mediaType,
             data: base64,
-            previewUrl: dataUrl,
+            previewUrl: image.previewUrl,
           },
         ])
       }
@@ -531,6 +892,20 @@ export function ForgeChat({
     } finally {
       setIsClassifying(false)
     }
+  }
+
+  async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const selectedFiles = Array.from(event.target.files ?? [])
+    event.target.value = ''
+    await addImageFiles(selectedFiles, 'uploaded-image')
+  }
+
+  async function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const files = getClipboardImageFiles(event.clipboardData)
+    if (!files.length) return
+
+    event.preventDefault()
+    await addImageFiles(files, 'pasted-image')
   }
 
   async function handleImportFigmaFrame() {
@@ -544,48 +919,65 @@ export function ForgeChat({
 
     setError(null)
     setIsImportingFigma(true)
+    setFigmaImportProgress(buildFigmaImportProgress(0))
+    const startedAt = Date.now()
+    const progressTimer = window.setInterval(() => {
+      setFigmaImportProgress(buildFigmaImportProgress(Date.now() - startedAt))
+    }, 500)
     try {
       await onImportFigmaFrame({ url })
+      setFigmaImportProgress({
+        value: 100,
+        status: 'HTML 原型已生成',
+        detail: '正在切换到右侧预览，可作为原型图或参考图继续打磨。',
+      })
       setFigmaUrl('')
       setShowFigmaImporter(false)
     } catch (err) {
       setError(err instanceof Error ? err.message : '导入 Figma Frame 失败，请检查链接、环境变量和文件权限。')
     } finally {
+      window.clearInterval(progressTimer)
       setIsImportingFigma(false)
+      setFigmaImportProgress(null)
     }
   }
 
   async function handleSupplementFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files ?? [])
     event.target.value = ''
-    if (!files.length || isSuggesting) return
+    if (!files.length || isSuggesting || isSending || isClassifying || isImportingFigma) return
 
     const validFiles = files.filter((file) => {
-      if (/\.(md|txt|json)$/iu.test(file.name)) return true
-      setError('补充节点资料只支持 .md、.txt、.json。')
+      if (/\.(md|txt|json|jsonc)$/iu.test(file.name)) return true
+      setError('补充节点资料只支持 .md、.txt、.json、.jsonc。')
       return false
     })
     if (!validFiles.length) return
 
     setError(null)
     setIsSuggesting(true)
+    setIsSending(true)
     try {
-      const sources = (await Promise.all(validFiles.map(async (file, index): Promise<SupplementSource | null> => {
+      const documents = (await Promise.all(validFiles.map(async (file): Promise<DocumentBlock | null> => {
         const text = await readFileAsText(file)
         if (!text) return null
-        return { id: `supplement-${Date.now()}-${file.name}-${index}`, name: file.name, sourceKind: 'upload', text }
-      }))).filter((source): source is SupplementSource => source !== null)
+        return buildDocumentAttachment(file.name, text)
+      }))).filter((source): source is DocumentBlock => source !== null)
 
-      if (!sources.length) {
+      if (!documents.length) {
         setError('上传资料没有可读取的文本内容。')
         return
       }
 
-      await onSuggestNodeOperations({ supplementText: '', sources })
+      const content = buildMessageContentWithDocuments(draft.trim(), documents)
+      setDraft('')
+      setAttachments([])
+      await onSend(content, { performancePolishMode })
     } catch (err) {
       setError(err instanceof Error ? err.message : '资料分析失败，请重试')
     } finally {
       setIsSuggesting(false)
+      setIsSending(false)
     }
   }
 
@@ -613,6 +1005,18 @@ export function ForgeChat({
     ]
   }
 
+  function buildMessageContentWithDocuments(text: string, documents: DocumentBlock[]): ChatMessage['content'] {
+    if (documents.length === 0) return buildMessageContent(text)
+
+    const baseContent = buildMessageContent(text)
+    const introText = text || 'Please use the uploaded material attachments to continue polishing the current node.'
+    const baseBlocks: ContentBlock[] = typeof baseContent === 'string'
+      ? [{ type: 'text', text: baseContent || introText }]
+      : baseContent
+
+    return [...baseBlocks, ...documents]
+  }
+
   async function handleSend() {
     const text = draft.trim()
     if (isSending || isClassifying || isImportingFigma) return
@@ -625,7 +1029,7 @@ export function ForgeChat({
     setError(null)
     setIsSending(true)
     try {
-      await onSend(content)
+      await onSend(content, { performancePolishMode })
     } catch (err) {
       setError(err instanceof Error ? err.message : '发送失败，请重试')
     } finally {
@@ -633,20 +1037,54 @@ export function ForgeChat({
     }
   }
 
-  async function handleGeneratePrototype(instruction?: string, options?: { recordInstruction?: boolean; evidenceContent?: ChatMessage['content'] }) {
-    await onGeneratePrototype(instruction, {
-      singlePrototypeOnly: !instruction && singlePrototypeOnly,
-      recordInstruction: options?.recordInstruction,
-      evidenceContent: options?.evidenceContent,
-    })
+  async function handlePerformanceModeChange(nextMode: boolean) {
+    if (!nextMode) {
+      setPerformancePolishMode(false)
+      return
+    }
+
+    if (performancePolishMode) return
+
+    setPerformancePolishMode(true)
+    if (isSending || isClassifying || isImportingFigma) return
+
+    setError(null)
+    setIsSending(true)
+    try {
+      await onSend('进入 AI 追问表现模式。请根据当前节点、已有文档和表现编排状态，立即提出当前最不清楚、最阻塞实现的一个表现问题。', {
+        performancePolishMode: true,
+        suppressUserEcho: true,
+      })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '切换到 AI 追问表现失败，请重试')
+    } finally {
+      setIsSending(false)
+    }
   }
 
-  async function handlePrototypeButtonClick() {
+  async function handleGeneratePrototype(instruction?: string, options?: { singlePrototypeOnly?: boolean; recordInstruction?: boolean; evidenceContent?: ChatMessage['content']; currentTurnOnly?: boolean }) {
+    try {
+      const updated = await onGeneratePrototype(instruction, {
+        singlePrototypeOnly: options?.singlePrototypeOnly ?? singlePrototypeOnly,
+        recordInstruction: options?.recordInstruction,
+        evidenceContent: options?.evidenceContent,
+        currentTurnOnly: options?.currentTurnOnly,
+      })
+      if (!updated) setError('原型更新没有生成新的 HTML，请重试。')
+      return updated
+    } catch (err) {
+      setError(errorMessageFromUnknown(err))
+      return false
+    }
+  }
+
+  async function handlePrototypeButtonClick(options: { compareVariants?: boolean } = {}) {
     if (isSending || isClassifying || isImportingFigma) return
 
     const draftInstruction = draft.trim()
     const hasPendingEvidence = Boolean(draftInstruction || attachments.length > 0)
     const pendingEvidenceContent = hasPendingEvidence ? buildMessageContent(draftInstruction) : undefined
+    const useSinglePrototype = options.compareVariants ? false : singlePrototypeOnly
 
     if (!prototypeHtml) {
       if (hasPendingEvidence) {
@@ -654,7 +1092,7 @@ export function ForgeChat({
         setAttachments([])
         setError(null)
       }
-      await handleGeneratePrototype(undefined, { evidenceContent: pendingEvidenceContent })
+      await handleGeneratePrototype(undefined, { evidenceContent: pendingEvidenceContent, singlePrototypeOnly: useSinglePrototype })
       return
     }
 
@@ -662,7 +1100,7 @@ export function ForgeChat({
       setDraft('')
       setAttachments([])
       setError(null)
-      await handleGeneratePrototype(draftInstruction, { recordInstruction: true, evidenceContent: pendingEvidenceContent })
+      await handleGeneratePrototype(draftInstruction, { recordInstruction: true, evidenceContent: pendingEvidenceContent, singlePrototypeOnly: useSinglePrototype })
       return
     }
 
@@ -673,7 +1111,7 @@ export function ForgeChat({
       }
       setDraft('')
       setError(null)
-      await handleGeneratePrototype(draftInstruction, { recordInstruction: true })
+      await handleGeneratePrototype(draftInstruction, { recordInstruction: true, singlePrototypeOnly: useSinglePrototype })
       return
     }
 
@@ -682,7 +1120,7 @@ export function ForgeChat({
       setDraft('')
       setAttachments([])
       setError(null)
-      await handleGeneratePrototype(imageAlignmentInstruction, { recordInstruction: true, evidenceContent: pendingEvidenceContent })
+      await handleGeneratePrototype(imageAlignmentInstruction, { recordInstruction: true, evidenceContent: pendingEvidenceContent, singlePrototypeOnly: useSinglePrototype })
       return
     }
 
@@ -692,7 +1130,7 @@ export function ForgeChat({
       return
     }
     setError(null)
-    await handleGeneratePrototype(instruction)
+    await handleGeneratePrototype(instruction, { singlePrototypeOnly: useSinglePrototype })
   }
 
   function handleClearChat() {
@@ -700,6 +1138,25 @@ export function ForgeChat({
     setAttachments([])
     setError(null)
     onClearChat()
+  }
+
+  function restoreRecalledMessage(message: ChatMessage) {
+    setDraft(stripRecalledAttachmentLines(getTextFromMessage(message.content)))
+    setAttachments(recalledImageAttachments(message.content))
+    window.requestAnimationFrame(() => textareaRef.current?.focus())
+  }
+
+  function handleRemoveLastTurn(restoreDraft: boolean) {
+    if (!canRemoveLastTurn) return
+    const recalledMessage = onRemoveLastTurn()
+    if (!recalledMessage) return
+    if (restoreDraft) {
+      restoreRecalledMessage(recalledMessage)
+    } else {
+      setDraft('')
+      setAttachments([])
+    }
+    setError(null)
   }
 
   function insertPromptSkill(skill: PromptSkill) {
@@ -724,6 +1181,14 @@ export function ForgeChat({
       const slashStart = match.index + match[0].lastIndexOf('/')
       return current.slice(0, slashStart).trimEnd()
     })
+  }
+
+  function insertQuestionReply(reply: QuestionReply) {
+    setDraft((current) => {
+      const prefix = current.trimEnd()
+      return prefix ? `${prefix}\n${reply.text}` : reply.text
+    })
+    window.requestAnimationFrame(() => textareaRef.current?.focus())
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -757,46 +1222,142 @@ export function ForgeChat({
   }
 
   const canSubmitDraft = Boolean(draft.trim() || attachments.length > 0)
-  const composePlaceholder = '输入你想补充/修改的内容，可同时要求打磨文档、更新原型或分析参考图...'
+  const composePlaceholder = performancePolishMode
+    ? '回答当前表现问题。也可以补充触发、分支、顺序、资源、层级、控制或结束状态...'
+    : '自由描述你想补充或修改的内容，可同时要求打磨文档、更新原型或分析参考图...'
+  const understandingTone = overallUnderstanding.score >= 80
+    ? 'bg-tertiary'
+    : overallUnderstanding.score >= 60
+      ? 'bg-secondary'
+      : 'bg-error'
+  const modeTitle = performancePolishMode ? 'AI 追问表现' : '自由迭代'
+  const modeSubtitle = performancePolishMode
+    ? '单问单答 · 回答后重算理解度'
+    : '自由补充 · AI 自动归类处理'
+  const focusValue = performancePolishMode && blockingQuestion
+    ? performanceSlotLabel(blockingQuestion.slot)
+    : performancePolishMode
+      ? '等待下一问'
+      : '未启用'
+  const qualityChecks = [
+    { label: '来源/边界', icon: 'rule', done: messages.length > 1 },
+    { label: '质量门槛', icon: 'verified', done: nodeComplete },
+    { label: '参考证据', icon: 'image_search', done: imageEvidenceCount > 0 },
+    { label: '原型预览', icon: 'preview', done: Boolean(prototypeHtml) },
+  ]
 
   return (
     <div className="flex min-w-0 flex-1 bg-background blueprint-grid">
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <div className="border-b border-outline-variant/30 bg-surface/80 px-lg py-sm">
-          <div className="flex flex-wrap items-center gap-sm">
-            {[
-              { label: '来源/边界', done: messages.length > 1 },
-              { label: '质量门槛', done: nodeComplete },
-              { label: '参考证据', done: imageEvidenceCount > 0 },
-              { label: '原型预览', done: Boolean(prototypeHtml) },
-            ].map((item) => (
-              <span
-                key={item.label}
+        <div className="border-b border-outline-variant/30 bg-surface/90 px-md py-xs backdrop-blur-sm">
+          <div className="flex min-h-[42px] flex-wrap items-center gap-xs">
+            <div className="flex h-8 shrink-0 overflow-hidden rounded-md border border-outline-variant/50 bg-surface-container-low p-[2px]">
+              <button
+                type="button"
+                onClick={() => { void handlePerformanceModeChange(false) }}
+                aria-pressed={!performancePolishMode}
                 className={[
-                  'rounded-full border px-sm py-xs font-mono text-[10px] uppercase',
-                  item.done
-                    ? 'border-tertiary/40 bg-tertiary-container/20 text-tertiary'
-                    : 'border-outline-variant/40 bg-surface-container text-on-surface-variant',
+                  'flex items-center gap-xs rounded px-sm text-label-md transition-colors',
+                  !performancePolishMode
+                    ? 'bg-primary text-on-primary'
+                    : 'text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface',
                 ].join(' ')}
+                title="自由迭代"
               >
-                {item.done ? '✓' : '○'} {item.label}
+                <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>edit_note</span>
+                自由迭代
+              </button>
+              <button
+                type="button"
+                onClick={() => { void handlePerformanceModeChange(true) }}
+                disabled={isSending || isClassifying || isImportingFigma}
+                aria-pressed={performancePolishMode}
+                className={[
+                  'flex items-center gap-xs rounded px-sm text-label-md transition-colors disabled:cursor-wait disabled:opacity-60',
+                  performancePolishMode
+                    ? 'bg-secondary-container text-on-secondary-container'
+                    : 'text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface',
+                ].join(' ')}
+                title="AI 追问表现"
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>question_answer</span>
+                AI 追问
+              </button>
+            </div>
+
+            <div className="mx-xs hidden h-5 w-px bg-outline-variant/50 sm:block" />
+
+            <div className="flex min-w-[180px] flex-1 items-center gap-xs overflow-hidden">
+              <span className={[
+                'material-symbols-outlined shrink-0',
+                performancePolishMode ? 'text-secondary' : 'text-primary',
+              ].join(' ')} style={{ fontSize: '17px' }}>
+                {performancePolishMode ? 'psychology_alt' : 'tune'}
               </span>
-            ))}
+              <div className="min-w-0 truncate">
+                <span className="text-label-md text-on-surface">{modeTitle}</span>
+                <span className="mx-xs text-on-surface-variant/50">/</span>
+                <span className="text-label-md text-on-surface-variant">{modeSubtitle}</span>
+                <span className="mx-xs text-on-surface-variant/50">/</span>
+                <span className="font-mono text-[10px] text-secondary">焦点: {focusValue}</span>
+              </div>
+            </div>
+
+            <div className="flex h-8 min-w-[168px] items-center gap-xs rounded-md border border-outline-variant/40 bg-surface-container-low px-xs" title={overallUnderstanding.detail}>
+              <span className="font-mono text-[10px] text-on-surface-variant">理解度</span>
+              <div className="h-1.5 min-w-[58px] flex-1 overflow-hidden rounded-full bg-surface-container-highest">
+                <div
+                  className={`h-full rounded-full transition-all duration-300 ${understandingTone}`}
+                  style={{ width: `${overallUnderstanding.score}%` }}
+                />
+              </div>
+              <span className="font-mono text-[11px] text-on-surface">{overallUnderstanding.score}%</span>
+              <span className="hidden font-mono text-[10px] text-on-surface-variant 2xl:inline">
+                {overallUnderstanding.confirmedCount}/{overallUnderstanding.unresolvedCount}
+              </span>
+            </div>
+
+            <div className="flex h-8 items-center gap-[3px] rounded-md border border-outline-variant/35 bg-surface-container-low px-xs">
+              {qualityChecks.map((item) => (
+                <span
+                  key={item.label}
+                  className={[
+                    'flex h-5 w-5 items-center justify-center rounded border',
+                    item.done
+                      ? 'border-tertiary/35 bg-tertiary-container/20 text-tertiary'
+                      : 'border-outline-variant/40 bg-surface text-on-surface-variant',
+                  ].join(' ')}
+                  title={`${item.done ? '已完成' : '待补齐'}：${item.label}`}
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '13px' }}>
+                    {item.done ? 'check' : item.icon}
+                  </span>
+                </span>
+              ))}
+            </div>
+
             <button
+              type="button"
               onClick={handleClearChat}
               disabled={isSending || messages.length === 0}
-              className="ml-auto flex min-h-[30px] items-center gap-xs rounded-lg border border-outline-variant bg-surface px-sm py-xs font-mono text-[11px] text-on-surface-variant transition-colors hover:border-error hover:text-error disabled:opacity-40"
+              aria-label="清空当前节点聊天和参考图"
+              className="ml-auto flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-outline-variant/45 bg-surface text-on-surface-variant transition-colors hover:border-error/70 hover:bg-error-container/20 hover:text-error disabled:opacity-40"
               title="清空当前节点聊天和参考图"
             >
-              <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>delete</span>
-              清空聊天
+              <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>delete</span>
             </button>
           </div>
         </div>
 
         <div className="flex-1 overflow-y-auto px-lg py-md flex flex-col gap-md">
           {messages.map((msg, i) => (
-            <MessageBubble key={i} msg={msg} />
+            <MessageBubble
+              key={i}
+              msg={msg}
+              canRemove={i === lastUserIndex && canRemoveLastTurn}
+              onRecall={() => handleRemoveLastTurn(true)}
+              onClear={() => handleRemoveLastTurn(false)}
+            />
           ))}
           {isSending && <LoadingIndicator />}
           {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
@@ -844,12 +1405,12 @@ export function ForgeChat({
                   onClick={() => void handleImportFigmaFrame()}
                   disabled={isImportingFigma}
                   className="flex min-h-[36px] items-center gap-xs rounded-md border border-primary bg-primary px-sm text-label-md font-medium text-on-primary transition-opacity hover:opacity-90 disabled:opacity-40"
-                  title="调用 Figma2Prefab 生成 HTML 原型"
+                  title="从 Figma 直接提取子图，并结合当前文档流式生成 HTML 原型"
                 >
                   <span className={['material-symbols-outlined', isImportingFigma ? 'animate-spin' : ''].join(' ')} style={{ fontSize: '16px' }}>
                     {isImportingFigma ? 'sync' : 'download'}
                   </span>
-                  生成 HTML
+                  提取并生成
                 </button>
               </div>
             </div>
@@ -906,10 +1467,27 @@ export function ForgeChat({
               </div>
             ) : null}
 
+            {!showPromptSkills && questionReplies.length > 0 && !isSending ? (
+              <div className="flex flex-wrap gap-xs">
+                {questionReplies.map((reply) => (
+                  <button
+                    key={`${reply.label}-${reply.text}`}
+                    type="button"
+                    onClick={() => insertQuestionReply(reply)}
+                    className="rounded-lg border border-secondary/40 bg-secondary/10 px-sm py-xs text-label-md text-secondary transition-colors hover:bg-secondary/20 active:scale-[0.99]"
+                    title="点击预填此回答"
+                  >
+                    {reply.label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+
             <textarea
               ref={textareaRef}
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
+              onPaste={(event) => { void handlePaste(event) }}
               onKeyDown={handleKeyDown}
               placeholder={composePlaceholder}
               disabled={isSending}
@@ -929,7 +1507,7 @@ export function ForgeChat({
                 />
                 <button
                   onClick={() => supplementInputRef.current?.click()}
-                  disabled={isSuggesting}
+                  disabled={isSuggesting || isSending || isClassifying || isImportingFigma}
                   className="flex min-h-[36px] items-center gap-xs rounded-lg border border-outline-variant bg-surface px-md py-sm text-label-md text-on-surface-variant transition-colors hover:border-primary hover:text-primary"
                   title="上传补充资料"
                 >
@@ -975,7 +1553,7 @@ export function ForgeChat({
                   className="flex min-h-[36px] items-center gap-xs rounded-lg border border-secondary bg-secondary-container px-md py-sm text-label-md font-medium text-on-secondary-container transition-opacity hover:opacity-90 disabled:opacity-40"
                 >
                   <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>send</span>
-                  发送给 AI
+                  {performancePolishMode ? '回答当前问题' : '发送给 AI'}
                 </button>
               </div>
             </div>
@@ -990,21 +1568,37 @@ export function ForgeChat({
               <span className="material-symbols-outlined text-primary">view_carousel</span>
               <h2 className="text-headline-sm font-semibold">视觉舱</h2>
             </div>
-            <button
-              onClick={() => void handlePrototypeButtonClick()}
-              disabled={isGeneratingPrototype}
-              className="flex items-center gap-xs rounded-lg border border-secondary/40 bg-secondary/10 px-sm py-xs font-mono text-[11px] uppercase text-secondary transition-colors hover:bg-secondary/20 disabled:opacity-40"
-              title={prototypeHtml ? '使用最近的对话或当前输入框内容增量修改已有原型' : '根据当前节点生成首版 HTML 原型'}
-            >
-              <span className={['material-symbols-outlined', isGeneratingPrototype ? 'animate-spin' : ''].join(' ')} style={{ fontSize: '15px' }}>
-                {isGeneratingPrototype ? 'sync' : 'auto_awesome'}
-              </span>
-              {prototypeHtml ? '按对话更新' : '生成原型'}
-            </button>
+            <div className="flex shrink-0 items-center gap-xs">
+              <button
+                onClick={() => void handlePrototypeButtonClick()}
+                disabled={isGeneratingPrototype || isImportingFigma}
+                className="flex items-center gap-xs rounded-lg border border-secondary/40 bg-secondary/10 px-sm py-xs font-mono text-[11px] uppercase text-secondary transition-colors hover:bg-secondary/20 disabled:opacity-40"
+                title={prototypeHtml ? '使用最近的对话或当前输入框内容增量修改已有原型' : '根据当前节点生成首版 HTML 原型'}
+              >
+                <span className={['material-symbols-outlined', isGeneratingPrototype ? 'animate-spin' : ''].join(' ')} style={{ fontSize: '15px' }}>
+                  {isGeneratingPrototype ? 'sync' : 'auto_awesome'}
+                </span>
+                {prototypeHtml ? '按对话更新' : '生成原型'}
+              </button>
+              <button
+                onClick={() => void handlePrototypeButtonClick({ compareVariants: true })}
+                disabled={isGeneratingPrototype || isImportingFigma}
+                className="flex items-center gap-xs rounded-lg border border-primary/30 bg-primary/10 px-sm py-xs font-mono text-[11px] uppercase text-primary transition-colors hover:bg-primary/20 disabled:opacity-40"
+                title="并行生成两个候选方案，用于对比后选择一个继续打磨"
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>
+                  view_comfy
+                </span>
+                双方案
+              </button>
+            </div>
           </div>
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-sm">
+            {isImportingFigma && figmaImportProgress ? (
+              <FigmaImportProgressPanel progress={figmaImportProgress} sourceUrl={figmaUrl} />
+            ) : null}
             {hasMultipleVariants && variantView === 'grid' ? (
               <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-outline-variant/30 bg-zinc-950">
                 <div className="flex items-center justify-between border-b border-outline-variant/20 bg-zinc-900/80 px-sm py-xs">

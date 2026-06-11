@@ -1,15 +1,6 @@
-import { useState } from 'react'
 import { formatPrototypeVersionTime } from '../../lib/prototypeUtils'
 import type { PrototypeVersion } from '../../store/appStore'
 import { PrototypePreviewSurface } from './PrototypeSandboxPreview'
-
-type PreviewMode = 'fit' | 'viewport' | 'actual'
-
-const PREVIEW_MODES: Array<{ id: PreviewMode; label: string; icon: string }> = [
-  { id: 'fit', label: '适屏全貌', icon: 'fit_screen' },
-  { id: 'viewport', label: '真机交互', icon: 'phone_iphone' },
-  { id: 'actual', label: '100%', icon: 'zoom_in' },
-]
 
 interface PrototypeBoardProps {
   html: string | null
@@ -32,8 +23,6 @@ export function PrototypeBoard({
   onClearHistory,
   canClearHistory,
 }: PrototypeBoardProps) {
-  const [previewMode, setPreviewMode] = useState<PreviewMode>('fit')
-  const previewFit = previewMode === 'fit' ? 'fullPage' : previewMode === 'actual' ? 'actual' : 'pane'
   const clearHistoryEnabled = canClearHistory ?? history.length > 0
 
   function handleRestore(id: string) {
@@ -52,25 +41,6 @@ export function PrototypeBoard({
           </span>
         </div>
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-xs">
-          <div className="flex h-8 rounded-md border border-outline-variant/40 bg-surface-container-high p-[2px]">
-            {PREVIEW_MODES.map((mode) => (
-              <button
-                key={mode.id}
-                type="button"
-                onClick={() => setPreviewMode(mode.id)}
-                className={[
-                  'flex items-center gap-xs rounded px-sm font-mono text-[11px] transition-colors',
-                  previewMode === mode.id
-                    ? 'bg-secondary-container text-on-secondary-container'
-                    : 'text-on-surface-variant hover:bg-surface-container-highest hover:text-on-surface',
-                ].join(' ')}
-                title={mode.label}
-              >
-                <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>{mode.icon}</span>
-                {mode.label}
-              </button>
-            ))}
-          </div>
           <select
             value=""
             onChange={(event) => handleRestore(event.target.value)}
@@ -93,7 +63,7 @@ export function PrototypeBoard({
               disabled={isLoading || !onSinglePrototypeOnlyChange}
               className="h-3.5 w-3.5 accent-secondary"
             />
-            只生成一个
+            快速单稿
           </label>
           <button
             type="button"
@@ -111,8 +81,8 @@ export function PrototypeBoard({
         <PrototypePreviewSurface
           html={html}
           title="UX prototype preview"
-          interactive={previewMode !== 'fit'}
-          fit={previewFit}
+          interactive
+          fit="fullPage"
           fallback={(
               <div className="flex h-full items-center justify-center p-md">
                 {isLoading ? (

@@ -7,4 +7,5 @@ export interface PrototypeVariant {
   model?: string
   focus?: string
   history?: string[]
+  error?: string
 }

@@ -40,4 +40,65 @@ assert.ok(
   'keeps legacy fragment normalization for existing saved previews',
 )
 
+const normalizedFullHtml = normalizePrototypeHtml(fullHtml)
+const injectedScripts = [...normalizedFullHtml.matchAll(/<script>\s*([\s\S]*?)<\/script>/gu)].map((match) => match[1])
+const annotationStripScript = injectedScripts.find((script) => script.includes('removePrototypeAnnotations'))
+assert.ok(annotationStripScript, 'injects annotation stripping runtime script')
+assert.doesNotThrow(
+  () => new Function(annotationStripScript),
+  'annotation stripping runtime script is syntactically valid',
+)
+assert.ok(
+  normalizedFullHtml.includes('body * { max-width: 100vw; }'),
+  'keeps generic width normalization for non-Figma prototypes',
+)
+assert.ok(
+  normalizedFullHtml.includes('[data-prototype-annotation]'),
+  'injects annotation selectors for generated prototypes',
+)
+assert.ok(
+  normalizedFullHtml.includes('display: none !important;'),
+  'hides annotation elements before runtime stripping',
+)
+assert.ok(
+  normalizedFullHtml.includes('removePrototypeAnnotations'),
+  'injects runtime annotation removal safeguard for generated prototypes',
+)
+assert.ok(
+  normalizedFullHtml.includes('stripAnnotationTextPattern'),
+  'removes compact Chinese annotation text labels',
+)
+
+const figmaHtml = `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UISlotsMain Figma Prototype</title>
+  <style>
+    .pf-shell { position: relative; width: 750px; height: 1624px; }
+    .pf-stage { position: absolute; width: 750px; height: 1624px; transform: scale(var(--pf-scale)); }
+  </style>
+</head>
+<body>
+  <main class="pf-shell">
+    <section class="pf-stage" data-generator="figma2prefab" data-node-count="42"></section>
+  </main>
+</body>
+</html>`
+
+const normalizedFigmaHtml = normalizePrototypeHtml(figmaHtml)
+assert.ok(
+  normalizedFigmaHtml.includes('width: 750px; height: 1624px;'),
+  'keeps Figma2Prefab design-stage dimensions',
+)
+assert.ok(
+  !normalizedFigmaHtml.includes('body * { max-width: 100vw; }'),
+  'does not inject generic descendant max-width into Figma2Prefab prototypes',
+)
+assert.ok(
+  normalizedFigmaHtml.includes('[data-prototype-annotation]'),
+  'keeps annotation stripping selectors for Figma2Prefab prototypes',
+)
+
 console.log('prototypeUtils.test.ts: all assertions passed')

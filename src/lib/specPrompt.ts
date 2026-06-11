@@ -1,5 +1,6 @@
 import { formatSectionTitle, formatSpecLens, hasNodeSections, resolveNodeAudience, resolveNodeSpecLens } from './prdNodeLens'
 import { formatPerformanceSpecForPrompt, formatPerformanceSpecMarkdown, resolveNodePerformanceSpec } from './performanceOrchestration'
+import { buildDeliverySections, collectBackendContracts, collectDeliveryNodes } from './prdNodeDelivery'
 import type { PrdNode, PrdTree } from '../types/prdNode'
 import type { UXRequirementState } from '../types/uxRequirement'
 
@@ -32,8 +33,8 @@ export function requirementToBoltPrompt(requirement: UXRequirementState) {
 - 输出可直接运行的前端原型，不需要构建步骤。
 - 使用内联 CSS/JS 或 CDN，界面应有游戏 UX 质感。
 - 覆盖主要状态、按钮反馈、加载/禁用/错误态和关键动画。
-- 保留清晰的组件标注，便于设计师和开发复核。
-- 所有用户可见界面文字、按钮文案、状态提示、组件标注和说明文字必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。
+- 不要生成提示性标注、组件标注、注释说明小标签、注释栏、引线或 callout；原型只保留用户真实会看到和操作的界面内容。
+- 所有用户可见界面文字、按钮文案和状态提示必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。
 
 交互规格：
 触发条件：${formatValue(requirement.trigger_condition)}
@@ -87,29 +88,51 @@ function uniqueNodes(nodes: PrdNode[]) {
   })
 }
 
+function formatDeliverySectionsForPrompt(node: PrdNode, tree: PrdTree) {
+  const sections = buildDeliverySections(node, tree)
+  if (!sections.some((section) => section.status !== 'missing')) return formatNodeSectionsForPrompt(node)
+  return [
+    '- View / Flow / Data：',
+    ...sections.map((section) => {
+      if (section.status === 'missing') return null
+      return [
+        `  - ${section.title}`,
+        section.summary ? `    摘要：${section.summary}` : null,
+        section.content ? `    内容：${section.content}` : null,
+        section.sourceNodeIds.length ? `    折叠来源：${section.sourceNodeIds.join(', ')}` : null,
+      ].filter(Boolean).join('\n')
+    }).filter((item): item is string => Boolean(item)),
+  ].join('\n')
+}
+
+function formatBackendContractsForPrompt(node: PrdNode, tree: PrdTree) {
+  const contracts = collectBackendContracts(node, tree)
+  if (!contracts.length) return null
+  return [
+    '- 服务端交互 / 依赖引用：',
+    ...contracts.map((contract) => [
+      `  - ${contract.title} (${contract.kind})`,
+      contract.summary ? `    说明：${contract.summary}` : null,
+      contract.fields?.length ? `    字段：${contract.fields.join('、')}` : null,
+      contract.targetNodeId ? `    目标节点：${contract.targetNodeId}` : null,
+    ].filter(Boolean).join('\n')),
+  ].join('\n')
+}
+
 export function prdTreeToBoltPrompt(tree: PrdTree) {
-  const nodes = Object.values(tree)
-  const leaves = nodes.filter((node) => node.children.length === 0)
-  const completedLeaves = leaves.filter((node) => node.status === 'done')
-  const visualLeaves = leaves.filter((node) => (
-    node.type === 'ui'
-    || resolveNodeAudience(node) === 'client'
-    || resolveNodeSpecLens(node) === 'view'
-  ))
-  const completedVisualLeaves = visualLeaves.filter((node) => node.status === 'done')
-  const sectionPages = nodes.filter((node) => hasNodeSections(node.sections))
-  const completedSectionPages = sectionPages.filter((node) => node.status === 'done')
-  const baseSourceNodes = completedVisualLeaves.length
-    ? completedVisualLeaves
-    : completedLeaves.length
-      ? completedLeaves
-      : visualLeaves.length
-        ? visualLeaves
-        : leaves
-  const sourceNodes = uniqueNodes([
-    ...baseSourceNodes,
-    ...(completedSectionPages.length ? completedSectionPages : sectionPages),
-  ])
+  const deliveryNodes = collectDeliveryNodes(tree)
+  const completedDeliveryNodes = deliveryNodes.filter((node) => node.status === 'done')
+  const visualDeliveryNodes = deliveryNodes.filter((node) => resolveNodeAudience(node) === 'client' || resolveNodeSpecLens(node) === 'view')
+  const completedVisualDeliveryNodes = visualDeliveryNodes.filter((node) => node.status === 'done')
+  const sourceNodes = uniqueNodes(
+    completedVisualDeliveryNodes.length
+      ? completedVisualDeliveryNodes
+      : completedDeliveryNodes.length
+        ? completedDeliveryNodes
+        : visualDeliveryNodes.length
+          ? visualDeliveryNodes
+          : deliveryNodes,
+  )
 
   const specs = sourceNodes.map((node) => [
     `## ${buildNodePath(node.id, tree)}`,
@@ -122,7 +145,8 @@ export function prdTreeToBoltPrompt(tree: PrdTree) {
     node.handoffGoal ? `- AI 接力目标：${node.handoffGoal}` : null,
     `- 摘要：${node.summary}`,
     `- 内容：${node.content}`,
-    formatNodeSectionsForPrompt(node),
+    formatDeliverySectionsForPrompt(node, tree),
+    formatBackendContractsForPrompt(node, tree),
     formatPerformanceSpecMarkdown(resolveNodePerformanceSpec(node)),
     node.techNotes ? `- 技术备注：${node.techNotes}` : null,
   ].filter(Boolean).join('\n')).join('\n\n')
@@ -134,7 +158,8 @@ export function prdTreeToBoltPrompt(tree: PrdTree) {
 - 使用单文件 HTML/CSS/JS 或现代前端项目均可，但需要能直接运行预览。
 - 优先实现已完成的 client/UI 文档包；如果没有已完成文档包，则从全部叶子文档中抽取可视化界面需求。
 - 用游戏交互设计规格的方式呈现，不要做营销页。
-- 所有用户可见界面文字、按钮文案、状态提示、组件标注和说明文字必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。
+- 不要生成提示性标注、组件标注、注释说明小标签、注释栏、引线或 callout；原型只保留用户真实会看到和操作的界面内容。
+- 所有用户可见界面文字、按钮文案和状态提示必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。
 
 导图叶子文档包：
 ${specs || '暂无节点内容'}

@@ -9,6 +9,7 @@ interface TopAppBarProps {
   onOpenArchive: () => void
   onSaveArchive: () => void
   onSaveArchiveAs: () => void
+  onConfigureEnvironment?: () => void
   onDeleteProject?: () => void
   canExport?: boolean
   onExport?: () => void
@@ -36,6 +37,7 @@ export function TopAppBar({
   onOpenArchive,
   onSaveArchive,
   onSaveArchiveAs,
+  onConfigureEnvironment,
   onDeleteProject,
   canExport,
   onExport,
@@ -127,6 +129,18 @@ export function TopAppBar({
                 <span className="material-symbols-outlined" style={{ fontSize: '17px' }}>drive_file_rename_outline</span>
                 另存为...
               </button>
+              {onConfigureEnvironment ? (
+                <>
+                  <div className="my-xs h-px bg-outline-variant" />
+                  <button
+                    onClick={() => runProjectAction(onConfigureEnvironment)}
+                    className="flex w-full items-center gap-sm px-md py-sm text-left text-label-md text-on-surface hover:bg-surface-container-high"
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: '17px' }}>manufacturing</span>
+                    配置环境
+                  </button>
+                </>
+              ) : null}
               {onDeleteProject ? (
                 <>
                   <div className="my-xs h-px bg-outline-variant" />

@@ -14,6 +14,7 @@ const ROOT_GAP = 64
 
 interface TreeCanvasProps {
   tree: PrdTree
+  sourceTree?: PrdTree
   selectedNodeId: string | null
   onNodeClick: (id: string) => void
   onNodeDoubleClick: (id: string) => void
@@ -66,7 +67,7 @@ function buildChildrenMap(tree: PrdTree) {
 function layerLabel(depth: number) {
   if (depth === 0) return '原文目录'
   if (depth === 1) return '页面节点'
-  if (depth === 2) return 'MVC 文档'
+  if (depth === 2) return '交付节点'
   if (depth === 3) return '细分文档'
   return `拆分层 ${depth - 2}`
 }
@@ -180,7 +181,7 @@ function addNodeConnectorPath(root: PositionedNode, addSlot: { x: number; y: num
   return `M ${sx} ${sy} C ${sx} ${midY}, ${ex} ${midY}, ${ex} ${ey}`
 }
 
-export function TreeCanvas({ tree, selectedNodeId, onNodeClick, onNodeDoubleClick, onAddNode }: TreeCanvasProps) {
+export function TreeCanvas({ tree, sourceTree, selectedNodeId, onNodeClick, onNodeDoubleClick, onAddNode }: TreeCanvasProps) {
   const transformRef = useRef({ scale: 1, tx: 0, ty: 0 })
   const viewportRef = useRef<HTMLDivElement>(null)
   const innerRef = useRef<HTMLDivElement>(null)
@@ -403,6 +404,7 @@ export function TreeCanvas({ tree, selectedNodeId, onNodeClick, onNodeDoubleClic
           >
             <NodeCard
               node={item.node}
+              tree={sourceTree ?? tree}
               isSelected={item.node.id === selectedNodeId}
               onNodeClick={onNodeClick}
               onNodeDoubleClick={onNodeDoubleClick}
@@ -425,7 +427,7 @@ export function TreeCanvas({ tree, selectedNodeId, onNodeClick, onNodeDoubleClic
             <span className="min-w-0">
               <span className="block font-label-md text-label-md text-on-surface">新增页面节点</span>
               <span className="mt-xs block text-body-sm leading-snug text-on-surface-variant">
-                上传资料，生成 MVC 拆分
+                上传资料，补齐三栏细节
               </span>
             </span>
             <span className="absolute right-sm top-sm rounded border border-primary/30 bg-primary-container/40 px-xs py-[1px] font-mono text-[10px] uppercase text-primary">

@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 import { sendChatMessage } from '../../lib/api'
+import { getClipboardImageFiles, readImageFileAsClipboardAttachment } from '../../lib/clipboardImages'
 import { useAppStore } from '../../store/appStore'
 import type { ContentBlock, ImageBlock } from '../../types/chat'
 
@@ -13,12 +14,22 @@ type Attachment =
   | { kind: 'text'; name: string; content: string }
   | { kind: 'image'; name: string; mediaType: ImageBlock['source']['media_type']; data: string; previewUrl: string }
 
+const MAX_IMAGE_SIZE = 4 * 1024 * 1024
+
 function renderMessageContent(content: string | ContentBlock[]) {
   if (typeof content === 'string') return <p className="whitespace-pre-line leading-relaxed">{content}</p>
   return (
     <div className="flex flex-col gap-sm">
       {content.map((block, i) => {
         if (block.type === 'text') return <p key={i}>{block.text}</p>
+        if (block.type === 'document') {
+          return (
+            <div key={i} className="rounded-lg border border-outline-variant/50 bg-surface-container-high px-sm py-xs text-label-md">
+              <div className="font-medium text-on-surface">{block.title}</div>
+              {block.context ? <div className="text-on-surface-variant">{block.context}</div> : null}
+            </div>
+          )
+        }
         return (
           <img
             key={i}
@@ -94,6 +105,32 @@ export function ChatPanel({ onOpenSettings, onBack, onConfirm }: ChatPanelProps)
     })
 
     event.target.value = ''
+  }
+
+  async function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const files = getClipboardImageFiles(event.clipboardData)
+    if (!files.length) return
+
+    event.preventDefault()
+    setError(null)
+    try {
+      for (const file of files) {
+        if (file.size > MAX_IMAGE_SIZE) {
+          setError('单张粘贴图片不能超过 4MB。')
+          continue
+        }
+        const image = await readImageFileAsClipboardAttachment(file, `pasted-image-${Date.now()}.png`)
+        addAttachment({
+          kind: 'image',
+          name: image.name,
+          mediaType: image.mediaType,
+          data: image.data,
+          previewUrl: image.previewUrl,
+        })
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '粘贴图片失败，请重试。')
+    }
   }
 
   async function handleSend() {
@@ -295,6 +332,7 @@ export function ChatPanel({ onOpenSettings, onBack, onConfirm }: ChatPanelProps)
           <textarea
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
+            onPaste={(event) => { void handlePaste(event) }}
             onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); handleSend() } }}
             className="min-h-[80px] w-full resize-none border-none bg-transparent font-body text-body-md text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none"
             placeholder={inputPlaceholder}

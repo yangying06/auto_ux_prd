@@ -30,8 +30,8 @@ const PERFORMANCE_SLOT_KEYS = PERFORMANCE_SLOT_DEFINITIONS.map((definition) => d
 const PERFORMANCE_BLOCKING_SLOT_PRIORITY: PrdPerformanceSlotKey[] = [
   'trigger',
   'branches',
-  'integrationModes',
   'sequence',
+  'integrationModes',
   'assets',
   'layers',
   'controls',
@@ -44,6 +44,173 @@ const PERFORMANCE_SLOT_QUESTIONS = Object.fromEntries(
   PERFORMANCE_SLOT_DEFINITIONS.map((definition) => [definition.key, definition.question]),
 ) as Record<PrdPerformanceSlotKey, string>
 const SLOT_STATUS_VALUES = new Set<PrdPerformanceSlotStatusValue>(['missing', 'inferred', 'confirmed', 'waived'])
+
+export interface PerformanceAnswerFastResult {
+  reply: string
+  performanceSpec: PrdPerformanceSpec
+}
+
+const PERFORMANCE_FAST_REPLY_OPTIONS: Record<PrdPerformanceSlotKey, string[]> = {
+  trigger: ['接口返回后', '用户点击后', '状态变化后', '我来描述'],
+  branches: ['统一流程', '按等级分支', '异常单独处理', '我来描述'],
+  sequence: ['逐段等待', '并行后收尾', '数值后飞入', '我来描述'],
+  integrationModes: ['Tween+粒子', 'Animation/Spine', 'Prefab 承载', '先占位'],
+  assets: ['资源已准备', '资源待补', '复用现有', '缺失降级'],
+  layers: ['UIEffect', '原界面内', 'PopUp/Dialog', 'HUD 层'],
+  controls: ['禁止重复', '合并触发', '允许跳过', '打断回滚'],
+  endState: ['结束后刷新', '关闭后刷新', '先刷新再播', '保持当前页'],
+}
+
+function shortText(value: string, max = 160) {
+  const text = value.replace(/\s+/g, ' ').trim()
+  return text.length > max ? `${text.slice(0, max - 1)}...` : text
+}
+
+function isUnresolvedPerformanceAnswer(value: string) {
+  return /待补|待定|暂未|暂无|未确认|不确定|不知道|占位|后续|稍后|缺失/u.test(value)
+}
+
+function isWaivedPerformanceAnswer(value: string) {
+  return /无特殊表现|无需表现|不用动效|不需要额外|豁免/u.test(value)
+}
+
+function appendUniqueString(items: string[] | undefined, value: string, limit = 12) {
+  return unique([...(items ?? []), value], limit)
+}
+
+function inferConfirmedIntegrationModes(value: string) {
+  const modes: string[] = []
+  if (/tween|补间|位移|缩放|滚动|飞入/i.test(value)) modes.push('Cocos Tween 变换')
+  if (/animationclip|cc\.animation|animation|动画片段/i.test(value)) modes.push('AnimationClip/cc.Animation')
+  if (/spine|skeleton|骨骼/i.test(value)) modes.push('Spine/Skeleton')
+  if (/particle|粒子/i.test(value)) modes.push('ParticleSystem 粒子')
+  if (/prefab|弹窗|实例化/i.test(value)) modes.push('Prefab 特效/弹窗')
+  if (/序列帧|sequence/i.test(value)) modes.push('序列帧')
+  if (/音效|audio|sound/i.test(value)) modes.push('音效联动')
+  return unique(modes, 8)
+}
+
+function inferConfirmedLayers(value: string) {
+  const layers: string[] = []
+  if (/uieffect/i.test(value)) layers.push('UIEffect')
+  if (/hud/i.test(value)) layers.push('HUD')
+  if (/popup/i.test(value)) layers.push('PopUp')
+  if (/dialog/i.test(value)) layers.push('Dialog')
+  if (/notify/i.test(value)) layers.push('Notify')
+  if (/guide/i.test(value)) layers.push('Guide')
+  if (/原界面|组件位置|原位置/u.test(value)) layers.push('原界面内')
+  return unique(layers, 8)
+}
+
+function cloneSlotStatus(spec: PrdPerformanceSpec): PrdPerformanceSlotStatusMap {
+  const normalized = normalizePerformanceSpec(spec)
+  const source = normalized?.slotStatus ?? spec.slotStatus
+  return Object.fromEntries(PERFORMANCE_SLOT_KEYS.map((key) => [
+    key,
+    {
+      status: source?.[key]?.status ?? (slotHasValue(spec, key) ? 'inferred' : 'missing'),
+      detail: source?.[key]?.detail ?? summarizeSlotValue(spec, key),
+      question: source?.[key]?.question ?? PERFORMANCE_SLOT_QUESTIONS[key],
+    },
+  ])) as PrdPerformanceSlotStatusMap
+}
+
+function applyAnswerToPerformanceSlot(
+  spec: PrdPerformanceSpec,
+  slot: PrdPerformanceSlotKey,
+  answer: string,
+  status: PrdPerformanceSlotStatusValue,
+) {
+  const detail = shortText(answer)
+  const next: PrdPerformanceSpec = {
+    ...spec,
+    source: 'user',
+    updatedAt: new Date().toISOString(),
+  }
+
+  if (status === 'waived') return next
+
+  if (slot === 'trigger') next.trigger = detail
+  if (slot === 'branches') next.branches = appendUniqueString(next.branches, detail, 8)
+  if (slot === 'sequence') {
+    next.sequence = [
+      ...next.sequence,
+      {
+        id: `confirmed-sequence-${next.sequence.length + 1}`,
+        title: next.sequence.length ? `补充阶段 ${next.sequence.length + 1}` : '用户确认流程',
+        detail,
+      },
+    ].slice(0, 10)
+  }
+  if (slot === 'integrationModes') {
+    const modes = inferConfirmedIntegrationModes(answer)
+    next.integrationModes = modes.length
+      ? unique([...(next.integrationModes ?? []), ...modes], 10)
+      : appendUniqueString(next.integrationModes, detail, 10)
+  }
+  if (slot === 'assets') next.assets = appendUniqueString(next.assets, detail, 12)
+  if (slot === 'layers') {
+    const layers = inferConfirmedLayers(answer)
+    next.layers = layers.length ? unique([...next.layers, ...layers], 8) : appendUniqueString(next.layers, detail, 8)
+  }
+  if (slot === 'controls') next.controls = appendUniqueString(next.controls, detail, 8)
+  if (slot === 'endState') next.endState = detail
+
+  return next
+}
+
+export function applyPerformanceAnswerFast(
+  currentSpec: PrdPerformanceSpec | null,
+  answerText: string,
+): PerformanceAnswerFastResult | null {
+  const normalized = normalizePerformanceSpec(currentSpec)
+  const answer = answerText.trim()
+  if (!normalized?.detected || normalized.disabled || !answer) return null
+
+  const currentSlot = normalized.blockingQuestion?.slot
+    ?? PERFORMANCE_BLOCKING_SLOT_PRIORITY.find((key) => normalized.slotStatus?.[key]?.status === 'missing')
+    ?? PERFORMANCE_BLOCKING_SLOT_PRIORITY.find((key) => normalized.slotStatus?.[key]?.status === 'inferred')
+    ?? null
+  if (!currentSlot) return null
+
+  const slotStatus = cloneSlotStatus(normalized)
+  const status: PrdPerformanceSlotStatusValue = isWaivedPerformanceAnswer(answer)
+    ? 'waived'
+    : isUnresolvedPerformanceAnswer(answer)
+      ? 'inferred'
+      : 'confirmed'
+
+  const patched = applyAnswerToPerformanceSlot(normalized, currentSlot, answer, status)
+  slotStatus[currentSlot] = {
+    status,
+    detail: status === 'waived' ? `用户豁免：${shortText(answer)}` : shortText(answer),
+    question: status === 'confirmed' || status === 'waived' ? null : PERFORMANCE_SLOT_QUESTIONS[currentSlot],
+  }
+
+  const performanceSpec = normalizePerformanceSpec({
+    ...patched,
+    confidence: Math.max(patched.confidence, status === 'confirmed' || status === 'waived' ? 82 : 68),
+    openQuestions: normalized.openQuestions.filter((question) => question !== normalized.blockingQuestion?.question),
+    blockingQuestion: null,
+    slotStatus,
+  })
+  if (!performanceSpec) return null
+
+  const score = performanceSpec.readiness?.score ?? performanceSpec.confidence
+  const nextQuestion = performanceSpec.blockingQuestion
+  const reply = nextQuestion
+    ? [
+        `整体理解度：${score}%`,
+        `当前卡住：${PERFORMANCE_SLOT_LABELS[nextQuestion.slot]} - ${nextQuestion.question}`,
+        `可选：${PERFORMANCE_FAST_REPLY_OPTIONS[nextQuestion.slot].join(' / ')}`,
+      ].join('\n')
+    : [
+        `整体理解度：${score}%`,
+        '表现编排 8 个槽位已确认，可以继续打磨文档或同步右侧原型。',
+      ].join('\n')
+
+  return { reply, performanceSpec }
+}
 
 function unique(items: string[], limit = 12) {
   const seen = new Set<string>()

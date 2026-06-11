@@ -25,7 +25,7 @@ export interface QaNodeRef {
   content: string
   docPath: string | null
   capturedAt: string
-  snapshot: Pick<PrdNode, 'id' | 'label' | 'summary' | 'content' | 'type' | 'status' | 'techNotes' | 'docPath' | 'audience' | 'specLens' | 'sections' | 'handoffGoal' | 'qualityGate'>
+  snapshot: Pick<PrdNode, 'id' | 'label' | 'summary' | 'content' | 'type' | 'status' | 'techNotes' | 'docPath' | 'audience' | 'specLens' | 'sections' | 'handoffGoal' | 'qualityGate' | 'backendContracts' | 'evidenceRefs' | 'performanceSpec'>
 }
 
 export interface QaAttachment {

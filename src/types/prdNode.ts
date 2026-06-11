@@ -41,6 +41,18 @@ export interface PrdNodeReference {
   sourceNodeId?: string | null
 }
 
+export type PrdNodeBackendContractKind = 'api' | 'config' | 'server' | 'data'
+
+export interface PrdNodeBackendContractRef {
+  id?: string | null
+  title: string
+  kind: PrdNodeBackendContractKind
+  summary?: string | null
+  fields?: string[]
+  targetNodeId?: string | null
+  evidenceRefs?: PrdNodeEvidenceRef[]
+}
+
 export type PrdPerformanceSpecSource = 'auto' | 'ai' | 'user'
 export type PrdPerformanceSlotKey =
   | 'trigger'
@@ -129,6 +141,7 @@ export interface UpdateNodePatch {
   sections?: PrdNodeSections
   handoffGoal?: string | null
   qualityGate?: string | null
+  backendContracts?: PrdNodeBackendContractRef[]
   sourceKind?: PrdNodeSourceKind
   evidenceRefs?: PrdNodeEvidenceRef[]
   performanceSpec?: PrdPerformanceSpec | null
@@ -147,6 +160,7 @@ export type PrdNodeOperationPatch = Partial<Pick<
   | 'sections'
   | 'handoffGoal'
   | 'qualityGate'
+  | 'backendContracts'
   | 'techNotes'
   | 'sourceKind'
   | 'evidenceRefs'
@@ -216,6 +230,7 @@ export interface PrdNode {
   sections?: PrdNodeSections
   handoffGoal?: string | null
   qualityGate?: string | null
+  backendContracts?: PrdNodeBackendContractRef[]
   references?: PrdNodeReference[]
   sourceKind?: PrdNodeSourceKind
   evidenceRefs?: PrdNodeEvidenceRef[]
@@ -224,12 +239,27 @@ export interface PrdNode {
 
 export type PrdTree = Record<string, PrdNode>
 
-export type PrdNodeDocumentField = 'summary' | 'content' | 'techNotes'
+export type PrdNodeDocumentField =
+  | 'summary'
+  | 'content'
+  | 'techNotes'
+  | 'sections'
+  | 'handoffGoal'
+  | 'qualityGate'
+  | 'backendContracts'
+  | 'evidenceRefs'
+  | 'performanceSpec'
 
 export interface PrdNodeDocumentSnapshot {
   summary: string
   content: string
   techNotes: string | null
+  sections?: PrdNodeSections
+  handoffGoal?: string | null
+  qualityGate?: string | null
+  backendContracts?: PrdNodeBackendContractRef[]
+  evidenceRefs?: PrdNodeEvidenceRef[]
+  performanceSpec?: PrdPerformanceSpec | null
 }
 
 export interface PrdNodePolishRevision {

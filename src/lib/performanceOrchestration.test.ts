@@ -1,5 +1,6 @@
 import type { PrdNode } from '../types/prdNode'
 import {
+  applyPerformanceAnswerFast,
   createNoSpecialPerformanceSpec,
   formatPerformanceSpecMarkdown,
   inferPerformanceSpecFromNode,
@@ -59,6 +60,24 @@ assert(
 assert(coinSpec.readiness?.level === 'risk', 'auto-inferred coin spec should be a soft risk, not fully ready')
 assert(coinSpec.slotStatus?.sequence.status === 'inferred', 'auto sequence should be marked inferred')
 
+const fastSequenceAnswer = applyPerformanceAnswerFast(
+  coinSpec,
+  '各阶段需要按顺序播放，上一段完成后再进入下一段。',
+)
+assert(fastSequenceAnswer, 'fast performance answer should update simple template replies without an AI call')
+assert(
+  fastSequenceAnswer.performanceSpec.slotStatus?.sequence.status === 'confirmed',
+  'fast answer should confirm the currently blocking slot',
+)
+assert(
+  fastSequenceAnswer.performanceSpec.blockingQuestion?.slot !== 'sequence',
+  'fast answer should advance to the next blocking slot',
+)
+assert(
+  fastSequenceAnswer.reply.includes('整体理解度'),
+  'fast answer should return the same compact question format',
+)
+
 const assetSpec = inferPerformanceSpecFromNode(makeNode({
   label: '奖励揭晓特效',
   content: '奖励揭晓时实例化 reward prefab，在 UIEffect 层播放 Spine Skeleton 动画，并叠加 ParticleSystem2D 光效。',
@@ -97,7 +116,7 @@ assert(Array.isArray(legacySpec.integrationModes), 'legacy performance spec shou
 assert(legacySpec.integrationModes.length === 0, 'legacy performance spec should default integrationModes to empty array')
 assert(legacySpec.slotStatus?.integrationModes.status === 'missing', 'legacy missing integration modes should be tracked as missing')
 assert(legacySpec.readiness?.missingSlots.includes('integrationModes'), 'legacy readiness should include missing integration modes')
-assert(legacySpec.blockingQuestion?.slot === 'integrationModes', 'legacy spec should ask about the first missing implementation slot')
+assert(legacySpec.blockingQuestion?.slot === 'sequence', 'legacy spec should ask playback sequence before implementation mode')
 
 const contradictoryReadinessSpec = normalizePerformanceSpec({
   detected: true,

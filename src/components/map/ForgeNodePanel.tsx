@@ -225,6 +225,7 @@ function PerformanceOrchestrationPanel({ node }: { node: PrdNode }) {
 }
 
 export function ForgeNodePanel({ node }: ForgeNodePanelProps) {
+  const prdTree = useAppStore((state) => state.prdTree)
   const revision = useAppStore((state) => state.nodePolishRevisions[node.id])
   const acceptRevision = useAppStore((state) => state.acceptNodePolishRevision)
   const revertRevision = useAppStore((state) => state.revertNodePolishRevision)
@@ -356,7 +357,7 @@ export function ForgeNodePanel({ node }: ForgeNodePanelProps) {
         ) : mode === 'compare' && revision ? (
           <DocumentComparePreview node={node} revision={revision} />
         ) : (
-          <DocumentPreview node={node} variant="full" />
+          <DocumentPreview node={node} tree={prdTree} variant="full" />
         )}
       </div>
     </aside>

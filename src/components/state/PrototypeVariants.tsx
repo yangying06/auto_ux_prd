@@ -76,6 +76,11 @@ export function PrototypeVariants({ variants, selectedIndex, onSelect, onRetry }
                     error
                   </span>
                   <p className="font-mono text-[11px] text-on-surface-variant">该方案生成失败</p>
+                  {variant.error ? (
+                    <p className="max-w-[220px] break-words font-mono text-[10px] leading-relaxed text-error/80">
+                      {variant.error}
+                    </p>
+                  ) : null}
                   {onRetry ? (
                     <span
                       role="button"

@@ -5,7 +5,7 @@ import type { UXRequirementState } from '../types/uxRequirement'
 export type PrototypeStreamEvent =
   | { type: 'setCode'; variantIndex: number; html: string | null; focus?: string; history?: string[] }
   | ({ type: 'variantComplete'; variantIndex: number; html: string | null; focus?: string; history?: string[] } & Partial<Pick<PrototypeVariantPayload, 'mode' | 'appliedEdits'>>)
-  | { type: 'variantError'; variantIndex: number; focus?: string }
+  | { type: 'variantError'; variantIndex: number; focus?: string; message?: string }
   | { type: 'done' }
 
 interface PrototypeStreamOptions {

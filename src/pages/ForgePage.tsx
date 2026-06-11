@@ -2,25 +2,38 @@ import { useEffect, useState } from 'react'
 import { useLocation, useParams } from 'wouter'
 import { ForgeChat } from '../components/map/ForgeChat'
 import { ForgeNodePanel } from '../components/map/ForgeNodePanel'
-import { classifyReferenceImage, generatePrototype, importFigmaFrame, sendNodeChatMessage, suggestPrdNodeOperations } from '../lib/api'
+import { classifyReferenceImage, generatePrototype, importFigmaFrame, sendNodeChatMessage } from '../lib/api'
 import { formatPerformanceSpecForPrompt, resolveNodePerformanceSpec } from '../lib/performanceOrchestration'
 import { formatSectionTitle, formatSpecLens, hasNodeSections, resolveNodeSpecLens } from '../lib/prdNodeLens'
+import { buildDeliverySections, collectBackendContracts, isDeliveryNode } from '../lib/prdNodeDelivery'
 import { streamPrototype } from '../lib/prototypeStream'
+import { buildUiOnlyPrototypeInstruction, chatContentImages, chatContentText, extractFigmaUrlsFromText, isUiOnlyPrototypeFeedback } from '../lib/nodeChatIntent'
+import { buildFigmaPrototypeIterationInstruction, mergeInstructionIntoPrototypeEvidence } from '../lib/prototypeIteration'
 import { useAppStore } from '../store/appStore'
+import type { FigmaFrameImportResponse, NodeChatOptions } from '../lib/api'
 import type { ChatMessage, ContentBlock, ReferenceImageClassificationRequest } from '../types/chat'
 import type { PrdNode } from '../types/prdNode'
-import type { UXRequirementState } from '../types/uxRequirement'
+import type { AssetDependency, UXRequirementState } from '../types/uxRequirement'
 
 const MAX_PROTOTYPE_IMAGES = 6
 
 type NodePolishPatch = NonNullable<Awaited<ReturnType<typeof sendNodeChatMessage>>['nodePatch']>
+type ForgeSendOptions = NodeChatOptions & { suppressUserEcho?: boolean }
 
-const POLISH_SECTION_RE = /\n\n## Deep Forge (?:精修规格|精修文档|打磨记录)\n[\s\S]*$/u
+const POLISH_SECTION_RE = /\n\n## Deep Forge .*\n[\s\S]*$/u
+
+function errorMessageFromUnknown(error: unknown, fallback = 'Prototype update failed.') {
+  return error instanceof Error && error.message ? error.message : fallback
+}
 
 function contentText(content: ChatMessage['content']) {
   if (typeof content === 'string') return content.trim()
   return content
-    .map((block) => block.type === 'text' ? block.text.trim() : `[图片附件: ${block.source.media_type}]`)
+    .map((block) => {
+      if (block.type === 'text') return block.text.trim()
+      if (block.type === 'document') return `[Document attachment: ${block.title}]`
+      return `[图片附件: ${block.source.media_type}]`
+    })
     .filter(Boolean)
     .join('\n')
 }
@@ -29,13 +42,21 @@ function stripPolishSection(content: string) {
   return content.replace(POLISH_SECTION_RE, '').trim()
 }
 
-function mergePolishPatch(node: PrdNode, patch: NodePolishPatch) {
+function mergePolishPatch(patch: NodePolishPatch) {
   const next: NodePolishPatch = { ...patch }
-  if (patch.content?.trim()) {
-    const baseContent = stripPolishSection(node.content)
-    next.content = `${baseContent}\n\n## Deep Forge 精修文档\n${patch.content.trim()}`
+  const content = patch.content?.trim()
+  if (content) {
+    next.content = stripPolishSection(content)
   }
   return next
+}
+
+function formatNodeChatStatus(documentUpdated: boolean, prototypeUpdated: boolean, fallback: string) {
+  if (documentUpdated && prototypeUpdated) return 'Recorded this requirement and completed this UI iteration.'
+  if (prototypeUpdated) return 'Completed this UI iteration.'
+  if (documentUpdated) return 'Recorded this requirement.'
+  const trimmed = fallback.trim()
+  return trimmed.length > 80 ? 'Received.' : trimmed || 'Received.'
 }
 
 function buildFallbackPolish(node: PrdNode, messages: ChatMessage[]): NodePolishPatch {
@@ -50,10 +71,10 @@ function buildFallbackPolish(node: PrdNode, messages: ChatMessage[]): NodePolish
 
   const baseContent = stripPolishSection(node.content)
   return {
-    content: `${baseContent}\n\n## Deep Forge 打磨记录\n${transcript || '用户已人工确认该文档包。'}`,
+    content: `${baseContent}\n\n## Deep Forge notes\n${transcript || 'User confirmed this document package.'}`,
     techNotes: [
       node.techNotes,
-      'Deep Forge 已人工确认，打磨记录已合并到文档包。',
+      'Deep Forge confirmed manually; notes merged into the document package.',
     ].filter(Boolean).join('\n\n'),
   }
 }
@@ -65,11 +86,42 @@ function countImageBlocks(messages: ChatMessage[]) {
   }, 0)
 }
 
+function collectFigmaAssetDependencies(messages: ChatMessage[]): AssetDependency[] {
+  const assets: AssetDependency[] = []
+  const seen = new Set<string>()
+
+  for (const message of messages) {
+    if (message.role !== 'user') continue
+    const text = typeof message.content === 'string'
+      ? message.content
+      : message.content
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n')
+    const lines = text.split('\n')
+    for (let index = 0; index < lines.length; index += 1) {
+      const match = /Cached resource:\s*(\S+)/u.exec(lines[index])
+      if (!match) continue
+      const url = match[1]
+      if (seen.has(url)) continue
+      seen.add(url)
+      const descriptor = lines[index - 1]?.trim() || `Figma 子图 ${assets.length + 1}`
+      assets.push({
+        type: descriptor.includes('整帧') ? 'FigmaFrameImage' : 'FigmaSubImage',
+        path: `${url} | ${descriptor}`,
+        is_ready: true,
+      })
+    }
+  }
+
+  return assets.slice(0, MAX_PROTOTYPE_IMAGES)
+}
+
 // Image blocks carry no role metadata; ForgeChat encodes the role in text lines like
 // "1. 布局参考：name". We parse those lines to map each image (same order) to its role
 // so reference images can be prioritized for prototype generation.
 function isReferenceRoleLine(line: string) {
-  return line.includes('layout_reference') || line.includes('布局参考')
+  return line.includes('layout_reference') || line.includes('????')
 }
 
 function collectPrototypeImages(messages: ChatMessage[]): ContentBlock[] {
@@ -104,31 +156,62 @@ function buildMvcChildContext(node: PrdNode, tree: Record<string, PrdNode> | nul
   const children = node.children.map((childId) => tree?.[childId]).filter((child): child is PrdNode => Boolean(child))
   if (!children.length) return null
   return [
-    '页面下属 MVC 子节点上下文：',
+    'Page MVC child node context:',
     ...children.map((child) => [
-      `- ${child.label}（${child.id} / ${child.type} / ${formatSpecLens(resolveNodeSpecLens(child))}）`,
-      `  摘要：${child.summary}`,
-      `  内容：${child.content}`,
+      `- ${child.label} (${child.id} / ${child.type} / ${formatSpecLens(resolveNodeSpecLens(child))})`,
+      `  Summary: ${child.summary}`,
+      `  Content: ${child.content}`,
       child.techNotes ? `  技术备注：${child.techNotes}` : null,
-      child.docPath ? `  文档路径：${child.docPath}` : null,
+      child.docPath ? `  Doc path: ${child.docPath}` : null,
     ].filter(Boolean).join('\n')),
   ].join('\n')
 }
 
-function buildPageSectionContext(node: PrdNode) {
+function buildPageSectionContext(node: PrdNode, tree: Record<string, PrdNode> | null) {
+  const deliverySections = buildDeliverySections(node, tree)
+  if (deliverySections.some((section) => section.status !== 'missing')) {
+    return [
+      'Page View / Flow / Data spec:',
+      ...deliverySections.map((section) => {
+        if (section.status === 'missing') return null
+        return [
+          `## ${section.title}`,
+          `Status: ${section.status === 'ready' ? 'ready' : 'pending'}`,
+          section.summary ? `Summary: ${section.summary}` : null,
+          section.content ? `Content: ${section.content}` : null,
+          section.openQuestions.length ? `Open questions: ${section.openQuestions.join('; ')}` : null,
+          section.sourceNodeIds.length ? `Folded source nodes: ${section.sourceNodeIds.join(', ')}` : null,
+        ].filter(Boolean).join('\n')
+      }).filter((item): item is string => Boolean(item)),
+    ].join('\n\n')
+  }
   if (!hasNodeSections(node.sections)) return null
   return [
-    '页面内规格视角：',
+    'Page spec sections:',
     ...(['view', 'interaction', 'data'] as const).map((key) => {
       const section = node.sections?.[key]
       if (!section?.summary && !section?.content) return null
       return [
         `## ${section.title ?? formatSectionTitle(key)}`,
-        section.summary ? `摘要：${section.summary}` : null,
-        section.content ? `内容：${section.content}` : null,
+        section.summary ? `Summary: ${section.summary}` : null,
+        section.content ? `Content: ${section.content}` : null,
       ].filter(Boolean).join('\n')
     }).filter((item): item is string => Boolean(item)),
   ].join('\n\n')
+}
+
+function buildBackendContractContext(node: PrdNode, tree: Record<string, PrdNode> | null) {
+  const contracts = collectBackendContracts(node, tree)
+  if (!contracts.length) return null
+  return [
+    'Backend contract / dependency references:',
+    ...contracts.map((contract) => [
+      `- ${contract.title} (${contract.kind})`,
+      contract.summary ? `  Description: ${contract.summary}` : null,
+      contract.fields?.length ? `  Fields: ${contract.fields.join(', ')}` : null,
+      contract.targetNodeId ? `  Target node: ${contract.targetNodeId}` : null,
+    ].filter(Boolean).join('\n')),
+  ].join('\n')
 }
 
 function buildNodePrototypeRequirement(node: PrdNode, messages: ChatMessage[], tree: Record<string, PrdNode> | null): UXRequirementState {
@@ -137,13 +220,14 @@ function buildNodePrototypeRequirement(node: PrdNode, messages: ChatMessage[], t
     .map((message) => {
       const text = contentText(message.content)
       if (!text) return null
-      return `${message.role === 'user' ? '用户' : 'AI'}：${text}`
+      return `${message.role === 'user' ? 'User' : 'AI'}: ${text}`
     })
     .filter((item): item is string => Boolean(item))
     .join('\n')
   const referenceCount = countImageBlocks(messages)
   const mvcChildContext = node.type === 'page' ? buildMvcChildContext(node, tree) : null
-  const pageSectionContext = buildPageSectionContext(node)
+  const pageSectionContext = buildPageSectionContext(node, tree)
+  const backendContractContext = buildBackendContractContext(node, tree)
   const performanceSpec = resolveNodePerformanceSpec(node)
   const performanceContext = performanceSpec?.detected && !performanceSpec.disabled
     ? `表现编排规格：\n${formatPerformanceSpecForPrompt(performanceSpec)}`
@@ -155,27 +239,29 @@ function buildNodePrototypeRequirement(node: PrdNode, messages: ChatMessage[], t
         is_ready: false,
       }))
     : []
+  const figmaAssets = collectFigmaAssetDependencies(messages)
+  const genericReferenceAssets = Array.from({ length: Math.max(0, referenceCount - figmaAssets.length) }, (_, index) => ({
+    type: 'ReferenceImage',
+    path: `Reference image ${index + 1} in the current node chat`,
+    is_ready: true,
+  }))
 
   return {
-    trigger_condition: `基于 PRD 节点 ${node.id}「${node.label}」生成手机端交互原型。`,
+    trigger_condition: `Generate a mobile interaction prototype from PRD node ${node.id} (${node.label}).`,
     sequence_rules: [
       stripPolishSection(node.content),
       pageSectionContext,
       mvcChildContext,
+      backendContractContext,
       performanceContext,
-      transcript ? `\nDeep Forge 对话摘要：\n${transcript}` : null,
+      transcript ? `\nDeep Forge conversation summary:\n${transcript}` : null,
     ].filter(Boolean).join('\n\n'),
-    asset_dependencies: referenceCount > 0
-      ? [
-          ...Array.from({ length: referenceCount }, (_, index) => ({
-            type: 'ReferenceImage',
-            path: `当前节点对话中的参考图 ${index + 1}`,
-            is_ready: true,
-          })),
-          ...performanceAssets,
-        ]
-      : performanceAssets,
-    engine_constraints: node.techNotes ?? '面向 Cocos Creator 游戏 UI，还原移动端长屏界面和关键交互状态。',
+    asset_dependencies: [
+      ...figmaAssets,
+      ...genericReferenceAssets,
+      ...performanceAssets,
+    ],
+    engine_constraints: node.techNotes ?? 'Game UI for Cocos Creator; restore mobile portrait UI and key interaction states.',
     ui_components: [],
     suggested_answers: [],
     completion_rate: node.status === 'done' ? 85 : 68,
@@ -188,12 +274,136 @@ function buildNodePrototypeRequirement(node: PrdNode, messages: ChatMessage[], t
     missing_reasons: {
       trigger_condition: null,
       sequence_rules: null,
-      asset_dependencies: referenceCount > 0 ? null : '可上传参考图提升原型贴合度。',
+      asset_dependencies: referenceCount > 0 ? null : 'Upload reference images to improve prototype fidelity.',
       engine_constraints: null,
     },
     next_question: null,
     performance_spec: performanceSpec?.detected && !performanceSpec.disabled ? performanceSpec : null,
   }
+}
+
+function buildFigmaEvidenceContent(result: FigmaFrameImportResponse): ContentBlock[] {
+  const formatNumericTextSlots = (image: FigmaFrameImportResponse['images'][number]) => {
+    const slots = image.numericTextSlots ?? []
+    if (!slots.length) return ''
+    return [
+      `   Numeric placeholders: ${slots.length} sample values were removed; overlay real business values at these coordinates in HTML.`,
+      ...slots.map((slot) => (
+        `   - ${slot.slotId}: x=${slot.x}, y=${slot.y}, w=${slot.width}, h=${slot.height}, center=(${slot.centerX}, ${slot.centerY})`
+      )),
+    ].join('\n')
+  }
+  const imageLines = result.images.map((image, index) => (
+    [
+      `${index + 1}. layout_reference (${image.depth === 0 ? 'full frame' : 'Figma child'}): ${image.name} / ${image.type} / ${image.width}x${image.height}`,
+      `   Cached resource: ${image.assetUrl}`,
+      formatNumericTextSlots(image),
+    ].filter(Boolean).join('\n')
+  ))
+  const numericSlotCount = result.images.reduce((sum, image) => sum + (image.numericTextSlots?.length ?? 0), 0)
+
+  return [
+    {
+      type: 'text',
+      text: [
+        `Figma Frame: ${result.panelName}`,
+        `Source URL: ${result.sourceUrl}`,
+        `Extraction result: ${result.imageCount} visual evidence image(s).`,
+        numericSlotCount ? `Numeric handling: removed ${numericSlotCount} sample value(s); use real business values or dynamic placeholders.` : null,
+        '',
+        'Use the current PRD node and the attached Figma child images to generate the right-side HTML prototype. Visual layout should follow Figma; state/data logic should follow PRD.',
+        numericSlotCount ? 'Do not restore guessed Figma sample numbers; use real PRD/chat values or dynamic placeholders.' : null,
+        '',
+        'Figma child images:',
+        imageLines.join('\n'),
+      ].join('\n'),
+    },
+    ...result.images.map((image) => ({
+      type: 'image' as const,
+      source: {
+        type: 'base64' as const,
+        media_type: image.mediaType,
+        data: image.data,
+      },
+    })),
+  ]
+}
+
+function buildCombinedFigmaEvidenceContent(results: FigmaFrameImportResponse[]): ContentBlock[] {
+  if (results.length === 0) return []
+  if (results.length === 1) return buildFigmaEvidenceContent(results[0])
+
+  let imageNumber = 0
+  const formatNumericTextSlots = (image: FigmaFrameImportResponse['images'][number]) => {
+    const slots = image.numericTextSlots ?? []
+    if (!slots.length) return ''
+    return [
+      `   Numeric placeholders: ${slots.length} sample values were removed; overlay real business values at these coordinates in HTML.`,
+      ...slots.map((slot) => (
+        `   - ${slot.slotId}: x=${slot.x}, y=${slot.y}, w=${slot.width}, h=${slot.height}, center=(${slot.centerX}, ${slot.centerY})`
+      )),
+    ].join('\n')
+  }
+  const imageLines = results.flatMap((result, resultIndex) => [
+    `Source ${resultIndex + 1}: ${result.panelName}`,
+    `URL: ${result.sourceUrl}`,
+    ...result.images.map((image) => {
+      imageNumber += 1
+      return [
+        `${imageNumber}. layout_reference (${image.depth === 0 ? 'full frame' : 'Figma child'}): ${image.name} / ${image.type} / ${image.width}x${image.height}`,
+        `   Cached resource: ${image.assetUrl}`,
+        formatNumericTextSlots(image),
+      ].filter(Boolean).join('\n')
+    }),
+  ])
+  const totalImageCount = results.reduce((sum, result) => sum + result.imageCount, 0)
+  const numericSlotCount = results.reduce(
+    (sum, result) => sum + result.images.reduce((imageSum, image) => imageSum + (image.numericTextSlots?.length ?? 0), 0),
+    0,
+  )
+
+  return [
+    {
+      type: 'text',
+      text: [
+        `Figma asset group: ${results.length} link(s).`,
+        `Extraction result: ${totalImageCount} visual evidence image(s).`,
+        numericSlotCount ? `Numeric handling: removed ${numericSlotCount} sample value(s); use real business values or dynamic placeholders.` : null,
+        '',
+        'Use these Figma child images as UI assets, list items, icons, or layout references for the right-side HTML prototype; do not write them into the requirements document unless explicitly asked.',
+        numericSlotCount ? 'Do not restore guessed Figma sample numbers; use real PRD/chat values or dynamic placeholders.' : null,
+        '',
+        'Figma child images:',
+        imageLines.join('\n'),
+      ].join('\n'),
+    },
+    ...results.flatMap((result) => result.images.map((image) => ({
+      type: 'image' as const,
+      source: {
+        type: 'base64' as const,
+        media_type: image.mediaType,
+        data: image.data,
+      },
+    }))),
+  ]
+}
+
+function combineUiFeedbackWithFigmaEvidence(feedback: ChatMessage['content'], figmaEvidence: ContentBlock[]): ChatMessage['content'] {
+  const feedbackText = chatContentText(feedback)
+  const figmaText = chatContentText(figmaEvidence)
+  return [
+    {
+      type: 'text',
+      text: [
+        'Current user UI iteration request:',
+        feedbackText || 'Iterate the right-side UI prototype according to the Figma visual evidence.',
+        '',
+        figmaText,
+      ].filter(Boolean).join('\n'),
+    },
+    ...chatContentImages(feedback),
+    ...chatContentImages(figmaEvidence),
+  ]
 }
 
 export function ForgePage() {
@@ -205,8 +415,8 @@ export function ForgePage() {
   const nodeOperationSuggestions = useAppStore((s) => s.nodeOperationSuggestions)
   const settings = useAppStore((s) => s.settings)
   const appendNodeMessage = useAppStore((s) => s.appendNodeMessage)
+  const removeLastNodeChatTurn = useAppStore((s) => s.removeLastNodeChatTurn)
   const clearNodeChat = useAppStore((s) => s.clearNodeChat)
-  const setNodeOperationSuggestions = useAppStore((s) => s.setNodeOperationSuggestions)
   const applyNodeOperationSuggestion = useAppStore((s) => s.applyNodeOperationSuggestion)
   const dismissNodeOperationSuggestion = useAppStore((s) => s.dismissNodeOperationSuggestion)
   const applyNodePolish = useAppStore((s) => s.applyNodePolish)
@@ -216,7 +426,6 @@ export function ForgePage() {
   const prototypeHistory = nodePrototypeState?.prototypeHistory ?? []
   const prototypeVariants = nodePrototypeState?.prototypeVariants ?? []
   const selectedVariantIndex = nodePrototypeState?.selectedVariantIndex ?? -1
-  const setNodePrototypeHtml = useAppStore((s) => s.setNodePrototypeHtml)
   const recordNodePrototypeHistory = useAppStore((s) => s.recordNodePrototypeHistory)
   const restoreNodePrototypeVersion = useAppStore((s) => s.restoreNodePrototypeVersion)
   const clearNodePrototypeHistory = useAppStore((s) => s.clearNodePrototypeHistory)
@@ -241,7 +450,8 @@ export function ForgePage() {
 
   useEffect(() => {
     if (!node && nodeId) navigate('/')
-  }, [node, nodeId, navigate])
+    if (node && prdTree && !isDeliveryNode(node, prdTree)) navigate('/')
+  }, [node, nodeId, navigate, prdTree])
 
   useEffect(() => {
     setNodeComplete(node?.status === 'done')
@@ -251,39 +461,72 @@ export function ForgePage() {
     if (!nodeId || !node) return
     if ((useAppStore.getState().nodeChats[nodeId] ?? []).length > 0) return
     const performanceSpec = resolveNodePerformanceSpec(node)
+    const hasPerformanceSpec = Boolean(performanceSpec?.detected && !performanceSpec.disabled)
     const visualPrompt = prototypeHtml
-      ? '我看到右侧已有原型预览，会先基于现有原型确认界面结构和主流程。'
-      : '第一步请先上传原型截图、参考图，或粘贴 Figma 链接导入视觉稿；如果暂时没有，请直接说“没有原型资源，先按文字打磨”。'
-    const performanceIntro = performanceSpec?.detected && !performanceSpec.disabled
-      ? [
-          '',
-          `后续我也会处理表现编排：${performanceSpec.eventTypes.join('、') || '表现流程'}。`,
-          '但顺序会放在原型/视觉依据和核心流程确认之后，再追问触发、分支、顺序、资源、层级、控制和结束状态。',
-        ].filter(Boolean).join('\n')
-      : ''
+      ? 'I see an existing prototype on the right. Can it be used as the visual reference for this interface?'
+      : 'Please upload a prototype screenshot/reference image or paste a Figma link. If none, reply: no prototype resource.'
+    const nextStep = prototypeHtml
+      ? `After confirmation I will continue polishing main flow, edge states, dependency fields, and acceptance criteria${hasPerformanceSpec ? ', then handle performance orchestration' : ''}.`
+      : 'After receiving a prototype resource or a no-resource answer, I will continue with the next concrete question.'
     appendNodeMessage(nodeId, {
       role: 'assistant',
-      content: `正在为文档包 ${node.label}（${node.docPath ?? nodeId}）开启深度打磨。\n${visualPrompt}\n之后我会确认入口、主流程、状态/边界、依赖字段和验收标准。${performanceIntro}`,
+      content: `Polishing ${node.label}.\n${visualPrompt}\n${nextStep}`,
     })
   }, [appendNodeMessage, node, nodeId, prototypeHtml])
 
-  async function handleSend(content: ChatMessage['content']) {
+  async function handleSend(content: ChatMessage['content'], options: ForgeSendOptions = {}) {
     if (!nodeId || !prdTree || !node) return
     const userMsg: ChatMessage = { role: 'user', content }
-    appendNodeMessage(nodeId, userMsg)
+    if (!options.suppressUserEcho) {
+      appendNodeMessage(nodeId, userMsg)
+    }
+    let resolvedFigmaEvidence: ContentBlock[] | null | undefined
+    const resolveFigmaEvidence = async () => {
+      if (resolvedFigmaEvidence !== undefined) return resolvedFigmaEvidence
+      const figmaUrls = extractFigmaUrlsFromText(chatContentText(content))
+      resolvedFigmaEvidence = figmaUrls.length
+        ? buildCombinedFigmaEvidenceContent(await Promise.all(
+            figmaUrls.map((url) => importFigmaFrame(settings.proxyBaseUrl, { url })),
+          ))
+        : null
+      return resolvedFigmaEvidence
+    }
 
-    const currentMessages = [...(useAppStore.getState().nodeChats[nodeId] ?? [])]
     try {
+      if (!options.performancePolishMode && isUiOnlyPrototypeFeedback(content)) {
+        const figmaEvidence = await resolveFigmaEvidence()
+        const evidenceContent = figmaEvidence
+          ? combineUiFeedbackWithFigmaEvidence(content, figmaEvidence)
+          : content
+
+        const prototypeUpdated = await handleGeneratePrototype(buildUiOnlyPrototypeInstruction(content), {
+          recordInstruction: false,
+          evidenceContent,
+          currentTurnOnly: true,
+        })
+        appendNodeMessage(nodeId, {
+          role: 'assistant',
+          content: prototypeUpdated ? 'Completed this UI iteration.' : 'UI iteration failed: no new HTML was generated.',
+        })
+        return
+      }
+
       const response = await sendNodeChatMessage(
         settings.proxyBaseUrl,
         nodeId,
-        currentMessages,
+        userMsg,
         prdTree,
+        options,
       )
-      appendNodeMessage(nodeId, { role: 'assistant', content: response.reply })
+      const documentUpdated = Boolean(
+        response.nodePatch
+        || response.nodeComplete
+        || response.intents?.some((intent) => intent === 'document_polish' || intent === 'reference_feedback'),
+      )
+      let prototypeUpdated = false
+      let prototypeError: string | null = null
       if (response.nodePatch) {
-        const currentNode = useAppStore.getState().prdTree?.[nodeId] ?? node
-        applyNodePolish(nodeId, mergePolishPatch(currentNode, response.nodePatch))
+        applyNodePolish(nodeId, mergePolishPatch(response.nodePatch))
       }
       if (response.nodeComplete) {
         setNodeComplete(true)
@@ -292,35 +535,33 @@ export function ForgePage() {
       const prototypeInstruction = response.prototypeInstruction?.trim()
       if (prototypeInstruction) {
         try {
-          await handleGeneratePrototype(prototypeInstruction, { recordInstruction: false, singlePrototypeOnly: true })
-          appendNodeMessage(nodeId, { role: 'assistant', content: '已根据同一轮输入同步更新右侧原型预览。' })
+          const figmaEvidence = await resolveFigmaEvidence()
+          prototypeUpdated = await handleGeneratePrototype(prototypeInstruction, {
+            recordInstruction: false,
+            evidenceContent: figmaEvidence
+              ? combineUiFeedbackWithFigmaEvidence(content, figmaEvidence)
+              : content,
+            currentTurnOnly: true,
+          })
+          if (!prototypeUpdated) prototypeError = 'No new HTML was generated.'
         } catch (err) {
-          const message = err instanceof Error ? err.message : '原型更新失败'
-          appendNodeMessage(nodeId, { role: 'assistant', content: `文档打磨已完成，但右侧原型同步更新失败：${message}` })
+          prototypeError = err instanceof Error ? err.message : 'UI 迭代失败'
         }
       }
+      const shouldKeepAiQuestion = options.performancePolishMode === true && response.reply.trim().length > 0
+      const statusText = prototypeError
+        ? documentUpdated
+          ? `Recorded this requirement, but UI iteration failed: ${prototypeError}`
+          : `UI iteration failed: ${prototypeError}`
+        : shouldKeepAiQuestion
+          ? response.reply
+          : formatNodeChatStatus(documentUpdated, prototypeUpdated, response.reply)
+      appendNodeMessage(nodeId, { role: 'assistant', content: statusText })
     } catch (err) {
-      const message = err instanceof Error ? err.message : '发送失败'
-      appendNodeMessage(nodeId, { role: 'assistant', content: `请求失败：${message}` })
+      const message = err instanceof Error ? err.message : 'Send failed.'
+      appendNodeMessage(nodeId, { role: 'assistant', content: `Request failed: ${message}` })
       throw err
     }
-  }
-
-  async function handleSuggestNodeOperations(input: { supplementText: string; sources: Array<{ name: string; sourceKind: 'upload'; text: string }> }) {
-    if (!nodeId || !prdTree || !node) return
-    const response = await suggestPrdNodeOperations(settings.proxyBaseUrl, {
-      tree: prdTree,
-      selectedNodeId: nodeId,
-      supplementText: input.supplementText,
-      sources: input.sources.map((source) => ({ name: source.name, sourceKind: source.sourceKind, text: source.text })),
-    })
-    setNodeOperationSuggestions(nodeId, response.suggestions)
-    appendNodeMessage(nodeId, {
-      role: 'assistant',
-      content: response.suggestions.length
-        ? `${response.reply}\n\n已生成 ${response.suggestions.length} 条待确认节点建议，请在输入框上方逐条应用或忽略。`
-      : response.reply,
-    })
   }
 
   function handleClassifyImageAttachment(input: ReferenceImageClassificationRequest) {
@@ -328,35 +569,53 @@ export function ForgePage() {
   }
 
   async function handleImportFigmaFrame(input: { url: string }) {
-    if (!nodeId) throw new Error('当前没有选中的节点。')
-    const result = await importFigmaFrame(settings.proxyBaseUrl, input)
-    setNodePrototypeHtml(nodeId, result.html, { mode: 'create', note: `Figma2Prefab：${result.panelName}` })
-    setNodePrototypeVariants(nodeId, [{
-      index: 0,
-      html: result.html,
-      status: 'complete',
-      focus: `Figma2Prefab ${result.panelName}`,
-      history: [`从 ${result.sourceUrl} 导入 ${result.uiSpecPath}`],
-    }])
-    selectNodePrototypeVariant(nodeId, 0)
+    if (!nodeId) throw new Error('No selected node.')
     appendNodeMessage(nodeId, {
       role: 'assistant',
-      content: `${result.summary}\n\n已把生成的 HTML 放到右侧原型预览，可继续用“按对话更新”迭代。`,
+      content: 'Parsing Figma Frame and generating a right-side HTML prototype from the current node.',
     })
-    return result
+    try {
+      const result = await importFigmaFrame(settings.proxyBaseUrl, input)
+      const evidenceContent = buildFigmaEvidenceContent(result)
+      const currentPrototypeState = useAppStore.getState().nodePrototypeStates[nodeId]
+      const selectedVariant = currentPrototypeState?.prototypeVariants.find((variant) => variant.index === currentPrototypeState.selectedVariantIndex)
+      const hasExistingPrototype = Boolean(selectedVariant?.html ?? currentPrototypeState?.prototypeHtml)
+      const instruction = buildFigmaPrototypeIterationInstruction(result, hasExistingPrototype)
+      const prototypeUpdated = await handleGeneratePrototype(instruction, { singlePrototypeOnly: true, evidenceContent, currentTurnOnly: true })
+      if (!prototypeUpdated) {
+        throw new Error('Figma parsed, but no updated HTML prototype was generated.')
+      }
+      appendNodeMessage(nodeId, {
+        role: 'assistant',
+        content: hasExistingPrototype
+          ? `${result.summary}\n\nUpdated the right-side HTML prototype from Figma child images.`
+          : `${result.summary}\n\nGenerated the right-side HTML prototype from the current PRD document and Figma child images.`,
+      })
+      return result
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Figma import or HTML prototype generation failed.'
+      appendNodeMessage(nodeId, {
+        role: 'assistant',
+        content: `Figma import or HTML generation failed: ${message}`,
+      })
+      throw err
+    }
   }
 
-  async function handleGeneratePrototype(instruction?: string, options?: { singlePrototypeOnly?: boolean; recordInstruction?: boolean; evidenceContent?: ChatMessage['content'] }) {
-    if (!node) return
+  async function handleGeneratePrototype(instruction?: string, options?: { singlePrototypeOnly?: boolean; recordInstruction?: boolean; evidenceContent?: ChatMessage['content']; currentTurnOnly?: boolean }) {
+    if (!node) return false
     const trimmedInstruction = instruction?.trim() ?? ''
     const shouldRecordInstruction = Boolean(options?.recordInstruction && trimmedInstruction && nodeId)
     let prototypeCompleted = false
     if (shouldRecordInstruction) {
-      appendNodeMessage(nodeId, { role: 'user', content: `原型修改：${trimmedInstruction}` })
+      appendNodeMessage(nodeId, { role: 'user', content: `Prototype edit: ${trimmedInstruction}` })
     }
-    const currentMessages = nodeId ? (useAppStore.getState().nodeChats[nodeId] ?? messages) : messages
-    const evidenceMessages = options?.evidenceContent
-      ? [...currentMessages, { role: 'user' as const, content: options.evidenceContent }]
+    const prototypeEvidenceContent = mergeInstructionIntoPrototypeEvidence(trimmedInstruction, options?.evidenceContent)
+    const currentMessages = options?.currentTurnOnly
+      ? []
+      : nodeId ? (useAppStore.getState().nodeChats[nodeId] ?? messages) : messages
+    const evidenceMessages = prototypeEvidenceContent
+      ? [...currentMessages, { role: 'user' as const, content: prototypeEvidenceContent }]
       : currentMessages
     const currentNode = nodeId ? (useAppStore.getState().prdTree?.[nodeId] ?? node) : node
     const referenceImages = collectPrototypeImages(evidenceMessages)
@@ -367,12 +626,20 @@ export function ForgePage() {
     const selectedPrototypeHtml = selectedVariant?.html ?? currentPrototypeState?.prototypeHtml ?? null
     const isUpdate = Boolean(trimmedInstruction && selectedPrototypeHtml)
     const createVariantCount = options?.singlePrototypeOnly ? 1 : 2
+    const updateVariantCount = options?.singlePrototypeOnly ? 1 : 2
+    let prototypeErrorMessage: string | null = null
 
     setIsGeneratingPrototype(true)
     try {
       if (isUpdate && selectedVariant?.html) {
         recordNodePrototypeHistory(nodeId, selectedVariant.html, { mode: 'update', note: `修改前：${trimmedInstruction}` })
-        updateNodePrototypeVariant(nodeId, selectedVariant.index, { status: 'streaming' })
+        setNodePrototypeVariants(nodeId, Array.from({ length: updateVariantCount }, (_, offset) => ({
+          index: selectedVariant.index + offset,
+          html: offset === 0 ? selectedVariant.html : null,
+          status: 'streaming' as const,
+          focus: offset === 0 ? selectedVariant.focus : undefined,
+          history: offset === 0 ? selectedVariant.history : undefined,
+        })))
         let didReceivePrototypeHtml = false
         await streamPrototype(
           settings.proxyBaseUrl,
@@ -381,7 +648,7 @@ export function ForgePage() {
             currentHtml: selectedVariant.html,
             instruction: trimmedInstruction,
             images: referenceImages,
-            numVariants: 1,
+            numVariants: updateVariantCount,
             variantIndex: selectedVariant.index,
             history: selectedVariant.history ?? [],
           },
@@ -405,13 +672,20 @@ export function ForgePage() {
               })
               if (event.variantIndex === selectedVariant.index && event.html) selectNodePrototypeVariant(nodeId, event.variantIndex)
             } else if (event.type === 'variantError') {
-              updateNodePrototypeVariant(nodeId, event.variantIndex, { status: 'error', focus: event.focus })
+              prototypeErrorMessage = event.message ?? prototypeErrorMessage
+              updateNodePrototypeVariant(nodeId, event.variantIndex, { status: 'error', focus: event.focus, error: event.message })
             }
           },
         )
-        selectNodePrototypeVariant(nodeId, selectedVariant.index)
+        if (!didReceivePrototypeHtml) {
+          throw new Error(prototypeErrorMessage ?? 'Prototype update did not return complete HTML.')
+        }
+        const variants = useAppStore.getState().nodePrototypeStates[nodeId]?.prototypeVariants ?? []
+        const completedVariant = variants.find((variant) => variant.index === selectedVariant.index && variant.status === 'complete' && variant.html)
+          ?? variants.find((variant) => variant.status === 'complete' && variant.html)
+        if (completedVariant) selectNodePrototypeVariant(nodeId, completedVariant.index)
         prototypeCompleted = didReceivePrototypeHtml
-        return
+        return prototypeCompleted
       }
 
       if (isUpdate && selectedPrototypeHtml) {
@@ -423,7 +697,7 @@ export function ForgePage() {
       await streamPrototype(
         settings.proxyBaseUrl,
         requirementState,
-        { images: referenceImages, numVariants: createVariantCount },
+        { instruction: trimmedInstruction || undefined, images: referenceImages, numVariants: createVariantCount },
         (event) => {
           if (event.type === 'setCode') {
             if (event.html) didReceivePrototypeHtml = true
@@ -445,12 +719,17 @@ export function ForgePage() {
               selectNodePrototypeVariant(nodeId, event.variantIndex)
             }
           } else if (event.type === 'variantError') {
-            updateNodePrototypeVariant(nodeId, event.variantIndex, { status: 'error', focus: event.focus })
+            prototypeErrorMessage = event.message ?? prototypeErrorMessage
+            updateNodePrototypeVariant(nodeId, event.variantIndex, { status: 'error', focus: event.focus, error: event.message })
           }
         },
       )
+      if (!didReceivePrototypeHtml) {
+        throw new Error(prototypeErrorMessage ?? 'Prototype generation did not return complete HTML.')
+      }
       prototypeCompleted = didReceivePrototypeHtml
-    } catch {
+    } catch (error) {
+      prototypeErrorMessage = errorMessageFromUnknown(error)
       const result = await generatePrototype(
         settings.proxyBaseUrl,
         requirementState,
@@ -458,29 +737,27 @@ export function ForgePage() {
           currentHtml: isUpdate ? selectedPrototypeHtml : null,
           instruction: trimmedInstruction || undefined,
           images: referenceImages,
-          numVariants: isUpdate ? 1 : createVariantCount,
+          numVariants: isUpdate ? updateVariantCount : createVariantCount,
           variantIndex: isUpdate ? selectedVariant?.index : undefined,
           history: isUpdate ? selectedVariant?.history : undefined,
         },
       )
 
-      if (isUpdate && selectedVariant) {
+      if (isUpdate) {
+        setNodePrototypeVariants(nodeId, result.variants.map((variant) => ({
+          index: variant.index,
+          html: variant.html,
+          status: variant.status,
+          focus: variant.focus,
+          history: variant.history,
+          error: variant.error,
+        })))
         const chosen = result.variants.find((variant) => variant.status === 'complete' && variant.html) ?? result.variants[0]
         if (chosen?.html) {
-          updateNodePrototypeVariant(nodeId, selectedVariant.index, {
-            html: chosen.html,
-            status: 'complete',
-            focus: chosen.focus,
-            history: chosen.history,
-          })
-          selectNodePrototypeVariant(nodeId, selectedVariant.index)
+          selectNodePrototypeVariant(nodeId, chosen.index)
           prototypeCompleted = true
-        }
-      } else if (isUpdate) {
-        const chosen = result.variants.find((variant) => variant.status === 'complete' && variant.html) ?? result.variants[0]
-        if (chosen?.html) {
-          setNodePrototypeHtml(nodeId, chosen.html, { mode: 'update', note: `按对话更新：${trimmedInstruction}` })
-          prototypeCompleted = true
+        } else {
+          prototypeErrorMessage = chosen?.error ?? prototypeErrorMessage
         }
       } else {
         setNodePrototypeVariants(nodeId, result.variants.map((variant) => ({
@@ -489,19 +766,23 @@ export function ForgePage() {
           status: variant.status,
           focus: variant.focus,
           history: variant.history,
+          error: variant.error,
         })))
         const chosen = result.variants.find((variant) => variant.status === 'complete' && variant.html)
         if (chosen?.html) {
           selectNodePrototypeVariant(nodeId, chosen.index)
           prototypeCompleted = true
+        } else {
+          prototypeErrorMessage = result.variants.find((variant) => variant.error)?.error ?? prototypeErrorMessage
         }
       }
     } finally {
       if (shouldRecordInstruction && prototypeCompleted) {
-        appendNodeMessage(nodeId, { role: 'assistant', content: '已更新右侧原型预览。' })
+        appendNodeMessage(nodeId, { role: 'assistant', content: 'Updated the right-side prototype preview.' })
       }
       setIsGeneratingPrototype(false)
     }
+    return prototypeCompleted
   }
 
   function handleConfirm() {
@@ -565,7 +846,7 @@ export function ForgePage() {
           >
             {nodeComplete ? hasPerformanceRisk ? 'warning' : 'check_circle' : 'auto_awesome'}
           </span>
-          {nodeComplete ? hasPerformanceRisk ? '已完成 · 表现风险' : '已完成' : '待打磨'}
+          {nodeComplete ? hasPerformanceRisk ? 'Done / performance risk' : 'Done' : 'Pending polish'}
         </button>
       </header>
 
@@ -581,8 +862,9 @@ export function ForgePage() {
           selectedVariantIndex={selectedVariantIndex}
           isGeneratingPrototype={isGeneratingPrototype}
           nodeOperationSuggestions={nodeOperationSuggestions[nodeId] ?? []}
+          performanceSpec={performanceSpec}
+          blockingQuestion={performanceSpec?.blockingQuestion ?? null}
           onSend={handleSend}
-          onSuggestNodeOperations={handleSuggestNodeOperations}
           onClassifyImageAttachment={handleClassifyImageAttachment}
           onImportFigmaFrame={handleImportFigmaFrame}
           onApplyNodeOperationSuggestion={(suggestionId) => applyNodeOperationSuggestion(nodeId, suggestionId)}
@@ -591,6 +873,7 @@ export function ForgePage() {
           onRestorePrototype={(id) => restoreNodePrototypeVersion(nodeId, id)}
           onClearPrototypeHistory={() => clearNodePrototypeHistory(nodeId)}
           onSelectVariant={(index) => selectNodePrototypeVariant(nodeId, index)}
+          onRemoveLastTurn={() => removeLastNodeChatTurn(nodeId)}
           onClearChat={() => clearNodeChat(nodeId)}
         />
       </main>

@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useLocation } from 'wouter'
-import type { PrdNode } from '../../types/prdNode'
-import { DocumentPreview } from './DocumentPreview'
+import { buildDeliverySections, isDeliveryNode } from '../../lib/prdNodeDelivery'
+import type { PrdNode, PrdNodeSectionKey, PrdTree } from '../../types/prdNode'
+import { DocumentPreview, type DocumentPreviewTab } from './DocumentPreview'
 
 interface PreviewDrawerProps {
   node: PrdNode | null
+  tree?: PrdTree | null
   onClose: () => void
   onDelete?: (node: PrdNode) => void
   onOpenDoc?: (node: PrdNode) => void
@@ -12,19 +14,74 @@ interface PreviewDrawerProps {
   onOpenQa?: (node: PrdNode) => void
 }
 
-export function PreviewDrawer({ node, onClose, onDelete, onOpenDoc, onUpdateContent, onOpenQa }: PreviewDrawerProps) {
+const previewTabs: Array<{ id: DocumentPreviewTab; label: string; icon: string }> = [
+  { id: 'overview', label: '总览', icon: 'article' },
+  { id: 'view', label: '画面', icon: 'visibility' },
+  { id: 'interaction', label: '操作', icon: 'account_tree' },
+  { id: 'data', label: '数据', icon: 'database' },
+  { id: 'contracts', label: '服务端', icon: 'dns' },
+]
+
+function isSectionTab(tab: DocumentPreviewTab): tab is PrdNodeSectionKey {
+  return tab === 'view' || tab === 'interaction' || tab === 'data'
+}
+
+const activeTabFrame = 'border-[#FACC15] ring-2 ring-[#FACC15] ring-offset-1 ring-offset-surface-container shadow-[0_0_0_1px_rgba(250,204,21,0.45)]'
+
+const tabToneMap: Partial<Record<DocumentPreviewTab, { active: string; inactive: string }>> = {
+  overview: {
+    active: 'bg-[#8B5CF6]/20 text-[#A78BFA]',
+    inactive: 'border-[#8B5CF6]/40 bg-[#8B5CF6]/10 text-[#A78BFA] hover:border-[#8B5CF6]/70 hover:bg-[#8B5CF6]/15',
+  },
+  view: {
+    active: 'bg-[#10B981]/20 text-[#10B981]',
+    inactive: 'border-[#10B981]/35 bg-[#10B981]/10 text-[#10B981] hover:border-[#10B981]/70 hover:bg-[#10B981]/15',
+  },
+  interaction: {
+    active: 'bg-[#F59E0B]/20 text-[#F59E0B]',
+    inactive: 'border-[#F59E0B]/35 bg-[#F59E0B]/10 text-[#F59E0B] hover:border-[#F59E0B]/70 hover:bg-[#F59E0B]/15',
+  },
+  data: {
+    active: 'bg-[#3B82F6]/20 text-[#3B82F6]',
+    inactive: 'border-[#3B82F6]/35 bg-[#3B82F6]/10 text-[#3B82F6] hover:border-[#3B82F6]/70 hover:bg-[#3B82F6]/15',
+  },
+  contracts: {
+    active: 'bg-[#8B5E3C]/25 text-[#C08457]',
+    inactive: 'border-[#8B5E3C]/50 bg-[#8B5E3C]/15 text-[#C08457] hover:border-[#8B5E3C]/80 hover:bg-[#8B5E3C]/20',
+  },
+}
+
+function tabTone(tab: DocumentPreviewTab, active: boolean) {
+  const tone = tabToneMap[tab] ?? tabToneMap.overview
+  return active ? `${tone?.active ?? ''} ${activeTabFrame}` : tone?.inactive ?? ''
+}
+
+export function PreviewDrawer({ node, tree, onClose, onDelete, onOpenDoc, onUpdateContent, onOpenQa }: PreviewDrawerProps) {
   const [, navigate] = useLocation()
   const isOpen = node !== null
-  const canForge = Boolean(node && node.type === 'page' && (node.needsPolish || node.status === 'done'))
+  const canForge = Boolean(node && isDeliveryNode(node, tree) && (node.needsPolish || node.status === 'done'))
   const [isEditing, setIsEditing] = useState(false)
   const [draftContent, setDraftContent] = useState('')
   const [isCollapsed, setIsCollapsed] = useState(false)
+  const [activeTab, setActiveTab] = useState<DocumentPreviewTab>('overview')
+  const deliverySections = node ? buildDeliverySections(node, tree) : []
+  const visibleTabs = node
+    ? previewTabs.filter((tab) => {
+      if (isSectionTab(tab.id)) return deliverySections.some((section) => section.key === tab.id && section.status !== 'missing')
+      return true
+    })
+    : previewTabs
 
   useEffect(() => {
     setIsEditing(false)
     setDraftContent(node?.content ?? '')
     setIsCollapsed(false)
+    setActiveTab('overview')
   }, [node?.id, node?.content])
+
+  useEffect(() => {
+    if (!visibleTabs.some((tab) => tab.id === activeTab)) setActiveTab('overview')
+  }, [activeTab, visibleTabs])
 
   const saveContent = () => {
     if (!node) return
@@ -93,36 +150,60 @@ export function PreviewDrawer({ node, onClose, onDelete, onOpenDoc, onUpdateCont
 
       {/* Content — only render internals when node is available to avoid layout artifacts */}
       {node && (
-        <div className="flex-1 overflow-y-auto custom-scrollbar px-lg py-md">
-          {isEditing ? (
-            <div className="flex h-full flex-col gap-sm">
-              <textarea
-                value={draftContent}
-                onChange={(event) => setDraftContent(event.target.value)}
-                className="min-h-[420px] flex-1 rounded border border-outline-variant bg-surface-container-low p-md font-code-sm text-code-sm text-on-surface outline-none focus:border-primary"
-              />
-              <div className="flex justify-end gap-xs">
-                <button
-                  onClick={() => {
-                    setDraftContent(node.content)
-                    setIsEditing(false)
-                  }}
-                  className="rounded border border-outline-variant px-sm py-xs text-label-md text-on-surface-variant hover:bg-surface-variant"
-                >
-                  取消
-                </button>
-                <button
-                  onClick={saveContent}
-                  className="rounded bg-primary px-sm py-xs text-label-md text-on-primary hover:bg-primary/90"
-                >
-                  保存内容
-                </button>
+        <>
+          {!isEditing && (
+            <div className="shrink-0 border-b border-outline-variant bg-surface-container px-lg py-sm shadow-sm">
+              <div className="flex gap-xs overflow-x-auto">
+                {visibleTabs.map((tab) => {
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setActiveTab(tab.id)}
+                      className={[
+                        'flex h-9 shrink-0 items-center gap-xs rounded-lg border px-sm text-label-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FACC15]',
+                        tabTone(tab.id, activeTab === tab.id),
+                      ].join(' ')}
+                    >
+                      <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>{tab.icon}</span>
+                      {tab.label}
+                    </button>
+                  )
+                })}
               </div>
             </div>
-          ) : (
-            <DocumentPreview node={node} />
           )}
-        </div>
+          <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar px-lg py-md">
+            {isEditing ? (
+              <div className="flex h-full flex-col gap-sm">
+                <textarea
+                  value={draftContent}
+                  onChange={(event) => setDraftContent(event.target.value)}
+                  className="min-h-[420px] flex-1 rounded border border-outline-variant bg-surface-container-low p-md font-code-sm text-code-sm text-on-surface outline-none focus:border-primary"
+                />
+                <div className="flex justify-end gap-xs">
+                  <button
+                    onClick={() => {
+                      setDraftContent(node.content)
+                      setIsEditing(false)
+                    }}
+                    className="rounded border border-outline-variant px-sm py-xs text-label-md text-on-surface-variant hover:bg-surface-variant"
+                  >
+                    取消
+                  </button>
+                  <button
+                    onClick={saveContent}
+                    className="rounded bg-primary px-sm py-xs text-label-md text-on-primary hover:bg-primary/90"
+                  >
+                    保存内容
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <DocumentPreview key={`${node.id}-${activeTab}`} node={node} tree={tree} tab={activeTab} />
+            )}
+          </div>
+        </>
       )}
 
       {/* Footer */}

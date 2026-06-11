@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'wouter'
-import { previewDecomposition, startDecomposition, pollDecomposition, exportSpecFolder, exportNodeMarkdown, suggestPrdNodeOperations } from '../lib/api'
+import { getAiEnvironmentConfig, previewDecomposition, startDecomposition, pollDecomposition, exportSpecFolder, exportNodeMarkdown, suggestPrdNodeOperations } from '../lib/api'
 import { MapAdjustmentPanel } from '../components/map/MapAdjustmentPanel'
 import type { PrdImportPreview, PrdNode, PrdNodeOperationSuggestion, PrdTree } from '../types/prdNode'
+import type { AiEnvironmentConfig } from '../types/chat'
 import { useAppStore } from '../store/appStore'
 import { UploadCard } from '../components/upload/UploadCard'
 import { DecompProgress } from '../components/upload/DecompProgress'
@@ -16,6 +17,8 @@ import { buildProjectArchiveFile, encodeProjectArchive } from '../lib/archiveCod
 import { openProjectArchiveFile, saveProjectArchiveBytes } from '../lib/archiveIO'
 import { createProjectWorkspaceSnapshot } from '../lib/archiveSnapshot'
 import { AddNodeModal, type AddNodePayload } from '../components/map/AddNodeModal'
+import { buildDeliveryDisplayTree, collectDeliveryNodes, isDeliveryNode } from '../lib/prdNodeDelivery'
+import { EnvironmentConfigModal } from '../components/map/EnvironmentConfigModal'
 
 type Stage = 'upload' | 'preview' | 'decomposing' | 'error' | 'map'
 
@@ -38,11 +41,13 @@ function normalizeStepPhase(label: string) {
     .trim()
 }
 
-function canForgeNode(node: PrdNode | null) {
-  return Boolean(node && node.type === 'page' && (node.needsPolish || node.status === 'done'))
+function canForgeNode(node: PrdNode | null, tree: PrdTree | null | undefined) {
+  return Boolean(node && isDeliveryNode(node, tree) && (node.needsPolish || node.status === 'done'))
 }
 
 function completionGateNodes(tree: PrdTree) {
+  const deliveryNodes = collectDeliveryNodes(tree)
+  if (deliveryNodes.length) return deliveryNodes
   const nodes = Object.values(tree)
   const leaves = nodes.filter((node) => node.children.length === 0)
   return leaves.length ? leaves : nodes
@@ -79,7 +84,7 @@ function buildAddedNodeContent(title: string, supplementText: string, sources: A
     )
   }
 
-  sections.push('## MVC 拆分', '等待 AI 建议或人工补充 Model / Ctrl / View 子文档。')
+  sections.push('## View / Flow / Data', '等待 AI 建议或人工补齐画面、操作、数据三类细节；服务端依赖记录到服务端交互内容中。')
   return sections.join('\n\n')
 }
 
@@ -106,8 +111,7 @@ function defaultArchiveFilename(projectName: string, sourceFilename?: string | n
 }
 
 function collectGeneratedNodePrototypes(tree: PrdTree, nodePrototypeStates: ReturnType<typeof useAppStore.getState>['nodePrototypeStates']) {
-  return Object.values(tree)
-    .filter((node) => node.type === 'page' || node.type === 'ui')
+  return collectDeliveryNodes(tree)
     .sort((a, b) => a.level - b.level || a.order - b.order || a.id.localeCompare(b.id))
     .map((node) => {
       const state = nodePrototypeStates[node.id]
@@ -140,6 +144,8 @@ export function MapPage() {
   const [isAddNodeSubmitting, setIsAddNodeSubmitting] = useState(false)
   const [isPrototypeModalOpen, setIsPrototypeModalOpen] = useState(false)
   const [selectedPrototypeNodeId, setSelectedPrototypeNodeId] = useState<string | null>(null)
+  const [environmentConfigOpen, setEnvironmentConfigOpen] = useState(false)
+  const [environmentStatus, setEnvironmentStatus] = useState<AiEnvironmentConfig | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const pollInFlightRef = useRef(false)
@@ -426,11 +432,37 @@ export function MapPage() {
   }
 
   useEffect(() => {
+    let cancelled = false
+    getAiEnvironmentConfig(settings.proxyBaseUrl)
+      .then((status) => {
+        if (cancelled) return
+        setEnvironmentStatus(status)
+        if (!status.aiConfigured) setEnvironmentConfigOpen(true)
+      })
+      .catch(() => {
+        if (!cancelled) setEnvironmentStatus(null)
+      })
+    return () => { cancelled = true }
+  }, [settings.proxyBaseUrl])
+
+  const environmentConfigModal = (
+    <EnvironmentConfigModal
+      open={environmentConfigOpen}
+      required={environmentStatus ? !environmentStatus.aiConfigured : false}
+      baseUrl={settings.proxyBaseUrl}
+      status={environmentStatus}
+      onSaved={setEnvironmentStatus}
+      onClose={() => setEnvironmentConfigOpen(false)}
+    />
+  )
+
+  useEffect(() => {
     return () => { clearPolling() }
   }, [])
 
   if (stage === 'map' && prdTree) {
     const selectedNode = selectedNodeId ? (prdTree[selectedNodeId] ?? null) : null
+    const displayTree = buildDeliveryDisplayTree(prdTree)
 
     const completionTargets = completionGateNodes(prdTree)
     const incompleteCompletionTargets = completionTargets.filter((node) => node.status !== 'done')
@@ -491,7 +523,7 @@ export function MapPage() {
           title: payload.title,
           parentId,
           summary: hasSourceMaterial
-            ? `${payload.title} 页面节点，已附加补充资料，等待确认 MVC 拆分。`
+            ? `${payload.title} 页面节点，已附加补充资料，等待确认 View / Flow / Data 拆分。`
             : undefined,
           content: buildAddedNodeContent(payload.title, supplementText, sources),
         })
@@ -516,7 +548,7 @@ export function MapPage() {
         setAddNodeAssistantReply(response.reply)
         setNodeOperationSuggestions(newNodeId, response.suggestions)
         if (!response.suggestions.length) {
-          setAddNodeError(response.reply || 'AI 没有返回可应用的 MVC 拆分建议。')
+          setAddNodeError(response.reply || 'AI 没有返回可应用的 View / Flow / Data 拆分建议。')
         }
       } catch (err) {
         setAddNodeError(err instanceof Error ? err.message : '新增节点失败')
@@ -541,7 +573,7 @@ export function MapPage() {
       for (const suggestionId of ids) {
         applyNodeOperationSuggestion(createdAddNodeId, suggestionId)
       }
-      setAddNodeAssistantReply('已应用全部 MVC 拆分建议。')
+      setAddNodeAssistantReply('已应用全部 View / Flow / Data 拆分建议。')
     }
 
     const handleDeleteNode = (node: PrdNode) => {
@@ -598,7 +630,7 @@ export function MapPage() {
     }
 
     const handleOpenQaForNode = (node: PrdNode) => {
-      createQaIssue((node.type === 'page' || node.type === 'ui') ? node.id : null)
+      createQaIssue(isDeliveryNode(node, prdTree) ? node.id : null)
       navigate('/qa')
     }
 
@@ -617,6 +649,7 @@ export function MapPage() {
           onOpenArchive={() => { void handleOpenArchive() }}
           onSaveArchive={() => { void handleSaveArchive(false) }}
           onSaveArchiveAs={() => { void handleSaveArchive(true) }}
+          onConfigureEnvironment={() => setEnvironmentConfigOpen(true)}
           onDeleteProject={handleDeleteProject}
           canExport={canExport}
           onExport={handleExport}
@@ -651,12 +684,13 @@ export function MapPage() {
           />
           <div className="flex min-w-0 flex-1 flex-col">
             <TreeCanvas
-              tree={prdTree}
+              tree={displayTree}
+              sourceTree={prdTree}
               selectedNodeId={selectedNodeId}
               onNodeClick={(id) => setSelectedNodeId(id)}
               onNodeDoubleClick={(id) => {
                 const node = prdTree[id]
-                if (!canForgeNode(node)) {
+                if (!canForgeNode(node, prdTree)) {
                   setSelectedNodeId(id)
                   return
                 }
@@ -668,6 +702,7 @@ export function MapPage() {
           </div>
           <PreviewDrawer
             node={selectedNode}
+            tree={prdTree}
             onClose={() => setSelectedNodeId(null)}
             onDelete={handleDeleteNode}
             onOpenDoc={handleOpenDoc}
@@ -688,16 +723,17 @@ export function MapPage() {
           onDismissSuggestion={handleDismissAddNodeSuggestion}
           onApplyAllSuggestions={handleApplyAllAddNodeSuggestions}
         />
+        {environmentConfigModal}
         {isPrototypeModalOpen ? (
-          <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/70 p-lg backdrop-blur-sm">
-            <section className="flex h-[88vh] w-[min(860px,96vw)] flex-col overflow-hidden rounded-xl border border-outline-variant bg-surface shadow-2xl">
-              <header className="flex shrink-0 flex-wrap items-center justify-between gap-md border-b border-outline-variant bg-surface-container-low px-lg py-md">
+          <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/70 p-md backdrop-blur-sm md:p-lg">
+            <section className="flex h-[92vh] w-[min(1280px,96vw)] flex-col overflow-hidden rounded-xl border border-outline-variant bg-surface shadow-2xl">
+              <header className="flex shrink-0 flex-wrap items-center justify-between gap-md border-b border-outline-variant bg-surface-container-low px-md py-md md:px-lg">
                 <div className="min-w-0">
                   <div className="flex items-center gap-sm">
                     <span className="material-symbols-outlined text-tertiary" style={{ fontSize: '20px' }}>preview</span>
                     <h2 className="font-title-md text-title-md text-on-surface">HTML 验证原型</h2>
                   </div>
-                  <p className="mt-xs max-w-[760px] text-body-sm text-on-surface-variant">
+                  <p className="mt-xs max-w-[960px] text-body-sm text-on-surface-variant">
                     汇总各界面节点已生成的 HTML 原型，用于进入 Cocos 编码前确认流程、状态和反馈边界；Prefab 仍由 Figma 通过 figma2prefab 生成。
                   </p>
                 </div>
@@ -712,7 +748,7 @@ export function MapPage() {
                   </button>
                 </div>
               </header>
-              <div className="flex shrink-0 gap-xs overflow-x-auto border-b border-outline-variant bg-surface-container-low px-lg py-sm">
+              <div className="flex shrink-0 gap-xs overflow-x-auto border-b border-outline-variant bg-surface-container-low px-md py-sm md:px-lg">
                 {generatedNodePrototypes.map((item) => (
                   <button
                     key={item.node.id}
@@ -729,17 +765,15 @@ export function MapPage() {
                   </button>
                 ))}
               </div>
-              <div className="flex min-h-0 flex-1 items-center justify-center bg-zinc-950 p-lg">
-                <div className="flex h-full max-h-[720px] w-full max-w-[360px] flex-col overflow-hidden rounded-[32px] border-[10px] border-zinc-900 bg-black shadow-2xl ring-1 ring-white/10">
-                  <div className="flex h-9 shrink-0 items-center justify-center bg-zinc-900">
-                    <div className="h-1.5 w-20 rounded-full bg-zinc-700" />
-                  </div>
-                  <div className="min-h-0 flex-1 overflow-hidden bg-black">
+              <div className="flex min-h-0 flex-1 bg-zinc-950 p-sm md:p-md">
+                <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-outline-variant/30 bg-zinc-950 shadow-inner">
+                  <div className="blueprint-grid pointer-events-none absolute inset-0 opacity-40" />
+                  <div className="relative z-0 flex min-h-0 flex-1 overflow-hidden">
                     <PrototypePreviewSurface
                       html={selectedNodePrototype?.html ?? null}
                       title={selectedNodePrototype ? `${selectedNodePrototype.node.label} HTML prototype` : 'HTML prototype'}
                       interactive
-                      fit="pane"
+                      fit="fullPage"
                       surfaceClassName="h-full w-full"
                       fallback={(
                         <div className="flex h-full items-center justify-center p-md text-center text-body-sm text-on-surface-variant">
@@ -750,7 +784,7 @@ export function MapPage() {
                   </div>
                 </div>
               </div>
-              <footer className="flex shrink-0 flex-wrap items-center justify-between gap-sm border-t border-outline-variant bg-surface-container-low px-lg py-sm text-label-md text-on-surface-variant">
+              <footer className="flex shrink-0 flex-wrap items-center justify-between gap-sm border-t border-outline-variant bg-surface-container-low px-md py-sm text-label-md text-on-surface-variant md:px-lg">
                 <div className="min-w-0 truncate">
                   当前展示：{selectedNodePrototype?.node.label ?? '无'} · 共 {generatedNodePrototypes.length} 个已生成节点原型
                 </div>
@@ -781,6 +815,7 @@ export function MapPage() {
             <DecompLiveCanvas steps={decompositionSteps} nodeCount={nodeCount} />
           )}
         </main>
+        {environmentConfigModal}
       </div>
     )
   }
@@ -797,6 +832,7 @@ export function MapPage() {
             onReset={handleReset}
           />
         </div>
+        {environmentConfigModal}
       </div>
     )
   }
@@ -816,6 +852,7 @@ export function MapPage() {
           )}
         </div>
       </div>
+      {environmentConfigModal}
     </div>
   )
 }

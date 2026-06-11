@@ -1,20 +1,34 @@
 import type { ChatMessage, ContentBlock } from '../types/chat'
 
-const IMAGE_OMITTED_NOTE = '图片证据已在本次会话中使用；为避免本地存储超限，图片二进制数据未持久化。'
+const IMAGE_OMITTED_NOTE = 'Image evidence was used in this turn; binary image data was not persisted locally.'
+const DOCUMENT_OMITTED_NOTE = 'Document attachment was sent to AI in this turn; body omitted from local persistence.'
 
 function persistableContentBlocks(content: ContentBlock[]): ContentBlock[] {
   const textBlocks = content
     .filter((block): block is ContentBlock & { type: 'text' } => block.type === 'text')
     .map((block) => ({ ...block }))
+  const documentBlocks = content
+    .filter((block): block is ContentBlock & { type: 'document' } => block.type === 'document')
+    .map((block) => ({
+      type: 'document' as const,
+      title: block.title,
+      context: block.context,
+      source: {
+        type: 'text' as const,
+        media_type: 'text/plain' as const,
+        data: DOCUMENT_OMITTED_NOTE,
+      },
+    }))
   const imageCount = content.filter((block) => block.type === 'image').length
 
-  if (imageCount === 0) return textBlocks
+  if (imageCount === 0) return [...textBlocks, ...documentBlocks]
 
   return [
     ...textBlocks,
+    ...documentBlocks,
     {
       type: 'text',
-      text: `[${imageCount} 张${IMAGE_OMITTED_NOTE}]`,
+      text: `[${imageCount} image attachment(s) omitted: ${IMAGE_OMITTED_NOTE}]`,
     },
   ]
 }

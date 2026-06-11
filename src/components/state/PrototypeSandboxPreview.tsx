@@ -19,6 +19,14 @@ interface PrototypePreviewSurfaceProps extends PrototypeSandboxPreviewProps {
 
 const PROTOTYPE_PREVIEW_SURFACE_BASE_CLASS = 'relative flex min-h-0 items-start justify-center overflow-hidden bg-black'
 
+function hashPreviewHtml(value: string) {
+  let hash = 0
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) | 0
+  }
+  return hash.toString(36)
+}
+
 export function PrototypeSandboxPreview({
   html,
   title = 'Prototype preview',
@@ -29,6 +37,10 @@ export function PrototypeSandboxPreview({
 }: PrototypeSandboxPreviewProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const normalizedHtml = useMemo(() => (html ? normalizePrototypeHtml(html) : null), [html])
+  const iframeKey = useMemo(
+    () => normalizedHtml ? `${mode}-${normalizedHtml.length}-${hashPreviewHtml(normalizedHtml)}` : mode,
+    [mode, normalizedHtml],
+  )
 
   function hydrateSandbox() {
     if (!normalizedHtml) return
@@ -45,6 +57,7 @@ export function PrototypeSandboxPreview({
 
   return (
     <iframe
+      key={iframeKey}
       ref={iframeRef}
       src="/sandbox.html"
       className={[

@@ -14,7 +14,18 @@ export interface ImageBlock {
   }
 }
 
-export type ContentBlock = TextBlock | ImageBlock
+export interface DocumentBlock {
+  type: 'document'
+  title: string
+  context?: string
+  source: {
+    type: 'text'
+    media_type: 'text/plain'
+    data: string
+  }
+}
+
+export type ContentBlock = TextBlock | ImageBlock | DocumentBlock
 
 export type ReferenceImageRole =
   | 'layout_reference'
@@ -62,6 +73,26 @@ export interface ProxyHealth {
     proxyScript: string
     status: string
   }
+}
+
+export interface AiEnvironmentConfig {
+  aiConfigured: boolean
+  envPath: string
+  values: {
+    ANTHROPIC_API_KEY_PRESENT: boolean
+    ANTHROPIC_BASE_URL: string
+    CLAUDE_MODEL: string
+    MOCK_DECOMPOSE: boolean
+    FIGMA_TOKEN_PRESENT: boolean
+  }
+}
+
+export interface AiEnvironmentUpdate {
+  ANTHROPIC_API_KEY?: string
+  ANTHROPIC_BASE_URL: string
+  CLAUDE_MODEL: string
+  MOCK_DECOMPOSE: boolean
+  FIGMA_TOKEN?: string
 }
 
 export interface AppSettings {

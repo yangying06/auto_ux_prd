@@ -130,7 +130,7 @@ export function AppShell({ onBack, onConfirm }: { onBack?: () => void; onConfirm
                 </button>
               </div>
             </div>
-            <pre className="flex-1 overflow-auto whitespace-pre-wrap break-words p-lg font-mono text-code-sm text-on-surface leading-relaxed">
+            <pre className="flex-1 overflow-auto whitespace-pre-wrap break-words p-lg font-mono text-code-sm leading-relaxed text-on-surface [overflow-wrap:anywhere]">
               {specMarkdown}
             </pre>
           </div>

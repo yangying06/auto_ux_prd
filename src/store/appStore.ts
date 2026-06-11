@@ -1,12 +1,13 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { defaultSettings } from '../data/defaultSettings'
+import { removeLatestUserTurn } from '../lib/chatRecall'
 import { persistableMessage, persistableNodeChats } from '../lib/messagePersistence'
 import { normalizePerformanceSpec } from '../lib/performanceOrchestration'
 import { defaultAudienceForSpecLens, normalizeLegacyAudience, normalizeNodeLensFields, specLensFromLegacyAudience } from '../lib/prdNodeLens'
 import type { AppSettings, ChatMessage, RagSearchResult } from '../types/chat'
 import type { UXRequirementState } from '../types/uxRequirement'
-import type { CreatePageNodeInput, DecompositionStatus, DecompositionStep, MapAdjustmentOperation, PrdNode, PrdNodeDocumentField, PrdNodeDocumentSnapshot, PrdNodeOperationSuggestion, PrdNodePolishRevision, PrdNodeReference, PrdPerformanceSpec, PrdTree, UpdateNodePatch } from '../types/prdNode'
+import type { CreatePageNodeInput, DecompositionStatus, DecompositionStep, MapAdjustmentOperation, PrdNode, PrdNodeBackendContractRef, PrdNodeDocumentField, PrdNodeDocumentSnapshot, PrdNodeOperationSuggestion, PrdNodePolishRevision, PrdNodeReference, PrdPerformanceSpec, PrdTree, UpdateNodePatch } from '../types/prdNode'
 import type { PrototypeVariant } from '../types/prototypeVariant'
 import type { ProjectSourceDocument, ProjectWorkspaceSnapshot } from '../types/archive'
 import type { QaAttachment, QaIssue, QaIssuePatch, QaIssueStatus, QaNodeRef } from '../types/qa'
@@ -53,10 +54,25 @@ interface NodePolishPatch {
   summary?: string | null
   content?: string | null
   techNotes?: string | null
+  sections?: PrdNode['sections']
+  handoffGoal?: string | null
+  qualityGate?: string | null
+  backendContracts?: PrdNodeBackendContractRef[]
+  evidenceRefs?: PrdNode['evidenceRefs']
   performanceSpec?: PrdPerformanceSpec | null
 }
 
-const DOCUMENT_FIELDS: PrdNodeDocumentField[] = ['summary', 'content', 'techNotes']
+const DOCUMENT_FIELDS: PrdNodeDocumentField[] = [
+  'summary',
+  'content',
+  'techNotes',
+  'sections',
+  'handoffGoal',
+  'qualityGate',
+  'backendContracts',
+  'evidenceRefs',
+  'performanceSpec',
+]
 
 function normalizeOptionalText(value: string | null | undefined) {
   if (typeof value !== 'string') return null
@@ -69,11 +85,17 @@ function createDocumentSnapshot(node: PrdNode): PrdNodeDocumentSnapshot {
     summary: node.summary,
     content: node.content,
     techNotes: node.techNotes,
+    sections: node.sections,
+    handoffGoal: node.handoffGoal,
+    qualityGate: node.qualityGate,
+    backendContracts: node.backendContracts,
+    evidenceRefs: node.evidenceRefs,
+    performanceSpec: node.performanceSpec,
   }
 }
 
 function changedDocumentFields(before: PrdNodeDocumentSnapshot, after: PrdNodeDocumentSnapshot): PrdNodeDocumentField[] {
-  return DOCUMENT_FIELDS.filter((field) => before[field] !== after[field])
+  return DOCUMENT_FIELDS.filter((field) => JSON.stringify(before[field] ?? null) !== JSON.stringify(after[field] ?? null))
 }
 
 function createNodePolishRevision(nodeId: string, before: PrdNodeDocumentSnapshot, after: PrdNodeDocumentSnapshot): PrdNodePolishRevision | null {
@@ -100,6 +122,22 @@ function normalizeReferences(value: PrdNodeReference[] | null | undefined): PrdN
       sourceNodeId: normalizeOptionalText(reference.sourceNodeId),
     }))
     .filter((reference) => reference.targetNodeId || reference.label)
+}
+
+function normalizeBackendContracts(value: PrdNodeBackendContractRef[] | null | undefined): PrdNodeBackendContractRef[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const contracts = value
+    .map((contract) => ({
+      id: normalizeOptionalText(contract.id),
+      title: normalizeOptionalText(contract.title) ?? '未命名服务端依赖',
+      kind: contract.kind,
+      summary: normalizeOptionalText(contract.summary),
+      fields: Array.isArray(contract.fields) ? contract.fields.map((field) => field.trim()).filter(Boolean) : undefined,
+      targetNodeId: normalizeOptionalText(contract.targetNodeId),
+      evidenceRefs: contract.evidenceRefs,
+    }))
+    .filter((contract) => ['api', 'config', 'server', 'data'].includes(contract.kind))
+  return contracts.length ? contracts : undefined
 }
 
 function makePageNodeId(tree: PrdTree | null, title: string) {
@@ -145,10 +183,85 @@ function sanitizePatch(patch: UpdateNodePatch): UpdateNodePatch {
     sections: patch.sections,
     handoffGoal: patch.handoffGoal === undefined ? undefined : normalizeOptionalText(patch.handoffGoal),
     qualityGate: patch.qualityGate === undefined ? undefined : normalizeOptionalText(patch.qualityGate),
+    backendContracts: patch.backendContracts === undefined ? undefined : normalizeBackendContracts(patch.backendContracts),
     sourceKind: patch.sourceKind,
     evidenceRefs: patch.evidenceRefs,
     performanceSpec: patch.performanceSpec === undefined ? undefined : normalizePerformanceSpec(patch.performanceSpec),
   }
+}
+
+function appendAdjustmentBlock(existing: string | null | undefined, addition: string | null | undefined, heading: string) {
+  const current = normalizeOptionalText(existing) ?? ''
+  const next = normalizeOptionalText(addition)
+  if (!next) return current
+  if (current.includes(next)) return current
+  const block = `## ${heading}\n\n${next}`
+  return current ? `${current.trim()}\n\n${block}` : next
+}
+
+function mergeSectionAdjustment(
+  current: PrdNode['sections'] | undefined,
+  patch: PrdNode['sections'] | undefined,
+): PrdNode['sections'] | undefined {
+  if (!patch || Object.keys(patch).length === 0) return current
+  const next: PrdNode['sections'] = { ...(current ?? {}) }
+  for (const key of ['data', 'interaction', 'view'] as const) {
+    const incoming = patch[key]
+    if (!incoming) continue
+    const existing = next[key]
+    next[key] = {
+      title: incoming.title ?? existing?.title ?? null,
+      summary: appendAdjustmentBlock(existing?.summary, incoming.summary, '用户反馈补充'),
+      content: appendAdjustmentBlock(existing?.content, incoming.content, '用户反馈补充'),
+      evidenceRefs: [
+        ...(existing?.evidenceRefs ?? []),
+        ...(incoming.evidenceRefs ?? []),
+      ],
+      openQuestions: Array.from(new Set([
+        ...(existing?.openQuestions ?? []),
+        ...(incoming.openQuestions ?? []),
+      ])),
+    }
+  }
+  return next
+}
+
+function mergeBackendContractAdjustment(
+  current: PrdNodeBackendContractRef[] | undefined,
+  patch: PrdNodeBackendContractRef[] | undefined,
+) {
+  const normalizedPatch = normalizeBackendContracts(patch)
+  if (!normalizedPatch?.length) return current
+  return [...(current ?? []), ...normalizedPatch]
+}
+
+function mergeMapAdjustmentPatch(node: PrdNode, patch: UpdateNodePatch): PrdNode {
+  const sanitized = sanitizePatch(patch)
+  return normalizePrdTreeNode({
+    ...node,
+    label: sanitized.label ?? node.label,
+    status: sanitized.status ?? (node.status === 'done' ? 'done' : 'pending_refine'),
+    type: sanitized.type ?? node.type,
+    needsPolish: node.needsPolish,
+    docPath: sanitized.docPath ?? node.docPath,
+    audience: sanitized.audience ?? node.audience,
+    specLens: sanitized.specLens ?? node.specLens,
+    sourceKind: sanitized.sourceKind ?? node.sourceKind,
+    references: sanitized.references
+      ? normalizeReferences([...(node.references ?? []), ...sanitized.references])
+      : node.references,
+    summary: appendAdjustmentBlock(node.summary, sanitized.summary, '用户反馈补充'),
+    content: appendAdjustmentBlock(node.content, sanitized.content, '用户反馈调整'),
+    techNotes: appendAdjustmentBlock(node.techNotes, sanitized.techNotes, '用户反馈技术补充') || null,
+    sections: mergeSectionAdjustment(node.sections, sanitized.sections),
+    handoffGoal: appendAdjustmentBlock(node.handoffGoal, sanitized.handoffGoal, '用户反馈补充') || null,
+    qualityGate: appendAdjustmentBlock(node.qualityGate, sanitized.qualityGate, '用户反馈补充') || null,
+    backendContracts: mergeBackendContractAdjustment(node.backendContracts, sanitized.backendContracts),
+    evidenceRefs: sanitized.evidenceRefs
+      ? [...(node.evidenceRefs ?? []), ...sanitized.evidenceRefs]
+      : node.evidenceRefs,
+    performanceSpec: sanitized.performanceSpec ?? node.performanceSpec,
+  })
 }
 
 function makeSuggestionNodeId(tree: PrdTree, suggestion: PrdNodeOperationSuggestion) {
@@ -217,6 +330,7 @@ function normalizePrdTreeNode(node: PrdNode): PrdNode {
     status: node.status ?? 'pending',
     references: normalizeReferences(node.references),
     sections: node.sections ?? {},
+    backendContracts: normalizeBackendContracts(node.backendContracts),
     performanceSpec: normalizePerformanceSpec(node.performanceSpec),
   })
 }
@@ -317,6 +431,9 @@ function createQaNodeRef(node: PrdNode): QaNodeRef {
       sections: node.sections,
       handoffGoal: node.handoffGoal,
       qualityGate: node.qualityGate,
+      backendContracts: node.backendContracts,
+      evidenceRefs: node.evidenceRefs,
+      performanceSpec: node.performanceSpec,
     },
   }
 }
@@ -440,6 +557,7 @@ export interface AppStoreState {
   applyMapAdjustmentOperations: (operations: MapAdjustmentOperation[]) => void
   setNodeDocPath: (nodeId: string, docPath: string | null) => void
   appendNodeMessage: (nodeId: string, msg: ChatMessage) => void
+  removeLastNodeChatTurn: (nodeId: string) => ChatMessage | null
   clearNodeChat: (nodeId: string) => void
   setNodeOperationSuggestions: (scopeId: string, suggestions: PrdNodeOperationSuggestion[]) => void
   dismissNodeOperationSuggestion: (scopeId: string, suggestionId: string) => void
@@ -447,6 +565,7 @@ export interface AppStoreState {
   createQaIssue: (initialNodeId?: string | null) => string
   deleteQaIssue: (issueId: string) => void
   appendQaIssueMessage: (issueId: string, message: ChatMessage) => void
+  removeLastQaIssueTurn: (issueId: string) => ChatMessage | null
   applyQaIssuePatch: (issueId: string, patch: QaIssuePatch) => void
   addQaIssueNodeRef: (issueId: string, nodeId: string) => void
   removeQaIssueNodeRef: (issueId: string, nodeId: string) => void
@@ -454,6 +573,7 @@ export interface AppStoreState {
   removeQaIssueAttachment: (issueId: string, attachmentId: string) => void
   updateQaIssueStatus: (issueId: string, status: QaIssueStatus) => void
   setMapAdjustmentMessages: (messages: ChatMessage[] | ((current: ChatMessage[]) => ChatMessage[])) => void
+  removeLastMapAdjustmentTurn: () => ChatMessage | null
   setPendingMapAdjustmentOperations: (operations: MapAdjustmentOperation[]) => void
   clearMapAdjustmentState: () => void
   applyNodePolish: (nodeId: string, patch: NodePolishPatch) => void
@@ -689,15 +809,13 @@ export const useAppStore = create<AppStoreState>()(
               }
               selectedNodeId = id
             } else if (operation.type === 'delete_node') {
-              if (!tree[operation.nodeId]) continue
-              const removedIds = collectDescendantIds(tree, operation.nodeId)
-              tree = Object.fromEntries(Object.entries(tree).filter(([id]) => !removedIds.has(id))) as PrdTree
-              if (selectedNodeId && removedIds.has(selectedNodeId)) selectedNodeId = null
-              for (const id of removedIds) removedRevisionIds.add(id)
+              // AI feedback is allowed to suggest restructuring, but it must never
+              // delete existing PRD/document nodes. Users can remove nodes manually.
+              continue
             } else if (operation.type === 'update_node') {
               const node = tree[operation.nodeId]
               if (!node) continue
-              tree = { ...tree, [operation.nodeId]: { ...node, ...sanitizePatch(operation.patch) } }
+              tree = { ...tree, [operation.nodeId]: mergeMapAdjustmentPatch(node, operation.patch) }
             } else if (operation.type === 'move_content') {
               const from = tree[operation.fromNodeId]
               const to = tree[operation.toNodeId]
@@ -705,8 +823,11 @@ export const useAppStore = create<AppStoreState>()(
               if (!from || !to || !content) continue
               tree = {
                 ...tree,
-                [operation.fromNodeId]: { ...from, content: from.content.replace(content, '').trim() || from.content },
-                [operation.toNodeId]: { ...to, content: `${to.content.trim()}\n\n${content}`.trim(), status: to.status === 'done' ? 'done' : 'pending_refine' },
+                [operation.toNodeId]: {
+                  ...to,
+                  content: appendAdjustmentBlock(to.content, content, `从「${from.label}」补充的反馈内容`),
+                  status: to.status === 'done' ? 'done' : 'pending_refine',
+                },
               }
             } else if (operation.type === 'add_reference') {
               const source = tree[operation.sourceNodeId]
@@ -747,6 +868,27 @@ export const useAppStore = create<AppStoreState>()(
           },
           archiveDirty: true,
         })),
+      removeLastNodeChatTurn: (nodeId) => {
+        let recalledMessage: ChatMessage | null = null
+        set((state) => {
+          const currentMessages = state.nodeChats[nodeId] ?? []
+          const result = removeLatestUserTurn(currentMessages)
+          if (!result.recalledMessage) return state
+          recalledMessage = result.recalledMessage
+          return {
+            nodeChats: {
+              ...state.nodeChats,
+              [nodeId]: result.messages,
+            },
+            nodeOperationSuggestions: {
+              ...state.nodeOperationSuggestions,
+              [nodeId]: [],
+            },
+            archiveDirty: true,
+          }
+        })
+        return recalledMessage
+      },
       clearNodeChat: (nodeId) =>
         set((state) => {
           const { [nodeId]: _, ...rest } = state.nodeChats
@@ -777,7 +919,7 @@ export const useAppStore = create<AppStoreState>()(
             const targetId = suggestion.targetNodeId ?? ''
             const node = tree[targetId]
             if (!node) return state
-            tree = { ...tree, [targetId]: normalizePrdTreeNode({ ...node, ...sanitizePatch(suggestion.patch as UpdateNodePatch) }) }
+            tree = { ...tree, [targetId]: mergeMapAdjustmentPatch(node, suggestion.patch as UpdateNodePatch) }
           } else {
             const parent = suggestion.parentId ? tree[suggestion.parentId] : null
             const siblings = Object.values(tree).filter((node) => node.parentId === (parent?.id ?? null))
@@ -806,6 +948,7 @@ export const useAppStore = create<AppStoreState>()(
                 sections: suggestion.patch.sections ?? {},
                 handoffGoal: suggestion.patch.handoffGoal ?? null,
                 qualityGate: suggestion.patch.qualityGate ?? null,
+                backendContracts: normalizeBackendContracts(suggestion.patch.backendContracts),
                 references: [],
                 sourceKind: suggestion.patch.sourceKind,
                 evidenceRefs: suggestion.patch.evidenceRefs ?? suggestion.evidenceRefs,
@@ -855,6 +998,32 @@ export const useAppStore = create<AppStoreState>()(
             archiveDirty: true,
           }
         }),
+      removeLastQaIssueTurn: (issueId) => {
+        let recalledMessage: ChatMessage | null = null
+        set((state) => {
+          const issue = state.qaIssues[issueId]
+          if (!issue) return state
+          const result = removeLatestUserTurn(issue.messages)
+          if (!result.recalledMessage) return state
+          recalledMessage = result.recalledMessage
+          return {
+            qaIssues: {
+              ...state.qaIssues,
+              [issueId]: {
+                ...issue,
+                messages: result.messages,
+                status: 'draft',
+                readyToConfirm: false,
+                devReceivedAt: null,
+                qaConfirmedAt: null,
+                updatedAt: new Date().toISOString(),
+              },
+            },
+            archiveDirty: true,
+          }
+        })
+        return recalledMessage
+      },
       applyQaIssuePatch: (issueId, patch) =>
         set((state) => {
           const issue = state.qaIssues[issueId]
@@ -950,6 +1119,20 @@ export const useAppStore = create<AppStoreState>()(
           archiveDirty: true,
         }))
       },
+      removeLastMapAdjustmentTurn: () => {
+        let recalledMessage: ChatMessage | null = null
+        set((state) => {
+          const result = removeLatestUserTurn(state.mapAdjustmentMessages)
+          if (!result.recalledMessage) return state
+          recalledMessage = result.recalledMessage
+          return {
+            mapAdjustmentMessages: result.messages,
+            pendingMapAdjustmentOperations: [],
+            archiveDirty: true,
+          }
+        })
+        return recalledMessage
+      },
       setPendingMapAdjustmentOperations: (pendingMapAdjustmentOperations) =>
         set({ pendingMapAdjustmentOperations, archiveDirty: true }),
       clearMapAdjustmentState: () =>
@@ -966,6 +1149,8 @@ export const useAppStore = create<AppStoreState>()(
           const summary = normalizeOptionalText(patch.summary)
           const content = normalizeOptionalText(patch.content)
           const techNotes = normalizeOptionalText(patch.techNotes)
+          const handoffGoal = normalizeOptionalText(patch.handoffGoal)
+          const qualityGate = normalizeOptionalText(patch.qualityGate)
           const performanceSpec = patch.performanceSpec === undefined
             ? node.performanceSpec
             : normalizePerformanceSpec(patch.performanceSpec)
@@ -974,6 +1159,11 @@ export const useAppStore = create<AppStoreState>()(
             summary: summary ?? node.summary,
             content: content ?? node.content,
             techNotes: techNotes ?? node.techNotes,
+            sections: patch.sections ?? node.sections,
+            handoffGoal: handoffGoal ?? node.handoffGoal,
+            qualityGate: qualityGate ?? node.qualityGate,
+            backendContracts: patch.backendContracts === undefined ? node.backendContracts : normalizeBackendContracts(patch.backendContracts),
+            evidenceRefs: patch.evidenceRefs ?? node.evidenceRefs,
             performanceSpec,
           }
           const revision = createNodePolishRevision(
@@ -1017,6 +1207,12 @@ export const useAppStore = create<AppStoreState>()(
                 summary: revision.before.summary,
                 content: revision.before.content,
                 techNotes: revision.before.techNotes,
+                sections: 'sections' in revision.before ? revision.before.sections : node.sections,
+                handoffGoal: 'handoffGoal' in revision.before ? revision.before.handoffGoal : node.handoffGoal,
+                qualityGate: 'qualityGate' in revision.before ? revision.before.qualityGate : node.qualityGate,
+                backendContracts: 'backendContracts' in revision.before ? revision.before.backendContracts : node.backendContracts,
+                evidenceRefs: 'evidenceRefs' in revision.before ? revision.before.evidenceRefs : node.evidenceRefs,
+                performanceSpec: 'performanceSpec' in revision.before ? revision.before.performanceSpec : node.performanceSpec,
               },
             },
             nodePolishRevisions: restRevisions,

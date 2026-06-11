@@ -31,10 +31,10 @@ export function NodeOperationReview({ suggestions, onApply, onDismiss }: NodeOpe
           <div key={suggestion.id} className="rounded-lg border border-outline-variant bg-surface p-sm">
             <div className="mb-xs flex items-center justify-between gap-sm">
               <div className="min-w-0">
-                <div className="truncate text-label-md text-on-surface">
+                <div className="break-words text-label-md text-on-surface [overflow-wrap:anywhere]">
                   {suggestion.operation === 'create' ? '新增' : '更新'}：{suggestion.patch.label ?? suggestion.targetNodeId ?? suggestion.parentId}
                 </div>
-                <div className="mt-0.5 font-mono text-[10px] text-on-surface-variant">
+                <div className="mt-0.5 break-words font-mono text-[10px] text-on-surface-variant [overflow-wrap:anywhere]">
                   {suggestion.operation === 'create' ? `挂到 ${suggestion.parentId ?? '当前节点'}` : `目标 ${suggestion.targetNodeId}`}
                   {' · 置信度 '}{suggestion.confidence}%
                 </div>
@@ -43,7 +43,7 @@ export function NodeOperationReview({ suggestions, onApply, onDismiss }: NodeOpe
                 {sourceLabel(sourceKind)}
               </span>
             </div>
-            <p className="mb-sm line-clamp-2 text-body-sm text-on-surface-variant">{suggestion.rationale}</p>
+            <p className="mb-sm line-clamp-2 break-words text-body-sm text-on-surface-variant [overflow-wrap:anywhere]">{suggestion.rationale}</p>
             <div className="flex justify-end gap-xs">
               <button
                 onClick={() => onDismiss(suggestion.id)}

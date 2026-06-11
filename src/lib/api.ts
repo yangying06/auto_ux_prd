@@ -2,13 +2,16 @@ import type {
   ChatMessage,
   ChatResponse,
   ContentBlock,
+  ImageBlock,
+  AiEnvironmentConfig,
+  AiEnvironmentUpdate,
   ProxyHealth,
   RagSearchResult,
   ReferenceImageClassificationRequest,
   ReferenceImageClassificationResponse,
 } from '../types/chat'
 import type { UXRequirementState } from '../types/uxRequirement'
-import type { MapAdjustmentOperation, PrdImportPreview, PrdNode, PrdNodeOperationSuggestion, PrdPerformanceSpec } from '../types/prdNode'
+import type { MapAdjustmentOperation, PrdImportPreview, PrdNode, PrdNodeBackendContractRef, PrdNodeEvidenceRef, PrdNodeOperationSuggestion, PrdPerformanceSpec } from '../types/prdNode'
 import type { QaChatResponse, QaIssue } from '../types/qa'
 
 async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
@@ -23,7 +26,7 @@ async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit)
     })
   } catch (err) {
     if (err instanceof TypeError) {
-      throw new Error(`无法连接本地代理服务（${baseUrl}）。请确认后端服务正在运行后重试。`)
+      throw new Error(`无法连接本地代理服务（${baseUrl}）。请确认已运行 npm run dev（同时启动前后端），或单独运行 npm run dev:server 后重试。`)
     }
     throw err
   }
@@ -50,6 +53,17 @@ export function getProxyHealth(baseUrl: string) {
   return requestJson<ProxyHealth>(baseUrl, '/api/health')
 }
 
+export function getAiEnvironmentConfig(baseUrl: string) {
+  return requestJson<AiEnvironmentConfig>(baseUrl, '/api/environment')
+}
+
+export function saveAiEnvironmentConfig(baseUrl: string, payload: AiEnvironmentUpdate) {
+  return requestJson<AiEnvironmentConfig>(baseUrl, '/api/environment', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 export function sendChatMessage(baseUrl: string, messages: ChatMessage[], requirementState: UXRequirementState) {
   return requestJson<ChatResponse>(baseUrl, '/api/chat', {
     method: 'POST',
@@ -72,6 +86,7 @@ export interface PrototypeVariantPayload {
   focus?: string
   appliedEdits: number
   history?: string[]
+  error?: string
 }
 
 export interface PrototypeResponse {
@@ -146,6 +161,10 @@ export function pollDecomposition(baseUrl: string, sessionId: string) {
 
 export type NodeChatIntent = 'document_polish' | 'prototype_update' | 'reference_feedback'
 
+export interface NodeChatOptions {
+  performancePolishMode?: boolean
+}
+
 export interface NodeChatResponse {
   reply: string
   nodeComplete: boolean
@@ -153,6 +172,11 @@ export interface NodeChatResponse {
     summary?: string | null
     content?: string | null
     techNotes?: string | null
+    sections?: PrdNode['sections']
+    handoffGoal?: string | null
+    qualityGate?: string | null
+    backendContracts?: PrdNodeBackendContractRef[]
+    evidenceRefs?: PrdNodeEvidenceRef[]
     performanceSpec?: PrdPerformanceSpec | null
   } | null
   intents?: NodeChatIntent[]
@@ -162,12 +186,18 @@ export interface NodeChatResponse {
 export function sendNodeChatMessage(
   baseUrl: string,
   nodeId: string,
-  messages: ChatMessage[],
-  tree: Record<string, PrdNode>
+  currentMessage: ChatMessage,
+  tree: Record<string, PrdNode>,
+  options: NodeChatOptions = {},
 ) {
   return requestJson<NodeChatResponse>(baseUrl, '/api/node-chat', {
     method: 'POST',
-    body: JSON.stringify({ nodeId, messages, tree }),
+    body: JSON.stringify({
+      nodeId,
+      currentMessage,
+      tree,
+      performancePolishMode: options.performancePolishMode === true,
+    }),
   })
 }
 
@@ -185,13 +215,32 @@ export interface FigmaFrameImportResponse {
   fileKey: string
   nodeId: string
   panelName: string
-  taskId: string | null
   sourceUrl: string
-  html: string
   summary: string
-  uiSpecPath: string
-  assetCount: number
-  zipFileCount: number
+  imageCount: number
+  images: Array<{
+    nodeId: string
+    name: string
+    type: string
+    width: number
+    height: number
+    depth: number
+    mediaType: ImageBlock['source']['media_type']
+    data: string
+    assetPath: string
+    assetUrl: string
+    numericTextSlots: Array<{
+      slotId: string
+      nodeId: string
+      name: string
+      x: number
+      y: number
+      width: number
+      height: number
+      centerX: number
+      centerY: number
+    }>
+  }>
 }
 
 export function importFigmaFrame(

@@ -4,25 +4,37 @@ import dotenv from 'dotenv'
 import express from 'express'
 import { strFromU8, unzipSync, zipSync } from 'fflate'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { formatPerformanceSpecForPrompt, formatPerformanceSpecMarkdown, normalizePerformanceSpec, resolveNodePerformanceSpec } from '../src/lib/performanceOrchestration'
+import { applyPerformanceAnswerFast, formatPerformanceSpecForPrompt, formatPerformanceSpecMarkdown, normalizePerformanceSpec, resolveNodePerformanceSpec } from '../src/lib/performanceOrchestration'
 import { defaultAudienceForSpecLens, formatSectionTitle, formatSpecLens, hasNodeSections, normalizeLegacyAudience, normalizeNodeLensFields, normalizeSectionKeyForLens, normalizeSpecLensValue, resolveNodeAudience, resolveNodeSpecLens, specLensFromLegacyAudience } from '../src/lib/prdNodeLens'
+import { buildDeliverySections, collectBackendContracts, collectDeliveryEvidence, collectDeliveryNodes } from '../src/lib/prdNodeDelivery'
+import { buildUiOnlyPrototypeInstruction, isUiOnlyPrototypeFeedback } from '../src/lib/nodeChatIntent'
 import { applyPrototypeEdit, normalizeGeneratedPrototypeHtml, normalizePrototypeHtml } from '../src/lib/prototypeUtils'
 import type { UXRequirementState } from '../src/types/uxRequirement'
-import type { DocumentKeywordSignal, DocumentSourceIndex, DocumentSourceIssue, DocumentSourceSection, MapAdjustmentOperation, PrdImportCandidateNode, PrdImportPreview, PrdNode, PrdNodeAudience, PrdNodeEvidenceRef, PrdNodeOperationPatch, PrdNodeOperationSuggestion, PrdNodeReference, PrdNodeSourceKind, PrdNodeStatus } from '../src/types/prdNode'
+import type { DocumentKeywordSignal, DocumentSourceIndex, DocumentSourceIssue, DocumentSourceSection, MapAdjustmentOperation, PrdImportCandidateNode, PrdImportPreview, PrdNode, PrdNodeAudience, PrdNodeBackendContractKind, PrdNodeBackendContractRef, PrdNodeEvidenceRef, PrdNodeOperationPatch, PrdNodeOperationSuggestion, PrdNodeReference, PrdNodeSourceKind, PrdNodeStatus } from '../src/types/prdNode'
 import type { ReferenceImageClassificationRequest, ReferenceImageClassificationResponse, ReferenceImageRole } from '../src/types/chat'
 import type { QaAttachment, QaChatRequest, QaChatResponse, QaIssuePatch, QaIssuePriority, QaIssueSeverity } from '../src/types/qa'
 import { contentDispositionHeader } from './exportHeaders'
+import { collectFigmaNumericTextSlots, redactNumericTextFromPng } from './figmaNumericText'
 import { extractNodeChatSuffix } from './nodeChatResponse'
 import { buildVariantConfigs, clampVariantCount, DEFAULT_CREATE_VARIANTS, DEFAULT_UPDATE_VARIANTS } from './prototypePrompts'
+import type { FigmaNumericTextSlot } from './figmaNumericText'
 
 dotenv.config()
 dotenv.config({ path: 'server/.env' })
 
 const app = express()
 const port = Number(process.env.LOCAL_PROXY_PORT ?? 8787)
-const model = process.env.CLAUDE_MODEL ?? 'claude-sonnet-4-6'
+const ENV_FILE_PATH = path.resolve(process.cwd(), '.env')
+const DEFAULT_ENV_CONFIG = {
+  ANTHROPIC_API_KEY: '',
+  ANTHROPIC_BASE_URL: 'https://litellm.wenext.technology/',
+  CLAUDE_MODEL: 'gpt-5.5',
+  MOCK_DECOMPOSE: 'false',
+  FIGMA_TOKEN: '',
+} as const
+let model = process.env.CLAUDE_MODEL ?? 'claude-sonnet-4-6'
 const ragSseUrl = process.env.COCOS_RAG_SSE_URL ?? 'http://43.134.44.85:18000/sse'
 const rawRagProxyScript = process.env.COCOS_RAG_PROXY_SCRIPT ?? '%APPDATA%\\cocos-rag\\remote_proxy.py'
 const ragProxyScript = rawRagProxyScript.replace('%APPDATA%', process.env.APPDATA ?? '').replace('$env:APPDATA', process.env.APPDATA ?? '')
@@ -37,13 +49,18 @@ const LARGE_PRD_DECOMPOSE_THRESHOLD = 30 * 1024
 const LARGE_PRD_SLICE_TARGET_LENGTH = 12 * 1024
 const SOURCE_OUTLINE_ROOT_ID = 'SOURCE_OUTLINE_ROOT'
 const SPEC_EXPORT_ROOT = path.resolve(process.cwd(), 'generated', 'specs')
+const FIGMA_ASSET_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'figma-assets')
+const figmaApiBaseUrl = (process.env.FIGMA_API_BASE_URL ?? 'https://api.figma.com').replace(/\/+$/, '')
 const figma2PrefabBaseUrl = (process.env.FIGMA2PREFAB_BASE_URL ?? 'http://43.134.44.85:3000').replace(/\/+$/, '')
 const figma2PrefabConvertPath = process.env.FIGMA2PREFAB_CONVERT_PATH ?? '/api/convert'
 const figma2PrefabProvider = process.env.FIGMA2PREFAB_PROVIDER?.trim()
-const figmaToken = process.env.FIGMA_TOKEN ?? process.env.FIGMA_ACCESS_TOKEN ?? ''
+let figmaToken = process.env.FIGMA_TOKEN ?? process.env.FIGMA_ACCESS_TOKEN ?? ''
 const FIGMA2PREFAB_POLL_INTERVAL_MS = Number.parseInt(process.env.FIGMA2PREFAB_POLL_INTERVAL_MS ?? '2500', 10)
 const FIGMA2PREFAB_TIMEOUT_MS = Number.parseInt(process.env.FIGMA2PREFAB_TIMEOUT_MS ?? '600000', 10)
 const FIGMA_ASSET_BUNDLE_TTL_MS = Number.parseInt(process.env.FIGMA_ASSET_BUNDLE_TTL_MS ?? `${30 * 60 * 1000}`, 10)
+const FIGMA_EXTRACT_MAX_IMAGES = Math.min(8, Math.max(2, Number.parseInt(process.env.FIGMA_EXTRACT_MAX_IMAGES ?? '4', 10)))
+const FIGMA_IMAGE_SCALE = Math.min(3, Math.max(0.5, Number.parseFloat(process.env.FIGMA_IMAGE_SCALE ?? '1.25')))
+const FIGMA_MAX_IMAGE_BYTES = Math.max(512 * 1024, Number.parseInt(process.env.FIGMA_MAX_IMAGE_BYTES ?? `${4 * 1024 * 1024}`, 10))
 
 interface FigmaAssetBundle {
   createdAt: number
@@ -53,15 +70,29 @@ interface FigmaAssetBundle {
 
 const figmaAssetBundles = new Map<string, FigmaAssetBundle>()
 
-const anthropic = process.env.ANTHROPIC_API_KEY
+let anthropic = process.env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL })
   : null
-const prototypeProviderOverride = (process.env.AI_PROVIDER ?? process.env.LLM_PROVIDER ?? '').toLowerCase()
-const usesOpenAiPrototypeProvider = model.toLowerCase().startsWith('gpt-')
+let prototypeProviderOverride = (process.env.AI_PROVIDER ?? process.env.LLM_PROVIDER ?? '').toLowerCase()
+let usesOpenAiPrototypeProvider = model.toLowerCase().startsWith('gpt-')
   || prototypeProviderOverride === 'openai'
   || prototypeProviderOverride === 'gpt'
-const openAiApiKey = process.env.OPENAI_API_KEY ?? process.env.ANTHROPIC_API_KEY
-const openAiBaseUrl = (process.env.OPENAI_BASE_URL ?? process.env.ANTHROPIC_BASE_URL ?? 'https://api.openai.com/v1').replace(/\/+$/, '')
+let openAiApiKey = process.env.OPENAI_API_KEY ?? process.env.ANTHROPIC_API_KEY
+let openAiBaseUrl = (process.env.OPENAI_BASE_URL ?? process.env.ANTHROPIC_BASE_URL ?? 'https://api.openai.com/v1').replace(/\/+$/, '')
+
+function reloadAiRuntimeConfig() {
+  model = process.env.CLAUDE_MODEL ?? 'claude-sonnet-4-6'
+  figmaToken = process.env.FIGMA_TOKEN ?? process.env.FIGMA_ACCESS_TOKEN ?? ''
+  anthropic = process.env.ANTHROPIC_API_KEY
+    ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL })
+    : null
+  prototypeProviderOverride = (process.env.AI_PROVIDER ?? process.env.LLM_PROVIDER ?? '').toLowerCase()
+  usesOpenAiPrototypeProvider = model.toLowerCase().startsWith('gpt-')
+    || prototypeProviderOverride === 'openai'
+    || prototypeProviderOverride === 'gpt'
+  openAiApiKey = process.env.OPENAI_API_KEY ?? process.env.ANTHROPIC_API_KEY
+  openAiBaseUrl = (process.env.OPENAI_BASE_URL ?? process.env.ANTHROPIC_BASE_URL ?? 'https://api.openai.com/v1').replace(/\/+$/, '')
+}
 
 // In-memory decomposition session store.
 // Single-user desktop app — no persistence needed between server restarts.
@@ -86,9 +117,11 @@ function scheduleSessionCleanup(sessionId: string) {
 }
 
 interface ContentBlock {
-  type: 'text' | 'image'
+  type: 'text' | 'image' | 'document'
+  title?: string
+  context?: string
   text?: string
-  source?: { type: 'base64'; media_type: string; data: string }
+  source?: { type: 'base64' | 'text'; media_type: string; data: string }
 }
 
 interface ChatMessage {
@@ -98,11 +131,34 @@ interface ChatMessage {
 
 function extractText(content: string | ContentBlock[]): string {
   if (typeof content === 'string') return content
-  return content.filter((b) => b.type === 'text').map((b) => b.text ?? '').join('\n')
+  return content.map((block) => {
+    if (block.type === 'text') return block.text ?? ''
+    if (block.type === 'document') {
+      const title = block.title ? `附件：${block.title}` : '附件'
+      const data = block.source?.data ?? ''
+      return [title, block.context, data].filter(Boolean).join('\n')
+    }
+    return ''
+  }).filter(Boolean).join('\n')
 }
 
 function hasImages(content: string | ContentBlock[]) {
   return typeof content !== 'string' && content.some((b) => b.type === 'image' && b.source)
+}
+
+function imageBlocksFromContent(content: string | ContentBlock[]): Anthropic.ImageBlockParam[] {
+  if (typeof content === 'string') return []
+  return content
+    .filter((block): block is ContentBlock & { type: 'image'; source: { type: 'base64'; media_type: string; data: string } } => (
+      block.type === 'image' && block.source?.type === 'base64'
+    ))
+    .map((block) => ({ type: 'image', source: block.source as Anthropic.Base64ImageSource }))
+}
+
+function imageBlocksFromMessages(messages: ChatMessage[]): Anthropic.ImageBlockParam[] {
+  return messages
+    .filter((message) => message.role === 'user')
+    .flatMap((message) => imageBlocksFromContent(message.content))
 }
 
 function toAnthropicNodeMessage(message: ChatMessage): Anthropic.MessageParam {
@@ -117,8 +173,20 @@ function toAnthropicNodeMessage(message: ChatMessage): Anthropic.MessageParam {
   const content = message.content
     .map((block): Anthropic.ContentBlockParam | null => {
       if (block.type === 'text') return { type: 'text', text: block.text ?? '' }
-      if (block.type === 'image' && block.source) {
+      if (block.type === 'image' && block.source?.type === 'base64') {
         return { type: 'image', source: block.source as Anthropic.Base64ImageSource }
+      }
+      if (block.type === 'document' && block.source?.type === 'text') {
+        return {
+          type: 'document',
+          title: block.title ?? null,
+          context: block.context ?? null,
+          source: {
+            type: 'text',
+            media_type: 'text/plain',
+            data: block.source.data,
+          },
+        }
       }
       return null
     })
@@ -127,6 +195,32 @@ function toAnthropicNodeMessage(message: ChatMessage): Anthropic.MessageParam {
   return {
     role: message.role,
     content: content.length > 0 ? content : extractText(message.content),
+  }
+}
+
+function prependTextToUserMessage(message: ChatMessage, prefix: string): ChatMessage {
+  if (typeof message.content === 'string') {
+    return {
+      role: 'user',
+      content: `${prefix}\n\n${message.content}`,
+    }
+  }
+
+  let didPrepend = false
+  const content = message.content.map((block) => {
+    if (block.type !== 'text' || didPrepend) return block
+    didPrepend = true
+    return {
+      ...block,
+      text: `${prefix}\n\n${block.text ?? ''}`,
+    }
+  })
+
+  return {
+    role: 'user',
+    content: didPrepend
+      ? content
+      : [{ type: 'text', text: prefix }, ...content],
   }
 }
 
@@ -151,7 +245,31 @@ interface FigmaFrameRequest {
   token?: string
 }
 
+interface FigmaExtractedImage {
+  nodeId: string
+  name: string
+  type: string
+  width: number
+  height: number
+  depth: number
+  mediaType: string
+  data: string
+  assetPath: string
+  assetUrl: string
+  numericTextSlots: FigmaNumericTextSlot[]
+}
+
 interface FigmaFrameResponse {
+  fileKey: string
+  nodeId: string
+  panelName: string
+  sourceUrl: string
+  summary: string
+  images: FigmaExtractedImage[]
+  imageCount: number
+}
+
+interface FigmaPrefabFrameResponse {
   fileKey: string
   nodeId: string
   panelName: string
@@ -174,12 +292,15 @@ interface PrototypeVariantPayload {
   focus?: string
   appliedEdits: number
   history?: string[]
+  error?: string
 }
 
 interface NodeChatRequest {
   nodeId: string
-  messages: ChatMessage[]
+  currentMessage?: ChatMessage
+  messages?: ChatMessage[]
   tree: Record<string, PrdNode>
+  performancePolishMode?: boolean
 }
 
 interface MapAdjustmentRequest {
@@ -638,7 +759,9 @@ async function runClaudeRequirementLoop(messages: ChatMessage[], requirementStat
   const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user')
   const imageBlocks: Anthropic.ImageBlockParam[] = typeof lastUserMsg?.content !== 'string'
     ? (lastUserMsg?.content ?? [])
-        .filter((b): b is ContentBlock & { type: 'image' } => b.type === 'image' && !!b.source)
+        .filter((b): b is ContentBlock & { type: 'image'; source: { type: 'base64'; media_type: string; data: string } } => (
+          b.type === 'image' && b.source?.type === 'base64'
+        ))
         .map((b) => ({ type: 'image', source: b.source as Anthropic.Base64ImageSource }))
     : []
 
@@ -1136,6 +1259,38 @@ function normalizeStringArray(value: unknown): string[] {
     .slice(0, 6)
 }
 
+function normalizeBackendContractKind(value: unknown): PrdNodeBackendContractKind | null {
+  if (value === 'api' || value === 'config' || value === 'server' || value === 'data') return value
+  return null
+}
+
+function normalizeBackendContracts(value: unknown, fallbackSourceKind: PrdNodeSourceKind, fallbackLabel: string): PrdNodeBackendContractRef[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const contracts = value.slice(0, 12)
+    .map((item): PrdNodeBackendContractRef | null => {
+      if (!item || typeof item !== 'object') return null
+      const candidate = item as Record<string, unknown>
+      const kind = normalizeBackendContractKind(candidate.kind ?? candidate.type)
+      const title = normalizeTextValue(candidate.title ?? candidate.label ?? candidate.name)
+      if (!kind || !title) return null
+      return {
+        id: normalizeTextValue(candidate.id),
+        title,
+        kind,
+        summary: normalizeTextValue(candidate.summary ?? candidate.description),
+        fields: normalizeStringArray(candidate.fields ?? candidate.params ?? candidate.schema),
+        targetNodeId: normalizeTextValue(candidate.targetNodeId ?? candidate.target_node_id),
+        evidenceRefs: normalizeEvidenceRefs(
+          candidate.evidenceRefs ?? candidate.evidence_refs ?? candidate.sources,
+          fallbackSourceKind,
+          fallbackLabel,
+        ),
+      }
+    })
+    .filter((contract): contract is PrdNodeBackendContractRef => Boolean(contract))
+  return contracts.length ? contracts : undefined
+}
+
 function normalizeNodeSections(value: unknown, fallbackSourceKind: PrdNodeSourceKind, fallbackLabel: string): PrdNode['sections'] {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
   const source = value as Record<string, unknown>
@@ -1240,6 +1395,7 @@ function normalizeDecompositionNodes(raw: unknown): PrdNode[] {
         audience: lensFields.audience,
         specLens: lensFields.specLens,
         sections,
+        backendContracts: normalizeBackendContracts(n.backendContracts ?? n.backend_contracts ?? n.contracts, sourceKind, extractedFrom ?? 'PRD 原文'),
         handoffGoal, qualityGate,
         references,
         sourceKind,
@@ -2178,7 +2334,7 @@ async function decomposeBranch(mdText: string, parentNode: PrdNode, session: Dec
         })
       : null
     return {
-      nodes: pageUpdate ? [pageUpdate, ...lensNodes] : lensNodes,
+      nodes: pageUpdate ? [pageUpdate] : [],
       stopReason: response.stop_reason,
     }
   }
@@ -2280,6 +2436,87 @@ app.use(cors({
   },
 }))
 app.use(express.json({ limit: '10mb' }))
+
+type AiEnvironmentUpdate = Partial<Record<keyof typeof DEFAULT_ENV_CONFIG, unknown>>
+
+function readEnvValue(key: keyof typeof DEFAULT_ENV_CONFIG) {
+  return process.env[key] ?? DEFAULT_ENV_CONFIG[key]
+}
+
+function normalizeEnvField(value: unknown, fallback: string) {
+  if (typeof value !== 'string') return fallback
+  return value.trim()
+}
+
+function toMockDecomposeValue(value: unknown, fallback: string) {
+  if (typeof value === 'boolean') return value ? 'true' : 'false'
+  if (typeof value !== 'string') return fallback === 'true' ? 'true' : 'false'
+  return value.trim().toLowerCase() === 'true' ? 'true' : 'false'
+}
+
+function hasOwnEnvField(payload: AiEnvironmentUpdate, key: keyof typeof DEFAULT_ENV_CONFIG) {
+  return Object.prototype.hasOwnProperty.call(payload, key)
+}
+
+function buildAiEnvironmentStatus() {
+  return {
+    aiConfigured: Boolean(process.env.ANTHROPIC_API_KEY?.trim()),
+    envPath: ENV_FILE_PATH,
+    values: {
+      ANTHROPIC_API_KEY_PRESENT: Boolean(process.env.ANTHROPIC_API_KEY?.trim()),
+      ANTHROPIC_BASE_URL: readEnvValue('ANTHROPIC_BASE_URL'),
+      CLAUDE_MODEL: readEnvValue('CLAUDE_MODEL'),
+      MOCK_DECOMPOSE: readEnvValue('MOCK_DECOMPOSE') === 'true',
+      FIGMA_TOKEN_PRESENT: Boolean(process.env.FIGMA_TOKEN?.trim()),
+    },
+  }
+}
+
+app.get('/api/environment', (_req, res) => {
+  res.json(buildAiEnvironmentStatus())
+})
+
+app.post('/api/environment', (req, res) => {
+  const payload = (req.body ?? {}) as AiEnvironmentUpdate
+  const nextEnv = {
+    ANTHROPIC_API_KEY: hasOwnEnvField(payload, 'ANTHROPIC_API_KEY')
+      ? normalizeEnvField(payload.ANTHROPIC_API_KEY, '')
+      : (process.env.ANTHROPIC_API_KEY ?? ''),
+    ANTHROPIC_BASE_URL: hasOwnEnvField(payload, 'ANTHROPIC_BASE_URL')
+      ? (normalizeEnvField(payload.ANTHROPIC_BASE_URL, DEFAULT_ENV_CONFIG.ANTHROPIC_BASE_URL) || DEFAULT_ENV_CONFIG.ANTHROPIC_BASE_URL)
+      : readEnvValue('ANTHROPIC_BASE_URL'),
+    CLAUDE_MODEL: hasOwnEnvField(payload, 'CLAUDE_MODEL')
+      ? (normalizeEnvField(payload.CLAUDE_MODEL, DEFAULT_ENV_CONFIG.CLAUDE_MODEL) || DEFAULT_ENV_CONFIG.CLAUDE_MODEL)
+      : readEnvValue('CLAUDE_MODEL'),
+    MOCK_DECOMPOSE: hasOwnEnvField(payload, 'MOCK_DECOMPOSE')
+      ? toMockDecomposeValue(payload.MOCK_DECOMPOSE, DEFAULT_ENV_CONFIG.MOCK_DECOMPOSE)
+      : readEnvValue('MOCK_DECOMPOSE'),
+    FIGMA_TOKEN: hasOwnEnvField(payload, 'FIGMA_TOKEN')
+      ? normalizeEnvField(payload.FIGMA_TOKEN, '')
+      : (process.env.FIGMA_TOKEN ?? ''),
+  }
+
+  if (!nextEnv.ANTHROPIC_API_KEY) {
+    return void res.status(400).json({ error: '请先填写 ANTHROPIC_API_KEY。' })
+  }
+
+  for (const [key, value] of Object.entries(nextEnv)) {
+    process.env[key] = value
+  }
+  reloadAiRuntimeConfig()
+
+  const fileBody = [
+    `ANTHROPIC_API_KEY=${nextEnv.ANTHROPIC_API_KEY}`,
+    `ANTHROPIC_BASE_URL=${nextEnv.ANTHROPIC_BASE_URL}`,
+    `CLAUDE_MODEL=${nextEnv.CLAUDE_MODEL}`,
+    `MOCK_DECOMPOSE=${nextEnv.MOCK_DECOMPOSE}`,
+    `FIGMA_TOKEN=${nextEnv.FIGMA_TOKEN}`,
+    '',
+  ].join('\n')
+  writeFileSync(ENV_FILE_PATH, fileBody, 'utf8')
+
+  res.json(buildAiEnvironmentStatus())
+})
 
 app.get('/api/health', (_req, res) => {
   res.json({
@@ -2423,12 +2660,14 @@ app.post('/api/map-adjust', async (req, res) => {
     .map((node) => `- ${node.id}｜${node.label}｜${node.status}｜lens=${resolveNodeSpecLens(node)}｜audience=${resolveNodeAudience(node) ?? '未定'}｜${node.summary}`)
     .join('\n')
 
+  const imageBlocks = imageBlocksFromMessages(messages).slice(0, 6)
+
   const response = await anthropic.messages.create({
     model,
     max_tokens: 2048,
-    system: `你是 GameUX PromptForge 的页面级导图调整助手。\n只给出建议，不直接修改导图。\n必须返回 JSON：{"reply":"中文说明","operations":[]}。\noperations 只能包含 create_node/delete_node/update_node/move_content/add_reference。\n新增页面默认 status 为 pending_refine；不要拆按钮/字段级节点；跨页面关系用 add_reference。MVC 视角必须写入 specLens；audience 只表示下游角色。`,
+    system: `你是 GameUX PromptForge 的页面级导图调整助手。\n只给出建议，不直接修改导图。\n必须返回 JSON：{"reply":"中文说明","operations":[]}。\noperations 只能包含 create_node/update_node/move_content/add_reference，严禁返回 delete_node。\n所有调整必须基于原有文档节点增补或修正：不要删除现有节点，不要用空内容或新内容覆盖原正文；需要拆分时创建新节点并用 move_content 表示“复制/补充到目标节点”的内容，原节点内容必须保留。新增页面默认 status 为 pending_refine；不要拆按钮/字段级节点；跨页面关系用 add_reference。MVC 视角必须写入 specLens；audience 只表示下游角色。\n如果用户上传的是 API 示例、mock 数据、请求/响应字段或服务端结算规则，不要把接口拆成页面节点；应优先对相关业务节点返回 update_node，并把接口契约写入 patch.backendContracts，同时把字段/状态来源补入 patch.sections.data，把调用时机/响应表现补入 patch.sections.interaction。无法可靠匹配节点时，只在 reply 中提示用户选中具体节点后走节点补充资料入口，不要编造节点映射。`,
     messages: [
-      { role: 'user', content: `当前导图：\n${treeSummary}\n\n用户对话：\n${messages.map((message) => `${message.role}: ${extractText(message.content)}`).join('\n')}` },
+      { role: 'user', content: buildContentWithImages(`当前导图：\n${treeSummary}\n\n用户对话：\n${messages.map((message) => `${message.role}: ${extractText(message.content)}`).join('\n')}`, imageBlocks) },
     ],
   })
   const parsed = safeParseMapAdjustmentJson(textFromClaudeContent(response.content))
@@ -2453,9 +2692,12 @@ app.post('/api/qa/chat', async (req, res) => {
     .slice(0, 120)
     .map((node) => `- ${node.id}｜parent=${node.parentId ?? 'ROOT'}｜${node.type}｜${node.label}｜${node.summary}`)
     .join('\n')
-  const imageBlocks = issue.attachments
-    .map(qaAttachmentToImageBlock)
-    .filter((block): block is Anthropic.ImageBlockParam => Boolean(block))
+  const imageBlocks = [
+    ...issue.attachments
+      .map(qaAttachmentToImageBlock)
+      .filter((block): block is Anthropic.ImageBlockParam => Boolean(block)),
+    ...imageBlocksFromMessages(messages),
+  ].slice(0, 8)
 
   const qaPrompt = `当前 PRD 导图摘要：
 ${treeSummary || '无导图节点'}
@@ -2549,8 +2791,7 @@ function normalizeMapAdjustmentOperations(value: unknown, tree: Record<string, P
         }
       }
       if (type === 'delete_node') {
-        const nodeId = normalizeTextValue(candidate.nodeId ?? candidate.node_id)
-        return nodeId && tree[nodeId] ? { type, nodeId } : null
+        return null
       }
       if (type === 'update_node') {
         const nodeId = normalizeTextValue(candidate.nodeId ?? candidate.node_id)
@@ -2574,6 +2815,7 @@ function normalizeMapAdjustmentOperations(value: unknown, tree: Record<string, P
             audience: normalizeLegacyAudience(rawAudience) ?? defaultAudienceForSpecLens(specLens),
             specLens: specLens ?? undefined,
             sections: normalizeNodeSections(rawPatch.sections ?? rawPatch.sectionDrafts ?? rawPatch.section_drafts ?? rawPatch.lenses, 'user', 'map-adjustment'),
+            backendContracts: normalizeBackendContracts(rawPatch.backendContracts ?? rawPatch.backend_contracts ?? rawPatch.contracts, 'user', 'map-adjustment'),
             references: normalizeNodeReferences(rawPatch.references),
             performanceSpec: rawPatch.performanceSpec === undefined && rawPatch.performance_spec === undefined
               ? undefined
@@ -2638,6 +2880,7 @@ function normalizeOperationPatch(value: unknown, fallbackSourceKind: PrdNodeSour
     audience,
     specLens: specLens ?? undefined,
     sections: normalizeNodeSections(candidate.sections ?? candidate.sectionDrafts ?? candidate.section_drafts ?? candidate.lenses, sourceKind, sourceKind === 'upload' ? 'upload' : 'user'),
+    backendContracts: normalizeBackendContracts(candidate.backendContracts ?? candidate.backend_contracts ?? candidate.contracts, sourceKind, sourceKind === 'upload' ? 'upload' : 'user'),
     handoffGoal: normalizeTextValue(candidate.handoffGoal ?? candidate.handoff_goal) ?? undefined,
     qualityGate: normalizeTextValue(candidate.qualityGate ?? candidate.quality_gate) ?? undefined,
     techNotes: normalizeTextValue(candidate.techNotes ?? candidate.tech_notes) ?? undefined,
@@ -2725,6 +2968,8 @@ app.post('/api/prd-node-suggestions', async (req, res) => {
     '新增或更新 MVC 视角时，patch.specLens 必须使用 model/control/view；patch.audience 只表示下游角色，优先使用 client/server/config/api/acceptance/mixed，不要再用 audience 承载 MVC。',
     '如果建议只来自用户补充或上传资料，patch.sourceKind 和 evidenceRefs.sourceKind 必须用 user 或 upload，不得写成 prd。只有能从现有节点 content/extractedFrom 明确引用原 PRD 时才能标 prd。',
     '新增 MVC 子节点应挂在当前页面或用户指定页面下，label 使用中文标题并包含 Model/Control/View；如果只是补齐页面章节，可以写入 patch.sections.data、patch.sections.interaction 或 patch.sections.view。',
+    '当补充资料是 API 示例、mock 数据、请求/响应字段、服务端状态码、结算规则或配置表时，优先更新当前业务节点的 patch.backendContracts，不要把接口拆成独立页面节点。backendContracts 每项必须包含 title、kind(api/config/server/data)、summary、fields，并用 evidenceRefs 引用上传资料片段。',
+    'API 契约和服务端数据应同时按用途补入 patch.sections.data 或 patch.sections.interaction：data 写字段含义/状态来源/数据模型，interaction 写调用时机/请求体/响应后的客户端表现流程。',
   ].join('\n')
 
   const response = await anthropic.messages.create({
@@ -2755,6 +3000,16 @@ app.post('/api/figma/frame', async (req, res) => {
   }
 })
 
+app.post('/api/figma/frame-prefab', async (req, res) => {
+  try {
+    const assetBaseUrl = `${req.protocol}://${req.get('host') ?? `127.0.0.1:${port}`}`
+    const result = await importFigmaFrameFromPrefab(req.body as FigmaFrameRequest, assetBaseUrl)
+    res.json(result)
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : '通过 Figma2Prefab 导入 Figma Frame 失败。' })
+  }
+})
+
 app.get(/^\/api\/figma\/assets\/([^/]+)\/(.+)$/u, (req, res) => {
   const params = req.params as unknown as { 0?: string; 1?: string }
   const bundleId = params[0]
@@ -2763,15 +3018,18 @@ app.get(/^\/api\/figma\/assets\/([^/]+)\/(.+)$/u, (req, res) => {
     res.status(400).json({ error: '缺少 Figma 资源路径。' })
     return
   }
-  const bundle = figmaAssetBundles.get(bundleId)
-  if (!bundle) {
-    res.status(404).json({ error: 'Figma 资源已过期，请重新导入。' })
-    return
-  }
   const assetPath = normalizeZipPath(decodeURIComponent(rawAssetPath))
-  const bytes = findZipFile(bundle.files, bundle.lookup, assetPath)
+  const bundle = figmaAssetBundles.get(bundleId)
+  const bytes = bundle ? findZipFile(bundle.files, bundle.lookup, assetPath) : null
   if (!bytes) {
-    res.status(404).json({ error: '未找到 Figma 资源。' })
+    const cachedPath = resolveCachedFigmaAssetPath(bundleId, assetPath)
+    if (cachedPath && existsSync(cachedPath)) {
+      res.setHeader('Content-Type', mimeTypeForPath(assetPath))
+      res.setHeader('Cache-Control', 'private, max-age=86400')
+      res.end(readFileSync(cachedPath))
+      return
+    }
+    res.status(404).json({ error: '未找到 Figma 资源，请重新导入。' })
     return
   }
   res.setHeader('Content-Type', mimeTypeForPath(assetPath))
@@ -2887,15 +3145,12 @@ app.post('/api/reference-image-classification', async (req, res) => {
 })
 
 app.post('/api/node-chat', async (req, res) => {
-  const { nodeId, messages, tree } = req.body as NodeChatRequest
+  const { nodeId, currentMessage, messages = [], tree, performancePolishMode = false } = req.body as NodeChatRequest
+  const latestUserMessage = currentMessage ?? [...messages].reverse().find((message) => message.role === 'user')
+  const isPerformancePolishMode = performancePolishMode === true
 
-  if (!nodeId || !messages?.length || !tree) {
+  if (!nodeId || !latestUserMessage || !tree) {
     res.status(400).json({ error: '缺少节点 ID、对话消息或导图树数据' })
-    return
-  }
-
-  if (!anthropic) {
-    res.status(400).json({ error: '未配置 ANTHROPIC_API_KEY。' })
     return
   }
 
@@ -2918,7 +3173,7 @@ app.post('/api/node-chat', async (req, res) => {
         `  标题: ${child.label}`,
         `  摘要: ${child.summary}`,
         `  导出路径: ${child.docPath ?? '未指定'}`,
-        `  内容: ${child.content}`,
+        `  内容: ${compactExcerpt(child.content, 800)}`,
         child.techNotes ? `  技术备注: ${child.techNotes}` : null,
       ].filter(Boolean).join('\n')).join('\n\n')}`
     : ''
@@ -2926,6 +3181,32 @@ app.post('/api/node-chat', async (req, res) => {
     ? `\n\n${formatNodeSectionsForContext(targetNode.sections)}`
     : ''
   const performanceSpec = resolveNodePerformanceSpec(targetNode)
+  const latestUserText = extractText(latestUserMessage.content)
+  const canUseFastPerformancePath = isPerformancePolishMode
+    && !hasImages(latestUserMessage.content)
+    && latestUserText.trim().length > 0
+    && latestUserText.trim().length <= 800
+    && !/https?:\/\/|figma|prototype|原型|右侧|截图|图片|上传|生成|修改|替换|颜色|布局/i.test(latestUserText)
+
+  if (canUseFastPerformancePath) {
+    const fastResult = applyPerformanceAnswerFast(performanceSpec, latestUserText)
+    if (fastResult) {
+      res.json({
+        reply: fastResult.reply,
+        nodeComplete: false,
+        nodePatch: { performanceSpec: fastResult.performanceSpec },
+        intents: ['document_polish'],
+        prototypeInstruction: null,
+      })
+      return
+    }
+  }
+
+  if (!anthropic) {
+    res.status(400).json({ error: '未配置 ANTHROPIC_API_KEY。' })
+    return
+  }
+
   const performanceContext = `\n\n表现编排扫描：\n${formatPerformanceSpecForPrompt(performanceSpec)}`
 
   const nodeContext = `目标节点：
@@ -2938,18 +3219,33 @@ app.post('/api/node-chat', async (req, res) => {
 规格视角: ${formatSpecLens(resolveNodeSpecLens(targetNode))}
 AI 接力目标: ${targetNode.handoffGoal ?? '未指定'}
 质量门槛: ${targetNode.qualityGate ?? '未指定'}
-内容: ${targetNode.content}${pageSectionContext}${performanceContext}${targetNode.techNotes ? `\n技术备注: ${targetNode.techNotes}` : ''}${parentNode ? `\n\n父节点上下文：\n标题: ${parentNode.label}\n摘要: ${parentNode.summary}` : ''}${mvcChildContext}`
+内容: ${compactExcerpt(targetNode.content, 6000)}${pageSectionContext}${performanceContext}${targetNode.techNotes ? `\n技术备注: ${targetNode.techNotes}` : ''}${parentNode ? `\n\n父节点上下文：\n标题: ${parentNode.label}\n摘要: ${parentNode.summary}` : ''}${mvcChildContext}`
 
-  const hasReferenceImages = messages.some((message) => hasImages(message.content))
-  const conversationText = messages.map((message) => extractText(message.content)).join('\n')
+  const hasReferenceImages = hasImages(latestUserMessage.content)
+  const conversationText = latestUserText
+  const existingNodeVisualText = [
+    targetNode.summary,
+    targetNode.content,
+    targetNode.extractedFrom,
+    targetNode.techNotes,
+    targetNode.evidenceRefs?.map((ref) => `${ref.sourceLabel}\n${ref.quote ?? ''}`).join('\n'),
+    Object.values(targetNode.sections ?? {}).map((section) => [
+      section?.title,
+      section?.summary,
+      section?.content,
+      section?.evidenceRefs?.map((ref) => `${ref.sourceLabel}\n${ref.quote ?? ''}`).join('\n'),
+    ].filter(Boolean).join('\n')).join('\n'),
+  ].filter(Boolean).join('\n')
+  const visualResourcePattern = /figma|参考图|截图|原型图|原型图片|视觉稿|设计稿|界面图|UI\s*图|已上传|已导入|图片|image|screenshot|prototype/i
   const mentionsVisualResource = hasReferenceImages
-    || /figma|参考图|截图|原型图|原型图片|视觉稿|设计稿|界面图|UI\s*图|已上传|已导入/i.test(conversationText)
+    || visualResourcePattern.test(conversationText)
+    || visualResourcePattern.test(existingNodeVisualText)
   const declinedVisualResource = /没有.{0,8}(图|figma|设计稿|原型|截图|视觉稿)|暂无.{0,8}(图|figma|设计稿|原型|截图|视觉稿)|先按文字|没有资源/i.test(conversationText)
   const isVisualNode = resolveNodeAudience(targetNode) === 'client'
     || resolveNodeSpecLens(targetNode) === 'view'
     || targetNode.type === 'page'
     || targetNode.type === 'ui'
-  const shouldAskForVisualResource = isVisualNode && !mentionsVisualResource && !declinedVisualResource
+  const shouldAskForVisualResource = !isPerformancePolishMode && isVisualNode && !mentionsVisualResource && !declinedVisualResource
 
   const nodeChatSystemPrompt = `你是游戏需求文档精修顾问，专注于把单个 PRD 拆分节点打磨成可直接交给 AI Agent 使用的 Markdown 文档。
 
@@ -2959,7 +3255,9 @@ ${nodeContext}
 
 规则：
 - 用中文回复；所有展示给用户或写入导出文档的生成内容都必须是中文
+- 当前工作模式：${isPerformancePolishMode ? 'AI 追问表现（AI 问、用户答）' : '自由迭代（用户主动补充或修改）'}
 - 回复正文只写给用户看的简短 Markdown 总结，不要输出整篇重写文档；可用标题、列表、加粗或行内代码，最多8行
+- 默认回复必须短：最多 3 行；除非用户要求总结或导出，不要列长清单
 - 如果文档还不完整，只问一个最关键的问题
 - 追问优先级不可颠倒：
   1. 如果这是客户端/UI/页面节点，且尚未提供原型图片、Figma、参考图或视觉稿，第一优先级必须先询问这些资源；如果用户明确说没有，再继续按文字打磨。
@@ -2967,6 +3265,7 @@ ${nodeContext}
   3. 最后才进入表现打磨/表现编排澄清。
 - 当前是否应先询问原型/Figma/参考图资源：${shouldAskForVisualResource ? '是' : '否'}
 - 当“当前是否应先询问原型/Figma/参考图资源”为“是”时，你的唯一问题应是请用户上传原型截图/参考图或粘贴 Figma 链接；不要在同一轮追问表现编排
+- 当“当前是否应先询问原型/Figma/参考图资源”为“是”时，回复必须只包含两层意思：1）先上传原型截图/参考图或粘贴 Figma 链接；2）如果没有就回复“没有原型资源”。禁止同时列原文依据、职责边界、依赖字段、验收标准、表现类型、触发条件或程序员追问清单
 - 优先补齐：原文位置、职责边界、核心规则、依赖字段/配置、跨文档关系、边界条件、需澄清点、可测试验收标准、AI 接力说明
 - 默认扫描目标节点中的表现编排缺口：结果/奖励表现、金币/数值获得、连线/命中、宝石/图标特效、弹窗揭晓、阶段演出、成功/失败反馈等都算表现编排
 - 不要问用户“这个表现重不重要”；这些表现通常是设计师已知但 PRD 未写清。你的角色是代替程序员追问 UI 设计师，把“会播什么、怎么播、播完怎么办”追问成可实现 spec
@@ -2974,12 +3273,18 @@ ${nodeContext}
 - 接入方式必须使用 Cocos 程序能落地的语言：Tween/AnimationClip/Spine/ParticleSystem/Prefab/序列帧/音效联动；不要停留在“更酷一点”“有氛围感”等视觉形容
 - 只有在原型/视觉资源问题和主流程问题都不阻塞时，才根据节点内容整理播放流程草案；再问最阻塞实现的 1 个具体问题，例如“连线是逐条亮还是同时亮”“金币飞入用 Tween 走贝塞尔还是复用 prefab 动画”“Spine 播完是否等待回调再开弹窗”“粒子和音效是否跟随跳过一起停止”“弹窗自动关闭还是点击关闭”
 - 进入表现追问时，必须明确这个问题卡住了哪个槽位：trigger、branches、sequence、integrationModes、assets、layers、controls、endState；回复正文只问这 1 个问题，不要同轮列多问
+- 单个追问必须给出 2-4 个可直接选择的回答方向，写在问题后面，例如“可选：逐段等待 / 并行播放后收尾 / 我来描述”；选项要短、具体、互斥，不要复述问题
 - 表现问题是软门槛：如果主文档已经足够交付但表现槽位仍有 AI 推断或缺失，可以 nodeComplete=true，但必须在 performanceSpec.readiness 保留风险，不要假装已经确认
-- 表现编排模板由节点内容动态组合，用户不需要选择模板，也不需要勾选开关
+- 未启用表现打磨问答模式时，处于自由迭代：用户主动描述要补充的需求、视觉反馈或原型修改，你自动识别 document_polish、reference_feedback、prototype_update，不要强迫用户按表现槽位回答
+- 当表现打磨问答模式为“是”时，进入 AI 问、用户答的表现编排澄清节奏：跳过视觉资源优先级和普通文档长清单，围绕触发条件、分支规则、播放顺序、接入方式、资源清单、层级位置、控制规则、结束状态这 8 个槽位逐项确认
+- 当表现打磨问答模式为“是”时，你必须每轮根据当前节点、已有表现编排扫描和用户最新回答重新评估 performanceSpec.slotStatus、confidence、blockingQuestion；nodePatch.performanceSpec 必须写入最新结构化对象，即使本轮只是在继续追问
+- 当表现打磨问答模式为“是”时，整体理解度不是只能上涨的进度条：如果用户回答引入矛盾、扩大范围、否定先前假设或暴露未知资源/接入方式，必须把相关槽位从 confirmed 降为 inferred 或 missing，让 readiness 分数和 confidence 下降
+- 当表现打磨问答模式为“是”时，回复正文最多 3 行：第一行写“整体理解度：X%”，第二行写“当前卡住：槽位名”并只问当前最阻塞的 1 个表现问题，第三行给 2-4 个短选项；不要输出说明性长清单
 - 你必须自己从用户最新一轮输入中识别一个或多个意图，不要要求用户选择模式
 - document_polish：用户补充、确认、修正文档内容时，更新 nodePatch
 - reference_feedback：用户上传图片、提到参考图/截图/视觉对比时，把图片或视觉评论作为文档证据；通常也要更新 UI/client 文档的 nodePatch
 - prototype_update：用户要求生成、修改、对齐、对比或修复右侧原型时，写出可直接传给原型生成器的简短中文 prototypeInstruction
+- 重要分流：用户说“换 item 图片 / 替换图片 / 换素材 / 用 Figma 链接 / 按这张图改界面 / 调整按钮颜色位置”等视觉或原型反馈时，默认只属于 prototype_update，不要写 nodePatch，不要把它记录为需求文档迭代；只有用户明确说“写入需求文档/更新 PRD/spec/验收/规则/流程/字段”时才更新 nodePatch
 - 一轮输入可以同时包含 document_polish、reference_feedback、prototype_update
 - 当用户上传参考图或界面截图时，仅对 client/UI 类文档像 screenshot-to-code 一样提取布局层级、控件分组、间距、对齐、视觉权重、可交互元素、状态反馈和素材/参考图边界，并转化为文档内容
 - 本轮是否包含图片参考：${hasReferenceImages ? '是' : '否'}
@@ -2990,25 +3295,52 @@ ${nodeContext}
 - 当你判断该文档已经足够交给后续 AI 执行时，把同一个 JSON 的 nodeComplete 设为 true，并让 nodePatch 包含最终文档内容
 - JSON 只能放在回复末尾；回复正文不能包含 JSON、大括号、schema 说明或原始回包
 - nodePatch.content 必须整合当前节点原始内容、用户补充和图片观察结论，写成可导出的当前文档正文；不要只写本轮摘要，也不要重复堆叠旧的 Deep Forge 段落
+- nodePatch 可以额外写入 sections.view / sections.interaction / sections.data、handoffGoal、qualityGate、backendContracts、evidenceRefs；页面节点的 View/Flow/Data 细节优先写 sections，接口/配置/服务端规则/数据模型依赖写入 backendContracts，作为页面的服务端交互内容，不要把服务端实现细节堆进页面正文
 - nodePatch.summary、nodePatch.content、nodePatch.techNotes、nodePatch.performanceSpec、prototypeInstruction 以及 content 内部 Markdown 标题必须使用中文；只有代码标识、文件路径、接口字段名、库/API 名称、枚举值和专有产品名可以保留英文
 - 保持专业、简洁、直接的语气`
+
+  const currentTurnOnlySystemPrompt = [
+    '重要：本次只处理当前用户反馈，不要依赖历史聊天记录。',
+    isPerformancePolishMode
+      ? '回复正文必须遵守表现打磨问答模式：写出最新整体理解度，标明当前卡住的表现槽位，只问一个最阻塞表现问题，并给出 2-4 个短选项。'
+      : '回复正文必须极短：只说“已记录这个需求。”、“已完成这次 UI 迭代。”或“已记录这个需求，并完成这次 UI 迭代。”；只有确实缺少必要信息时，才问一个短问题。',
+    '不要在回复正文中说明写入了哪些需求文档内容，也不要展示或复述发给 UI 原型迭代器的 prototypeInstruction。',
+    nodeChatSystemPrompt,
+  ].join('\n\n')
+  const currentTurnMessage = prependTextToUserMessage(
+    latestUserMessage,
+    isPerformancePolishMode
+      ? '当前用户正在回答表现打磨问题。请只处理这一轮回答，并重算表现编排的 8 个槽位理解状态：已确认、AI 推断、缺失或豁免。必须写回 nodePatch.performanceSpec，并只问下一条最阻塞的表现问题。'
+      : '当前用户反馈如下。请只拆分并处理这一轮：需要更新需求文档的内容写入 nodePatch；需要更新右侧 UI/原型的内容写入 prototypeInstruction。不要读取或总结历史对话。',
+  )
 
   const response = await anthropic.messages.create({
     model,
     max_tokens: 4096,
-    system: nodeChatSystemPrompt,
-    messages: messages.map(toAnthropicNodeMessage),
+    system: currentTurnOnlySystemPrompt,
+    messages: [toAnthropicNodeMessage(currentTurnMessage)],
   })
 
   const rawText = textFromClaudeContent(response.content)
 
   const parsedSuffix = extractNodeChatSuffix(rawText)
+  const latestContent = latestUserMessage.content as import('../src/types/chat').ChatMessage['content']
+  const finalSuffix = !isPerformancePolishMode && isUiOnlyPrototypeFeedback(latestContent)
+    ? {
+        ...parsedSuffix,
+        reply: '已完成这次 UI 迭代。',
+        nodeComplete: false,
+        nodePatch: null,
+        intents: ['prototype_update' as const],
+        prototypeInstruction: parsedSuffix.prototypeInstruction ?? buildUiOnlyPrototypeInstruction(latestContent),
+      }
+    : parsedSuffix
   res.json({
-    reply: parsedSuffix.reply || rawText,
-    nodeComplete: parsedSuffix.nodeComplete,
-    nodePatch: parsedSuffix.nodePatch,
-    intents: parsedSuffix.intents,
-    prototypeInstruction: parsedSuffix.prototypeInstruction,
+    reply: finalSuffix.reply || rawText,
+    nodeComplete: finalSuffix.nodeComplete,
+    nodePatch: finalSuffix.nodePatch,
+    intents: finalSuffix.intents,
+    prototypeInstruction: finalSuffix.prototypeInstruction,
   })
 })
 
@@ -3040,12 +3372,18 @@ function buildPrototypeSpec(requirementState: UXRequirementState) {
   const componentTree = hasComponents
     ? JSON.stringify(requirementState.ui_components, null, 2)
     : '（暂无组件信息，请根据 trigger_condition 和 sequence_rules 推断界面结构）'
+  const assetDependencies = requirementState.asset_dependencies.length > 0
+    ? JSON.stringify(requirementState.asset_dependencies, null, 2)
+    : '（暂无可用资源）'
 
   return `## 需求状态
 触发条件：${requirementState.trigger_condition ?? '未知'}
 执行规则：${requirementState.sequence_rules ?? '未知'}
 引擎约束：${requirementState.engine_constraints ?? '无'}
 完成度：${requirementState.completion_rate}%
+
+## 可用资源
+${assetDependencies}
 
 ## 表现编排
 ${requirementState.performance_spec ? formatPerformanceSpecForPrompt(requirementState.performance_spec) : '未提供单独的表现编排规格；请仅根据执行规则模拟关键状态反馈。'}
@@ -3069,17 +3407,65 @@ function buildFigmaEvidencePolicySection(hasImages: boolean) {
 ## Figma / 参考图优先级
 - 如果附件来自 Figma Frame、布局参考图或界面截图，它是视觉结构的主来源：布局、层级、间距、颜色、控件位置、文字和素材位置都优先按图还原。
 - PRD 和节点文档只用于补充交互逻辑、状态流转、数据条件、Cocos 制作约束和图中不可见的异常状态。
+- 如果 Figma 证据列出“数值占位”，说明原图中的示例数字已从位图中去除；生成 HTML 时必须在对应坐标叠加真实业务数值或动态占位，不要还原 Figma 示例数字。
 - 不要自行发明参考图/Figma 中不存在的装饰图、角色图、背景图或外层设备框。`
 }
 
-function buildCreatePrototypePrompt(requirementState: UXRequirementState, hasImages = false, focus?: string) {
+interface FigmaAssetReference {
+  url: string
+  label: string
+  type: string
+}
+
+function extractFigmaAssetReferences(requirementState: UXRequirementState): FigmaAssetReference[] {
+  const seen = new Set<string>()
+  return requirementState.asset_dependencies
+    .map((asset): FigmaAssetReference | null => {
+      const rawPath = asset.path ?? ''
+      const url = rawPath.split('|')[0]?.trim()
+      if (!url || !/^https?:\/\/[^\s]+$/u.test(url)) return null
+      if (!asset.type.toLowerCase().includes('figma') && !url.includes('/api/figma/assets/')) return null
+      if (seen.has(url)) return null
+      seen.add(url)
+      return {
+        url,
+        label: rawPath.split('|').slice(1).join('|').trim() || asset.type,
+        type: asset.type,
+      }
+    })
+    .filter((asset): asset is FigmaAssetReference => Boolean(asset))
+    .slice(0, 6)
+}
+
+function buildFigmaAssetUsageSection(requirementState: UXRequirementState) {
+  const assets = extractFigmaAssetReferences(requirementState)
+  if (!assets.length) return ''
+
+  return `
+## Figma 位图资产使用契约
+本次 Figma 子图已经作为可访问图片资源缓存到本地代理。生成 HTML 时必须真实引用这些图片，而不是只按视觉重新绘制。
+
+可用 Figma 图片：
+${assets.map((asset, index) => `${index + 1}. ${asset.type}｜${asset.label}\n   URL: ${asset.url}`).join('\n')}
+
+使用要求：
+- 至少使用 1 张 Figma 图片作为主视觉图层；如果存在 FigmaFrameImage，优先把它作为底图或首屏主图。
+- 对重要子区域，用 FigmaSubImage 作为真实 \`<img src="...">\` 或 \`background-image:url(...)\` 图层，再叠加 HTML 状态、按钮、热点、弹层和流程反馈。
+- 不要用纯 CSS/渐变/假卡片替代这些 Figma 图片；CSS 只负责适配、遮罩、交互状态和补充图中不可见的 PRD 逻辑。
+- 这些 URL 来自当前本地代理 \`/api/figma/assets/\`，允许在预览 HTML 中直接引用。`
+}
+
+function buildCreatePrototypePrompt(requirementState: UXRequirementState, hasImages = false, focus?: string, instruction?: string) {
   const focusSection = focus
     ? `\n## 本变体设计侧重\n${focus}\n（这是同一需求的多个备选方案之一，请在满足上述需求与约束的前提下，按本侧重做出有辨识度的设计。）\n`
     : ''
+  const instructionSection = instruction?.trim()
+    ? `\n## 本轮原型生成要求\n${instruction.trim()}\n`
+    : ''
   return `你是 GameUX PromptForge 的游戏 UX 原型生成专家。根据以下 UX 需求状态${hasImages ? '和参考图' : ''}，生成一个可直接预览的自包含 HTML 原型。
 
-${buildPrototypeSpec(requirementState)}
-${hasImages ? `\n${buildScreenshotFidelitySection()}` : ''}${buildFigmaEvidencePolicySection(hasImages)}${focusSection}
+${buildPrototypeSpec(requirementState)}${buildFigmaAssetUsageSection(requirementState)}
+${instructionSection}${hasImages ? `\n${buildScreenshotFidelitySection()}` : ''}${buildFigmaEvidencePolicySection(hasImages)}${focusSection}
 ## 尺寸契约
 - 预览沙盒按参考项目的手机适配方式提供 375px CSS 固定宽度；默认验收视口按 375x812 设计。
 - html、body 和唯一主根容器必须按移动端视口组织：width: 100vw; min-width: 375px; min-height: 100vh; overflow-x: hidden; overflow-y: auto。
@@ -3091,14 +3477,15 @@ ${hasImages ? `\n${buildScreenshotFidelitySection()}` : ''}${buildFigmaEvidenceP
 
 ## 输出约束
 1. 只输出单个完整 HTML 文件；可以用 \`\`\`html 包裹，但不要解释。
-2. 必须是静态单文件可运行：不需要 npm、构建步骤、本地资源或后端服务。
-3. 可使用 Tailwind CDN（https://cdn.tailwindcss.com）和少量内联 CSS/JS；不要引用不可访问的本地路径。
+2. 必须是单个 HTML 文件：不需要 npm 或构建步骤；如果上方提供了 Figma 图片 URL，必须直接引用这些 URL 作为真实视觉资产。
+3. 可使用 Tailwind CDN（https://cdn.tailwindcss.com）、上方提供的 Figma 图片 URL 和少量内联 CSS/JS；不要引用未提供或不可访问的本地路径。
 4. 画面要像游戏交互原型，不要做营销页：包含设备内界面、状态切换、关键按钮反馈、禁用/加载/错误态。
-5. 如果需求状态包含表现编排，必须模拟播放流程的大致顺序：前置特效、命中/高亮、弹窗/揭晓、数值滚动/飞入、收尾关闭等可以用占位特效和中文阶段标签表达；不要只画静态最终态。
-6. 组件标注要清楚：用小标签标出组件名称、类型、状态或动画参数。
-7. 未确认资源用占位块，不要伪造真实素材路径。
-8. 脚本必须安全自包含，不要访问父窗口、cookie、localStorage 或外部 API。
-9. 所有用户可见界面文字、按钮文案、状态提示、组件标注、注释说明必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。`
+5. 如果需求状态、PRD 或附件里包含多组 mock 数据、多个列表 item、多个奖励档位、多个接口示例或多种服务端返回，原型必须提供可验证的多数据态：用自动循环/轮播/分页展示，或提供一个紧凑的 GM/调试面板让用户切换 mock 数据、状态、奖励档位、错误码和空数据；不要只固定展示第一组 mock 数据。
+6. 如果需求状态包含表现编排，必须模拟播放流程的大致顺序：前置特效、命中/高亮、弹窗/揭晓、数值滚动/飞入、收尾关闭等可以用占位特效和中文阶段标签表达；不要只画静态最终态。
+7. 不要生成提示性标注、组件标注、注释说明小标签、注释栏、引线或 callout；原型只保留用户真实会看到和操作的界面内容。
+8. 未确认资源用占位块，不要伪造真实素材路径。
+9. 脚本必须安全自包含，不要访问父窗口、cookie、localStorage 或外部 API。
+10. 所有用户可见界面文字、按钮文案和状态提示必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。`
 }
 
 function buildUpdatePrototypePrompt(requirementState: UXRequirementState, currentHtml: string, instruction: string, history: string[] = [], focus?: string, hasImages = false) {
@@ -3108,7 +3495,7 @@ function buildUpdatePrototypePrompt(requirementState: UXRequirementState, curren
   const focusSection = focus ? `\n## 本次更新侧重\n${focus}\n` : ''
   return `你是 GameUX PromptForge 的原型迭代代理。请根据用户的修改说明，对当前 HTML 原型做最小必要修改。
 
-${buildPrototypeSpec(requirementState)}${buildFigmaEvidencePolicySection(hasImages)}${historySection}${focusSection}
+${buildPrototypeSpec(requirementState)}${buildFigmaAssetUsageSection(requirementState)}${buildFigmaEvidencePolicySection(hasImages)}${historySection}${focusSection}
 
 ## 用户修改说明
 ${instruction}
@@ -3117,16 +3504,19 @@ ${instruction}
 ${currentHtml}
 
 ## 修改规则
-1. 优先调用 edit_prototype 工具，用 old_string/new_string 做精确局部替换。
+1. 如果当前运行环境提供 edit_prototype 工具，优先调用 edit_prototype 工具，用 old_string/new_string 做精确局部替换；如果没有工具可用，必须直接输出修改后的完整 HTML 文件。
 2. old_string 必须逐字符来自当前 HTML，不能概括、不能省略。
 3. 如果需要多处修改，可以调用多次 edit_prototype。
 4. 如果无法安全定位精确片段，直接输出修改后的完整 HTML 文件。
-5. 保持单文件可运行、Tailwind CDN 可用、无构建步骤、无本地资源依赖。
+5. 保持单文件可运行、Tailwind CDN 可用、无构建步骤；如果上方提供了 Figma 图片 URL，继续保留并真实引用这些 URL。
 6. 预览 iframe 是 375px CSS 固定宽度；默认验收视口按 375x812 设计，html、body 和唯一主根容器必须使用 width:100vw; min-width:375px; min-height:100vh; overflow-x:hidden; overflow-y:auto。
 7. 修改时优先保持核心界面、主要按钮和关键状态在首屏可见；新增内容超过首屏时，用弹层、抽屉、折叠区、标签页或状态切换承载，不要直接把主页面继续拉长。
 8. 禁止生成额外的 750px 设计稿容器，禁止 max-width/mx-auto/scale()/zoom 让界面缩在中间，也不要新增手机壳、浏览器壳或外层设备框；内容过长时允许纵向滚动，不要横向溢出。
-9. 如果需求状态包含表现编排，本次更新必须优先对齐播放顺序、阶段标签、弹窗/特效/数值表现和结束状态；可以用占位粒子、光效、震屏模拟、音效标签表达尚未接入的资源。
-10. 所有用户可见界面文字、按钮文案、状态提示、组件标注、注释说明必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。`
+9. 如果需求状态、PRD 或附件里包含多组 mock 数据、多个列表 item、多个奖励档位、多个接口示例或多种服务端返回，本次更新必须保留或补齐多数据态切换：用自动循环/轮播/分页展示，或提供一个紧凑的 GM/调试面板让用户切换 mock 数据、状态、奖励档位、错误码和空数据；不要把原型退化成只展示第一组 mock 数据。
+10. 如果需求状态包含表现编排，本次更新必须优先对齐播放顺序、阶段标签、弹窗/特效/数值表现和结束状态；可以用占位粒子、光效、震屏模拟、音效标签表达尚未接入的资源。
+11. 不要新增提示性标注、组件标注、注释说明小标签、注释栏、引线或 callout；需要说明的设计意图只体现在真实界面状态、文案和交互反馈中。
+12. 所有用户可见界面文字、按钮文案和状态提示必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。
+13. 最终返回不能是说明、diff、patch、局部片段或 Markdown 清单；非工具路径必须返回以 <!doctype html> 或 <html> 开始、包含 </html> 的完整 HTML 文档。`
 }
 
 function applyPrototypeToolUses(currentHtml: string, content: Anthropic.Messages.ContentBlock[]) {
@@ -3161,7 +3551,9 @@ function parsePrototypeRequest(req: express.Request): PrototypeRequest {
 function buildImageBlocks(images: ContentBlock[] | null | undefined): Anthropic.ImageBlockParam[] {
   return Array.isArray(images)
     ? images
-        .filter((b): b is ContentBlock & { type: 'image' } => b?.type === 'image' && !!b.source)
+        .filter((b): b is ContentBlock & { type: 'image'; source: { type: 'base64'; media_type: string; data: string } } => (
+          b?.type === 'image' && b.source?.type === 'base64'
+        ))
         .map((b) => ({ type: 'image', source: b.source as Anthropic.Base64ImageSource }))
     : []
 }
@@ -3191,6 +3583,349 @@ function parseFigmaFrameUrl(rawUrl: string) {
   }
 
   return { fileKey, nodeId, sourceUrl: parsed.toString() }
+}
+
+interface FigmaApiBounds {
+  x?: number
+  y?: number
+  width?: number
+  height?: number
+}
+
+interface FigmaApiNode {
+  id: string
+  name: string
+  type: string
+  visible?: boolean
+  characters?: string
+  absoluteBoundingBox?: FigmaApiBounds
+  absoluteRenderBounds?: FigmaApiBounds | null
+  children?: FigmaApiNode[]
+}
+
+interface FigmaFileNodesResponse {
+  name?: string
+  nodes?: Record<string, { document?: FigmaApiNode | null }>
+}
+
+interface FigmaImageRenderResponse {
+  err?: string | null
+  images?: Record<string, string | null>
+  status?: number
+}
+
+interface FigmaImageCandidate {
+  node: FigmaApiNode
+  width: number
+  height: number
+  area: number
+  depth: number
+  score: number
+  pathIds: string[]
+  isRoot: boolean
+}
+
+function figmaApiUrl(routePath: string) {
+  return `${figmaApiBaseUrl}/${routePath.replace(/^\/+/, '')}`
+}
+
+async function fetchFigmaJson<T>(url: string, token: string, label: string): Promise<T> {
+  const response = await fetch(url, {
+    headers: {
+      'X-Figma-Token': token,
+      Accept: 'application/json',
+    },
+  })
+  if (!response.ok) {
+    throw new Error(`${label}：HTTP ${response.status}${await readResponseSnippet(response)}`)
+  }
+  return await response.json() as T
+}
+
+function figmaNodeBounds(node: FigmaApiNode): { x: number; y: number; width: number; height: number } | null {
+  const bounds = node.absoluteBoundingBox ?? node.absoluteRenderBounds
+  const width = typeof bounds?.width === 'number' && Number.isFinite(bounds.width) ? bounds.width : 0
+  const height = typeof bounds?.height === 'number' && Number.isFinite(bounds.height) ? bounds.height : 0
+  if (width <= 0 || height <= 0) return null
+  return {
+    x: typeof bounds?.x === 'number' && Number.isFinite(bounds.x) ? bounds.x : 0,
+    y: typeof bounds?.y === 'number' && Number.isFinite(bounds.y) ? bounds.y : 0,
+    width,
+    height,
+  }
+}
+
+function isFigmaContainerType(type: string) {
+  return ['FRAME', 'GROUP', 'COMPONENT', 'INSTANCE', 'COMPONENT_SET', 'SECTION'].includes(type)
+}
+
+function isLowSignalFigmaType(type: string) {
+  return ['TEXT', 'VECTOR', 'LINE', 'BOOLEAN_OPERATION', 'STAR', 'POLYGON'].includes(type)
+}
+
+function figmaNodeScore(node: FigmaApiNode, area: number, depth: number) {
+  let score = area
+  if (isFigmaContainerType(node.type)) score *= 1.55
+  if (['FRAME', 'COMPONENT', 'INSTANCE'].includes(node.type)) score *= 1.2
+  if (depth === 1) score *= 1.25
+  if (isLowSignalFigmaType(node.type)) score *= 0.28
+  return score
+}
+
+function collectFigmaImageCandidates(root: FigmaApiNode, rootArea: number) {
+  const candidates: FigmaImageCandidate[] = []
+  const minContainerArea = Math.max(3600, rootArea * 0.025)
+  const minLeafArea = Math.max(7200, rootArea * 0.08)
+
+  function walk(node: FigmaApiNode, depth: number, pathIds: string[]) {
+    if (node.visible === false) return
+    const bounds = figmaNodeBounds(node)
+    if (bounds) {
+      const area = bounds.width * bounds.height
+      const isContainer = isFigmaContainerType(node.type)
+      const minArea = isContainer ? minContainerArea : minLeafArea
+      if (depth > 0 && depth <= 4 && bounds.width >= 24 && bounds.height >= 24 && area >= minArea) {
+        candidates.push({
+          node,
+          width: Math.round(bounds.width),
+          height: Math.round(bounds.height),
+          area,
+          depth,
+          score: figmaNodeScore(node, area, depth),
+          pathIds,
+          isRoot: false,
+        })
+      }
+    }
+
+    if (depth >= 4) return
+    for (const child of node.children ?? []) {
+      walk(child, depth + 1, [...pathIds, child.id])
+    }
+  }
+
+  for (const child of root.children ?? []) {
+    walk(child, 1, [root.id, child.id])
+  }
+
+  return candidates
+}
+
+function candidatesOverlap(a: FigmaImageCandidate, b: FigmaImageCandidate) {
+  return a.pathIds.includes(b.node.id) || b.pathIds.includes(a.node.id)
+}
+
+function compareFigmaVisualOrder(a: FigmaImageCandidate, b: FigmaImageCandidate) {
+  const aBounds = figmaNodeBounds(a.node)
+  const bBounds = figmaNodeBounds(b.node)
+  return a.depth - b.depth
+    || (aBounds?.y ?? 0) - (bBounds?.y ?? 0)
+    || (aBounds?.x ?? 0) - (bBounds?.x ?? 0)
+}
+
+function selectFigmaExportCandidates(root: FigmaApiNode) {
+  const rootBounds = figmaNodeBounds(root)
+  if (!rootBounds) throw new Error('Figma Frame 缺少可导出的尺寸信息。请确认链接选中的是 Frame、Component 或可渲染节点。')
+  const rootCandidate: FigmaImageCandidate = {
+    node: root,
+    width: Math.round(rootBounds.width),
+    height: Math.round(rootBounds.height),
+    area: rootBounds.width * rootBounds.height,
+    depth: 0,
+    score: rootBounds.width * rootBounds.height,
+    pathIds: [root.id],
+    isRoot: true,
+  }
+
+  const selectedChildren: FigmaImageCandidate[] = []
+  const candidates = collectFigmaImageCandidates(root, rootCandidate.area)
+    .sort((a, b) => b.score - a.score)
+
+  for (const candidate of candidates) {
+    if (selectedChildren.some((selected) => candidatesOverlap(selected, candidate))) continue
+    selectedChildren.push(candidate)
+    if (selectedChildren.length >= FIGMA_EXTRACT_MAX_IMAGES - 1) break
+  }
+
+  return [rootCandidate, ...selectedChildren.sort(compareFigmaVisualOrder)]
+}
+
+async function fetchFigmaSelectedNode(fileKey: string, nodeId: string, token: string) {
+  const url = new URL(figmaApiUrl(`/v1/files/${encodeURIComponent(fileKey)}/nodes`))
+  url.searchParams.set('ids', nodeId)
+  url.searchParams.set('depth', '8')
+  const data = await fetchFigmaJson<FigmaFileNodesResponse>(url.toString(), token, '读取 Figma 节点失败')
+  const entry = data.nodes?.[nodeId] ?? data.nodes?.[nodeId.replace(/:/g, '-')]
+  const document = entry?.document
+  if (!document) {
+    throw new Error('Figma 返回中没有找到选中的节点。请确认 token 有权限访问该文件，且链接包含有效 node-id。')
+  }
+  return document
+}
+
+async function fetchFigmaImageUrl(fileKey: string, token: string, nodeId: string, scale: number) {
+  const url = new URL(figmaApiUrl(`/v1/images/${encodeURIComponent(fileKey)}`))
+  url.searchParams.set('ids', nodeId)
+  url.searchParams.set('format', 'png')
+  url.searchParams.set('scale', String(scale))
+  url.searchParams.set('use_absolute_bounds', 'true')
+  url.searchParams.set('contents_only', 'true')
+  const data = await fetchFigmaJson<FigmaImageRenderResponse>(url.toString(), token, '导出 Figma 子图失败')
+  if (data.err) throw new Error(`导出 Figma 子图失败：${data.err}`)
+  const imageUrl = data.images?.[nodeId] ?? data.images?.[nodeId.replace(/:/g, '-')]
+  if (!imageUrl) throw new Error(`Figma 未返回 ${nodeId} 的图片地址。`)
+  return imageUrl
+}
+
+function uniqueScales(scales: number[]) {
+  return Array.from(new Set(scales.map((scale) => Math.max(0.25, Math.min(3, Number(scale.toFixed(2)))))))
+}
+
+function figmaExportScales(candidate: FigmaImageCandidate) {
+  const maxEdge = Math.max(candidate.width, candidate.height)
+  const base = candidate.isRoot ? Math.min(FIGMA_IMAGE_SCALE, 0.75) : FIGMA_IMAGE_SCALE
+  if (maxEdge >= 3000) return uniqueScales([Math.min(base, 0.5), 0.35, 0.25])
+  if (maxEdge >= 2000) return uniqueScales([Math.min(base, 0.75), 0.5, 0.35])
+  if (candidate.isRoot) return uniqueScales([base, 0.5, 0.35])
+  return uniqueScales([base, 1, 0.75, 0.5])
+}
+
+function extensionForMediaType(mediaType: string) {
+  if (mediaType.includes('jpeg')) return 'jpg'
+  if (mediaType.includes('webp')) return 'webp'
+  if (mediaType.includes('gif')) return 'gif'
+  return 'png'
+}
+
+function normalizeImageMediaType(mediaType: string | null) {
+  const clean = mediaType?.split(';')[0]?.trim().toLowerCase()
+  if (clean === 'image/jpeg' || clean === 'image/png' || clean === 'image/gif' || clean === 'image/webp') return clean
+  return 'image/png'
+}
+
+function sanitizeFigmaAssetName(value: string) {
+  const sanitized = value
+    .replace(/[<>:"\\|?*\x00-\x1F]/g, '-')
+    .replace(/[^\w一-鿿.-]+/g, '-')
+    .replace(/-+/g, '-')
+    .slice(0, 48)
+    .replace(/^-|-$/g, '')
+  return sanitized || 'figma-node'
+}
+
+function figmaAssetPath(candidate: FigmaImageCandidate, index: number, mediaType: string) {
+  const order = String(index + 1).padStart(2, '0')
+  const nodeId = candidate.node.id.replace(/[^a-z0-9_-]+/giu, '-').replace(/-+/g, '-')
+  const ext = extensionForMediaType(mediaType)
+  return `figma-export/${order}-${sanitizeFigmaAssetName(candidate.node.name)}-${nodeId}.${ext}`
+}
+
+async function downloadFigmaImageBytes(imageUrl: string, label: string) {
+  const response = await fetch(imageUrl)
+  if (!response.ok) throw new Error(`${label} 下载失败：HTTP ${response.status}${await readResponseSnippet(response)}`)
+  const bytes = new Uint8Array(await response.arrayBuffer())
+  if (bytes.byteLength > FIGMA_MAX_IMAGE_BYTES) {
+    throw new Error(`${label} 超过 ${Math.round(FIGMA_MAX_IMAGE_BYTES / 1024 / 1024)}MB，已跳过。可降低 FIGMA_IMAGE_SCALE 或提高 FIGMA_MAX_IMAGE_BYTES。`)
+  }
+  return {
+    bytes,
+    mediaType: normalizeImageMediaType(response.headers.get('content-type')),
+  }
+}
+
+async function importFigmaFrame(payload: FigmaFrameRequest, assetBaseUrl: string): Promise<FigmaFrameResponse> {
+  const rawUrl = payload.url?.trim()
+  if (!rawUrl) throw new Error('请填写 Figma Frame 链接。')
+  const token = payload.token?.trim() || figmaToken.trim()
+  if (!token) throw new Error('未配置 FIGMA_TOKEN。请在项目 .env 或 server/.env 中配置 Figma token，前端只需要粘贴 Figma 链接。')
+
+  const { fileKey, nodeId, sourceUrl } = parseFigmaFrameUrl(rawUrl)
+  const root = await fetchFigmaSelectedNode(fileKey, nodeId, token)
+  const candidates = selectFigmaExportCandidates(root)
+  const exportCandidates = [
+    ...candidates.filter((candidate) => !candidate.isRoot),
+    ...candidates.filter((candidate) => candidate.isRoot),
+  ]
+  const downloaded: Array<{
+    candidate: FigmaImageCandidate
+    bytes: Uint8Array
+    data: string
+    mediaType: string
+    assetPath: string
+    scale: number
+    numericTextSlots: FigmaNumericTextSlot[]
+  }> = []
+  const skipped: string[] = []
+
+  for (const [index, candidate] of exportCandidates.entries()) {
+    const label = candidate.isRoot ? 'Figma 整帧' : `Figma 子图 ${index + 1}`
+    let exported = false
+    for (const scale of figmaExportScales(candidate)) {
+      try {
+        const url = await fetchFigmaImageUrl(fileKey, token, candidate.node.id, scale)
+        const image = await downloadFigmaImageBytes(url, `${label} @${scale}x`)
+        const numericTextSlots = collectFigmaNumericTextSlots(candidate.node)
+        const bytes = image.mediaType === 'image/png'
+          ? redactNumericTextFromPng(image.bytes, numericTextSlots, { width: candidate.width, height: candidate.height })
+          : image.bytes
+        downloaded.push({
+          candidate,
+          bytes,
+          mediaType: image.mediaType,
+          scale,
+          numericTextSlots,
+          data: Buffer.from(bytes).toString('base64'),
+          assetPath: figmaAssetPath(candidate, index, image.mediaType),
+        })
+        exported = true
+        break
+      } catch (err) {
+        console.warn(`[figma] export ${candidate.node.id} at ${scale}x failed:`, err)
+      }
+    }
+
+    if (!exported) {
+      skipped.push(`${candidate.node.name || candidate.node.id} (${candidate.node.type})`)
+    }
+  }
+
+  if (!downloaded.length) {
+    throw new Error('Figma 已返回节点结构，但所有候选图都导出失败。请选中更小的 Frame，或降低 FIGMA_IMAGE_SCALE / FIGMA_EXTRACT_MAX_IMAGES 后重试。')
+  }
+
+  downloaded.sort((a, b) => Number(b.candidate.isRoot) - Number(a.candidate.isRoot) || compareFigmaVisualOrder(a.candidate, b.candidate))
+
+  const files = Object.fromEntries(downloaded.map((image) => [image.assetPath, image.bytes]))
+  const bundleId = registerFigmaAssetBundle(files)
+  const images = downloaded.map((image): FigmaExtractedImage => ({
+    nodeId: image.candidate.node.id,
+    name: image.candidate.node.name || (image.candidate.isRoot ? 'Selected Frame' : 'Figma Child'),
+    type: image.candidate.node.type,
+    width: image.candidate.width,
+    height: image.candidate.height,
+    depth: image.candidate.depth,
+    mediaType: image.mediaType,
+    data: image.data,
+    assetPath: image.assetPath,
+    assetUrl: buildAssetUrl(assetBaseUrl, bundleId, image.assetPath),
+    numericTextSlots: image.numericTextSlots,
+  }))
+  const hasRootImage = images.some((image) => image.depth === 0)
+  const childCount = images.filter((image) => image.depth > 0).length
+  const numericSlotCount = images.reduce((sum, image) => sum + image.numericTextSlots.length, 0)
+  const panelName = root.name || 'Figma Frame'
+  const skippedText = skipped.length ? `，另有 ${skipped.length} 个过大/超时节点已跳过` : ''
+  const numericText = numericSlotCount ? `，已去除 ${numericSlotCount} 处示例数值并保留真实数值占位坐标` : ''
+
+  return {
+    fileKey,
+    nodeId,
+    panelName,
+    sourceUrl,
+    images,
+    imageCount: images.length,
+    summary: `已从 Figma 直接提取「${panelName}」视觉证据：${hasRootImage ? '整帧 1 张、' : ''}子图 ${childCount} 张${skippedText}${numericText}。将结合当前 PRD 节点内容流式生成 HTML 原型。`,
+  }
 }
 
 interface FigmaConvertTaskResponse {
@@ -3252,6 +3987,30 @@ function sleep(ms: number) {
 
 function normalizeZipPath(value: string) {
   return value.replace(/\\/g, '/').replace(/^\/+/, '')
+}
+
+function safeZipPathSegments(value: string) {
+  const normalized = normalizeZipPath(value)
+  const segments = normalized.split('/').filter(Boolean)
+  return segments.length > 0 && segments.every((segment) => segment !== '.' && segment !== '..') ? segments : null
+}
+
+function resolveCachedFigmaAssetPath(bundleId: string, assetPath: string) {
+  if (!/^[a-z0-9-]+$/iu.test(bundleId)) return null
+  const segments = safeZipPathSegments(assetPath)
+  if (!segments) return null
+  const resolved = path.resolve(FIGMA_ASSET_CACHE_ROOT, bundleId, ...segments)
+  const bundleRoot = path.resolve(FIGMA_ASSET_CACHE_ROOT, bundleId)
+  return resolved === bundleRoot || resolved.startsWith(`${bundleRoot}${path.sep}`) ? resolved : null
+}
+
+function persistFigmaAssetBundleFiles(bundleId: string, files: Record<string, Uint8Array>) {
+  for (const [filePath, bytes] of Object.entries(files)) {
+    const resolved = resolveCachedFigmaAssetPath(bundleId, filePath)
+    if (!resolved) continue
+    mkdirSync(path.dirname(resolved), { recursive: true })
+    writeFileSync(resolved, bytes)
+  }
 }
 
 function buildZipLookup(files: Record<string, Uint8Array>) {
@@ -3385,6 +4144,7 @@ function registerFigmaAssetBundle(files: Record<string, Uint8Array>) {
     files,
     lookup: buildZipLookup(files),
   }
+  persistFigmaAssetBundleFiles(bundleId, files)
   figmaAssetBundles.set(bundleId, bundle)
   setTimeout(() => {
     const current = figmaAssetBundles.get(bundleId)
@@ -3405,7 +4165,8 @@ function buildFigmaPrototypeHtml(spec: UiSpecDocument, uiSpecPath: string, bundl
   const assetUrls = new Map<string, string>()
   for (const asset of spec.assets ?? []) {
     if (!asset.name || !asset.path) continue
-    assetUrls.set(asset.name, buildAssetUrl(assetBaseUrl, bundleId, `${folder}/${asset.path}`))
+    const assetPath = `${folder}/${asset.path}`
+    assetUrls.set(asset.name, buildAssetUrl(assetBaseUrl, bundleId, assetPath))
   }
   const body = renderUiSpecNode(spec.root, assetUrls)
   const nodeCount = countUiSpecNodes(spec.root)
@@ -3519,7 +4280,7 @@ function decodeUiSpec(files: Record<string, Uint8Array>, uiSpecPath: string) {
   return JSON.parse(strFromU8(data)) as UiSpecDocument
 }
 
-async function importFigmaFrame(payload: FigmaFrameRequest, assetBaseUrl: string): Promise<FigmaFrameResponse> {
+async function importFigmaFrameFromPrefab(payload: FigmaFrameRequest, assetBaseUrl: string): Promise<FigmaPrefabFrameResponse> {
   const rawUrl = payload.url?.trim()
   if (!rawUrl) throw new Error('请填写 Figma Frame 链接。')
   const token = payload.token?.trim() || figmaToken.trim()
@@ -3712,6 +4473,120 @@ function normalizePrototypeModelResponse(raw: string, label: string) {
   return html
 }
 
+function errorMessageFromUnknown(error: unknown, fallback = '原型生成失败。') {
+  return error instanceof Error && error.message ? error.message : fallback
+}
+
+function truncateForPrototypeRepair(input: string, maxLength = 8000) {
+  const trimmed = input.trim()
+  if (trimmed.length <= maxLength) return trimmed
+  return `${trimmed.slice(0, maxLength)}\n\n<!-- 内容过长，已截断 -->`
+}
+
+function buildPrototypeHtmlRepairPrompt(originalPrompt: string, invalidOutput: string, reason: string) {
+  return `${originalPrompt}
+
+## 上一次输出不可用于预览
+原因：${reason}
+
+上一次输出如下，只用于定位错误，不能照抄其中的说明文字：
+${truncateForPrototypeRepair(invalidOutput)}
+
+## 强制修复输出
+请重新输出一个完整、可直接预览的 HTML 文档。
+- 只输出 HTML，不要解释。
+- 必须以 <!doctype html> 或 <html> 开始，并包含 </html>。
+- 不能输出 diff、patch、局部片段、Markdown 清单或自然语言说明。
+- 必须保留本次用户修改目标，并在完整 HTML 中体现修改结果。`
+}
+
+async function createOpenAiPrototypeHtmlWithRepair(
+  prompt: string,
+  imageBlocks: Anthropic.ImageBlockParam[],
+  temperature: number | undefined,
+  label: string,
+) {
+  const raw = await createOpenAiChatCompletionText(prompt, imageBlocks, temperature)
+  try {
+    return normalizePrototypeModelResponse(raw, label)
+  } catch (firstError) {
+    console.warn(`[prototype] ${label} invalid HTML, retrying repair:`, firstError)
+    const repairPrompt = buildPrototypeHtmlRepairPrompt(prompt, raw, errorMessageFromUnknown(firstError))
+    const repairedRaw = await createOpenAiChatCompletionText(repairPrompt, imageBlocks, Math.min(temperature ?? 0.2, 0.2))
+    try {
+      return normalizePrototypeModelResponse(repairedRaw, `${label} 修复重试`)
+    } catch (secondError) {
+      throw new Error(`${label} 未生成可用 HTML：${errorMessageFromUnknown(secondError)}`)
+    }
+  }
+}
+
+async function streamOpenAiPrototypeHtmlWithRepair(
+  prompt: string,
+  imageBlocks: Anthropic.ImageBlockParam[],
+  temperature: number | undefined,
+  label: string,
+  onPreview: (html: string) => void,
+) {
+  const streamRaw = async (nextPrompt: string, nextTemperature: number | undefined) => {
+    let raw = ''
+    let lastPreviewHtml = ''
+    return await streamOpenAiChatCompletionText(nextPrompt, imageBlocks, nextTemperature ?? 0.2, (delta) => {
+      raw += delta
+      const previewHtml = normalizeGeneratedPrototypeHtml(raw)
+      if (previewHtml && previewHtml !== lastPreviewHtml) {
+        lastPreviewHtml = previewHtml
+        onPreview(previewHtml)
+      }
+    })
+  }
+
+  const raw = await streamRaw(prompt, temperature)
+  try {
+    return normalizePrototypeModelResponse(raw, label)
+  } catch (firstError) {
+    console.warn(`[prototype] ${label} invalid streamed HTML, retrying repair:`, firstError)
+    const repairPrompt = buildPrototypeHtmlRepairPrompt(prompt, raw, errorMessageFromUnknown(firstError))
+    const repairedRaw = await streamRaw(repairPrompt, Math.min(temperature ?? 0.2, 0.2))
+    try {
+      return normalizePrototypeModelResponse(repairedRaw, `${label} 修复重试`)
+    } catch (secondError) {
+      throw new Error(`${label} 未生成可用 HTML：${errorMessageFromUnknown(secondError)}`)
+    }
+  }
+}
+
+async function createClaudePrototypeHtmlWithRepair(
+  prompt: string,
+  imageBlocks: Anthropic.ImageBlockParam[],
+  temperature: number | undefined,
+  label: string,
+) {
+  const createRaw = async (nextPrompt: string, nextTemperature: number | undefined) => {
+    const response = await anthropic!.messages.create({
+      model,
+      max_tokens: 8192,
+      temperature: nextTemperature === 1 ? undefined : nextTemperature,
+      messages: [{ role: 'user', content: buildContentWithImages(nextPrompt, imageBlocks) }],
+    })
+    return textFromClaudeContent(response.content)
+  }
+
+  const raw = await createRaw(prompt, temperature)
+  try {
+    return normalizePrototypeModelResponse(raw, label)
+  } catch (firstError) {
+    console.warn(`[prototype] ${label} invalid HTML, retrying repair:`, firstError)
+    const repairPrompt = buildPrototypeHtmlRepairPrompt(prompt, raw, errorMessageFromUnknown(firstError))
+    const repairedRaw = await createRaw(repairPrompt, Math.min(temperature ?? 0.2, 0.2))
+    try {
+      return normalizePrototypeModelResponse(repairedRaw, `${label} 修复重试`)
+    } catch (secondError) {
+      throw new Error(`${label} 未生成可用 HTML：${errorMessageFromUnknown(secondError)}`)
+    }
+  }
+}
+
 async function generateUpdateVariant(
   requirementState: UXRequirementState,
   currentHtml: string,
@@ -3722,10 +4597,9 @@ async function generateUpdateVariant(
 ): Promise<PrototypeVariantPayload> {
   const prompt = buildUpdatePrototypePrompt(requirementState, currentHtml, instruction, history, cfg.focus, imageBlocks.length > 0)
   if (usesOpenAiPrototypeProvider) {
-    const raw = await createOpenAiChatCompletionText(prompt, imageBlocks, cfg.temperature)
     return {
       index: cfg.index,
-      html: normalizePrototypeModelResponse(raw, 'GPT 原型更新'),
+      html: await createOpenAiPrototypeHtmlWithRepair(prompt, imageBlocks, cfg.temperature, 'GPT 原型更新'),
       mode: 'rewrite',
       status: 'complete',
       focus: cfg.focus,
@@ -3756,7 +4630,14 @@ async function generateUpdateVariant(
   }
 
   const raw = textFromClaudeContent(response.content)
-  const normalizedRaw = normalizePrototypeModelResponse(raw, 'Claude 原型更新')
+  let normalizedRaw: string
+  try {
+    normalizedRaw = normalizePrototypeModelResponse(raw, 'Claude 原型更新')
+  } catch (firstError) {
+    console.warn('[prototype] Claude 原型更新 invalid HTML, retrying repair:', firstError)
+    const repairPrompt = buildPrototypeHtmlRepairPrompt(prompt, raw, errorMessageFromUnknown(firstError))
+    normalizedRaw = await createClaudePrototypeHtmlWithRepair(repairPrompt, imageBlocks, Math.min(cfg.temperature ?? 0.2, 0.2), 'Claude 原型更新')
+  }
   return {
     index: cfg.index,
     html: normalizedRaw,
@@ -3772,13 +4653,13 @@ async function generateCreateVariant(
   requirementState: UXRequirementState,
   imageBlocks: Anthropic.ImageBlockParam[],
   cfg: { index: number; focus: string; temperature: number },
+  instruction?: string,
 ): Promise<PrototypeVariantPayload> {
-  const prompt = buildCreatePrototypePrompt(requirementState, imageBlocks.length > 0, cfg.focus)
+  const prompt = buildCreatePrototypePrompt(requirementState, imageBlocks.length > 0, cfg.focus, instruction)
   if (usesOpenAiPrototypeProvider) {
-    const raw = await createOpenAiChatCompletionText(prompt, imageBlocks, cfg.temperature)
     return {
       index: cfg.index,
-      html: normalizePrototypeModelResponse(raw, 'GPT 原型生成'),
+      html: await createOpenAiPrototypeHtmlWithRepair(prompt, imageBlocks, cfg.temperature, 'GPT 原型生成'),
       mode: 'create',
       status: 'complete',
       focus: cfg.focus,
@@ -3787,16 +4668,9 @@ async function generateCreateVariant(
     }
   }
 
-  const response = await anthropic!.messages.create({
-    model,
-    max_tokens: 8192,
-    temperature: cfg.temperature === 1 ? undefined : cfg.temperature,
-    messages: [{ role: 'user', content: buildContentWithImages(prompt, imageBlocks) }],
-  })
-  const raw = textFromClaudeContent(response.content)
   return {
     index: cfg.index,
-    html: normalizePrototypeModelResponse(raw, 'Claude 原型生成'),
+    html: await createClaudePrototypeHtmlWithRepair(prompt, imageBlocks, cfg.temperature, 'Claude 原型生成'),
     mode: 'create',
     status: 'complete',
     focus: cfg.focus,
@@ -3839,16 +4713,28 @@ async function streamPrototype(req: express.Request, res: express.Response) {
     let lastPreviewHtml = ''
     try {
       if (isUpdate) {
+        if (usesOpenAiPrototypeProvider) {
+          const prompt = buildUpdatePrototypePrompt(requirementState, normalizedCurrentHtml!, updateInstruction, updateHistory, cfg.focus, imageBlocks.length > 0)
+          const normalized = await streamOpenAiPrototypeHtmlWithRepair(prompt, imageBlocks, cfg.temperature, 'GPT 原型更新', (previewHtml) => {
+            writePrototypeEvent(res, { type: 'setCode', variantIndex: cfg.index, html: previewHtml, focus: cfg.focus, history: updateHistory })
+          })
+          const nextHistory = [...updateHistory, updateInstruction]
+          writePrototypeEvent(res, { type: 'setCode', variantIndex: cfg.index, html: normalized, focus: cfg.focus, history: nextHistory })
+          writePrototypeEvent(res, { type: 'variantComplete', variantIndex: cfg.index, html: normalized, focus: cfg.focus, history: nextHistory, mode: 'rewrite', appliedEdits: 0 })
+          return
+        }
+
         const variant = await generateUpdateVariant(requirementState, normalizedCurrentHtml!, updateInstruction, imageBlocks, cfg, updateHistory)
         writePrototypeEvent(res, { type: 'setCode', variantIndex: cfg.index, html: variant.html, focus: cfg.focus, history: variant.history })
         writePrototypeEvent(res, { type: 'variantComplete', variantIndex: cfg.index, html: variant.html, focus: cfg.focus, history: variant.history, mode: variant.mode, appliedEdits: variant.appliedEdits })
         return
       }
 
-      const prompt = buildCreatePrototypePrompt(requirementState, imageBlocks.length > 0, cfg.focus)
+      const prompt = buildCreatePrototypePrompt(requirementState, imageBlocks.length > 0, cfg.focus, updateInstruction)
       if (usesOpenAiPrototypeProvider) {
-        html = await streamOpenAiChatCompletionText(prompt, imageBlocks, cfg.temperature, () => undefined)
-        const normalized = normalizePrototypeModelResponse(html, 'GPT 原型生成')
+        const normalized = await streamOpenAiPrototypeHtmlWithRepair(prompt, imageBlocks, cfg.temperature, 'GPT 原型生成', (previewHtml) => {
+          writePrototypeEvent(res, { type: 'setCode', variantIndex: cfg.index, html: previewHtml, focus: cfg.focus })
+        })
         writePrototypeEvent(res, { type: 'setCode', variantIndex: cfg.index, html: normalized, focus: cfg.focus })
         writePrototypeEvent(res, { type: 'variantComplete', variantIndex: cfg.index, html: normalized, focus: cfg.focus, mode: 'create', appliedEdits: 0, history: [] })
         return
@@ -3875,7 +4761,7 @@ async function streamPrototype(req: express.Request, res: express.Response) {
       writePrototypeEvent(res, { type: 'variantComplete', variantIndex: cfg.index, html: normalized, focus: cfg.focus, mode: 'create', appliedEdits: 0, history: [] })
     } catch (err) {
       console.error(`[prototype] stream variant ${cfg.index} failed:`, err)
-      writePrototypeEvent(res, { type: 'variantError', variantIndex: cfg.index, focus: cfg.focus })
+      writePrototypeEvent(res, { type: 'variantError', variantIndex: cfg.index, focus: cfg.focus, message: errorMessageFromUnknown(err) })
     }
   }))
 
@@ -3919,7 +4805,7 @@ app.post('/api/prototype', async (req, res) => {
       const cfg = variantConfigs[index]
       if (result.status === 'fulfilled') return result.value
       console.error(`[prototype] update variant ${cfg.index} failed:`, result.reason)
-      return { index: cfg.index, html: null, mode: 'update', status: 'error', focus: cfg.focus, appliedEdits: 0, history: updateHistory }
+      return { index: cfg.index, html: null, mode: 'update', status: 'error', focus: cfg.focus, appliedEdits: 0, history: updateHistory, error: errorMessageFromUnknown(result.reason) }
     })
 
     res.json({ variants })
@@ -3930,14 +4816,14 @@ app.post('/api/prototype', async (req, res) => {
   const variantConfigs = buildVariantConfigs(clampVariantCount((req.body as PrototypeRequest).numVariants, DEFAULT_CREATE_VARIANTS))
 
   const settled = await Promise.allSettled(
-    variantConfigs.map((cfg) => generateCreateVariant(requirementState, imageBlocks, cfg)),
+    variantConfigs.map((cfg) => generateCreateVariant(requirementState, imageBlocks, cfg, updateInstruction)),
   )
 
   const variants: PrototypeVariantPayload[] = settled.map((result, index) => {
     const focus = variantConfigs[index].focus
     if (result.status === 'fulfilled') return result.value
     console.error(`[prototype] variant ${index} failed:`, result.reason)
-    return { index, html: null, mode: 'create', status: 'error', focus, appliedEdits: 0, history: [] }
+    return { index, html: null, mode: 'create', status: 'error', focus, appliedEdits: 0, history: [], error: errorMessageFromUnknown(result.reason) }
   })
 
   res.json({ variants })
@@ -4107,7 +4993,7 @@ function formatNodeSectionsForContext(sections: PrdNode['sections']) {
   ].join('\n')
 }
 
-function generateMarkdown(node: PrdNode): string {
+function generateMarkdown(node: PrdNode, tree?: Record<string, PrdNode>): string {
   const statusLabel = node.status === 'done' ? '已完成' : node.status === 'pending_refine' || node.needsPolish ? '待打磨' : '无需打磨'
   const lines = [
     `# ${node.label}`,
@@ -4156,6 +5042,25 @@ function generateMarkdown(node: PrdNode): string {
       }
     }
   }
+  if (tree) {
+    const foldedSections = buildDeliverySections(node, tree).filter((section) => section.sourceNodeIds.length > 0)
+    if (foldedSections.length) {
+      lines.push('', '## 折叠子节点补充')
+      for (const section of foldedSections) {
+        lines.push('', `### ${section.title}`, '', `> 来源节点：${section.sourceNodeIds.join(', ')}`)
+        if (section.summary) lines.push('', section.summary)
+        if (section.content) lines.push('', section.content)
+        if (section.evidenceRefs.length) {
+          lines.push('', '#### 证据引用')
+          for (const ref of section.evidenceRefs) {
+            lines.push(`- [${ref.sourceKind}] ${ref.sourceLabel}${ref.quote ? `：${ref.quote}` : ''}`)
+          }
+        }
+        if (section.openQuestions.length) lines.push('', '#### 需澄清点', ...section.openQuestions.map((item) => `- ${item}`))
+      }
+    }
+  }
+
   const performanceMarkdown = formatPerformanceSpecMarkdown(resolveNodePerformanceSpec(node))
   if (performanceMarkdown) {
     lines.push('', performanceMarkdown)
@@ -4166,6 +5071,31 @@ function generateMarkdown(node: PrdNode): string {
       lines.push(`- ${reference.label}${reference.targetNodeId ? ` → ${reference.targetNodeId}` : ''}${reference.reason ? `：${reference.reason}` : ''}`)
     }
   }
+  const backendContracts = collectBackendContracts(node, tree)
+  if (backendContracts.length) {
+    lines.push('', '## 服务端交互 / 依赖引用')
+    for (const contract of backendContracts) {
+      lines.push('', `### ${contract.title}`, '', `- 类型：${contract.kind}`)
+      if (contract.targetNodeId) lines.push(`- 目标节点：${contract.targetNodeId}`)
+      if (contract.summary) lines.push(`- 说明：${contract.summary}`)
+      if (contract.fields?.length) lines.push(`- 字段：${contract.fields.join('、')}`)
+      if (contract.evidenceRefs?.length) {
+        lines.push('', '#### 证据引用')
+        for (const ref of contract.evidenceRefs) {
+          lines.push(`- [${ref.sourceKind}] ${ref.sourceLabel}${ref.quote ? `：${ref.quote}` : ''}`)
+        }
+      }
+    }
+  }
+
+  const evidenceRefs = collectDeliveryEvidence(node, tree)
+  if (evidenceRefs.length) {
+    lines.push('', '## 汇总证据')
+    for (const ref of evidenceRefs) {
+      lines.push(`- [${ref.sourceKind}] ${ref.sourceLabel}${ref.quote ? `：${ref.quote}` : ''}`)
+    }
+  }
+
   if (node.techNotes) {
     lines.push('', '## 技术备注', '', node.techNotes)
   }
@@ -4263,8 +5193,7 @@ function resolveGeneratedSpecPath(docPath: string) {
 }
 
 function writeSpecFolder(tree: Record<string, PrdNode>) {
-  const nodes = Object.values(tree)
-  const pageNodes = nodes.filter((node) => node.type === 'page' && (node.children.length === 0 || hasNodeSections(node.sections)) && node.status === 'done')
+  const pageNodes = collectDeliveryNodes(tree).filter((node) => node.status === 'done')
   if (!pageNodes.length) throw new Error('没有找到已确认的页面 spec 节点')
   mkdirSync(SPEC_EXPORT_ROOT, { recursive: true })
   const pathByNodeId = new Map<string, string>()
@@ -4273,7 +5202,7 @@ function writeSpecFolder(tree: Record<string, PrdNode>) {
     const relativePath = uniqueExportPath(buildNodePath(node.id, tree), Object.fromEntries(documents.map((doc) => [doc.docPath, new Uint8Array()])))
     const target = resolveGeneratedSpecPath(relativePath)
     mkdirSync(path.dirname(target.resolved), { recursive: true })
-    writeFileSync(target.resolved, generateMarkdown({ ...node, docPath: target.relative }), 'utf-8')
+    writeFileSync(target.resolved, generateMarkdown({ ...node, docPath: target.relative }, tree), 'utf-8')
     pathByNodeId.set(node.id, target.relative)
     documents.push({ nodeId: node.id, docPath: target.relative })
   }
@@ -4304,7 +5233,7 @@ app.post('/api/export-node', (req, res) => {
   const filename = sanitizeDocPathSegment(`${node.id}-${sanitizeLabel(node.label)}.md`)
   res.setHeader('Content-Type', 'text/markdown; charset=utf-8')
   res.setHeader('Content-Disposition', contentDispositionHeader('inline', filename))
-  res.end(generateMarkdown(node))
+  res.end(generateMarkdown(node, tree))
 })
 
 app.post('/api/export-zip', (req, res) => {
@@ -4315,8 +5244,7 @@ app.post('/api/export-zip', (req, res) => {
     return
   }
 
-  const nodes = Object.values(tree)
-  const leafNodes = nodes.filter(n => (n.children.length === 0 || hasNodeSections(n.sections)) && (n.status === 'done' || !n.needsPolish))
+  const leafNodes = collectDeliveryNodes(tree).filter((node) => node.status === 'done' || !node.needsPolish)
 
   if (leafNodes.length === 0) {
     res.status(400).json({ error: '没有找到可导出的文档包节点' })
@@ -4330,7 +5258,7 @@ app.post('/api/export-zip', (req, res) => {
   for (const node of leafNodes) {
     const path = uniqueExportPath(buildNodePath(node.id, tree), files)
     pathByNodeId.set(node.id, path)
-    const content = generateMarkdown(node)
+    const content = generateMarkdown(node, tree)
     files[path] = Buffer.from(content, 'utf-8')
   }
   files['00-INDEX.md'] = Buffer.from(generateIndexMarkdown(leafNodes, tree, pathByNodeId), 'utf-8')
