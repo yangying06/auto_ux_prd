@@ -19,6 +19,7 @@ import { createProjectWorkspaceSnapshot } from '../lib/archiveSnapshot'
 import { AddNodeModal, type AddNodePayload } from '../components/map/AddNodeModal'
 import { buildDeliveryDisplayTree, collectDeliveryNodes, isDeliveryNode } from '../lib/prdNodeDelivery'
 import { EnvironmentConfigModal } from '../components/map/EnvironmentConfigModal'
+import { AssetWorkbenchModal } from '../components/map/AssetWorkbenchModal'
 
 type Stage = 'upload' | 'preview' | 'decomposing' | 'error' | 'map'
 
@@ -145,6 +146,7 @@ export function MapPage() {
   const [isPrototypeModalOpen, setIsPrototypeModalOpen] = useState(false)
   const [selectedPrototypeNodeId, setSelectedPrototypeNodeId] = useState<string | null>(null)
   const [environmentConfigOpen, setEnvironmentConfigOpen] = useState(false)
+  const [assetWorkbenchOpen, setAssetWorkbenchOpen] = useState(false)
   const [environmentStatus, setEnvironmentStatus] = useState<AiEnvironmentConfig | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -657,6 +659,7 @@ export function MapPage() {
           onValidatePrototype={() => { void handleOpenProjectPrototype() }}
           canValidatePrototype={canValidatePrototype}
           prototypeValidationRiskCount={incompleteCompletionTargets.length}
+          onOpenAssets={() => setAssetWorkbenchOpen(true)}
           onOpenQa={handleOpenQaFromToolbar}
           qaOpenIssueCount={qaOpenIssueCount}
         />
@@ -724,6 +727,11 @@ export function MapPage() {
           onApplyAllSuggestions={handleApplyAllAddNodeSuggestions}
         />
         {environmentConfigModal}
+        <AssetWorkbenchModal
+          isOpen={assetWorkbenchOpen}
+          baseUrl={settings.proxyBaseUrl}
+          onClose={() => setAssetWorkbenchOpen(false)}
+        />
         {isPrototypeModalOpen ? (
           <div className="fixed inset-0 z-[140] flex items-center justify-center bg-black/70 p-md backdrop-blur-sm md:p-lg">
             <section className="flex h-[92vh] w-[min(1280px,96vw)] flex-col overflow-hidden rounded-xl border border-outline-variant bg-surface shadow-2xl">

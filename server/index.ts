@@ -4,7 +4,7 @@ import dotenv from 'dotenv'
 import express from 'express'
 import { strFromU8, unzipSync, zipSync } from 'fflate'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { copyFileSync, type Dirent, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { applyPerformanceAnswerFast, formatPerformanceSpecForPrompt, formatPerformanceSpecMarkdown, normalizePerformanceSpec, resolveNodePerformanceSpec } from '../src/lib/performanceOrchestration'
 import { defaultAudienceForSpecLens, formatSectionTitle, formatSpecLens, hasNodeSections, normalizeLegacyAudience, normalizeNodeLensFields, normalizeSectionKeyForLens, normalizeSpecLensValue, resolveNodeAudience, resolveNodeSpecLens, specLensFromLegacyAudience } from '../src/lib/prdNodeLens'
@@ -12,12 +12,14 @@ import { buildDeliverySections, collectBackendContracts, collectDeliveryEvidence
 import { buildUiOnlyPrototypeInstruction, isUiOnlyPrototypeFeedback } from '../src/lib/nodeChatIntent'
 import { applyPrototypeEdit, normalizeGeneratedPrototypeHtml, normalizePrototypeHtml } from '../src/lib/prototypeUtils'
 import type { UXRequirementState } from '../src/types/uxRequirement'
+import type { PrototypeAssetAuditIssue, PrototypeAssetManifest } from '../src/types/prototypeAssets'
 import type { DocumentKeywordSignal, DocumentSourceIndex, DocumentSourceIssue, DocumentSourceSection, MapAdjustmentOperation, PrdImportCandidateNode, PrdImportPreview, PrdNode, PrdNodeAudience, PrdNodeBackendContractKind, PrdNodeBackendContractRef, PrdNodeEvidenceRef, PrdNodeOperationPatch, PrdNodeOperationSuggestion, PrdNodeReference, PrdNodeSourceKind, PrdNodeStatus } from '../src/types/prdNode'
 import type { ReferenceImageClassificationRequest, ReferenceImageClassificationResponse, ReferenceImageRole } from '../src/types/chat'
 import type { QaAttachment, QaChatRequest, QaChatResponse, QaIssuePatch, QaIssuePriority, QaIssueSeverity } from '../src/types/qa'
 import { contentDispositionHeader } from './exportHeaders'
 import { collectFigmaNumericTextSlots, redactNumericTextFromPng } from './figmaNumericText'
 import { extractNodeChatSuffix } from './nodeChatResponse'
+import { auditPrototypeAssets, buildPrototypeAssetManifestSection, normalizePrototypeAssetManifest } from './prototypeAssetAudit'
 import { buildVariantConfigs, clampVariantCount, DEFAULT_CREATE_VARIANTS, DEFAULT_UPDATE_VARIANTS } from './prototypePrompts'
 import type { FigmaNumericTextSlot } from './figmaNumericText'
 
@@ -49,7 +51,10 @@ const LARGE_PRD_DECOMPOSE_THRESHOLD = 30 * 1024
 const LARGE_PRD_SLICE_TARGET_LENGTH = 12 * 1024
 const SOURCE_OUTLINE_ROOT_ID = 'SOURCE_OUTLINE_ROOT'
 const SPEC_EXPORT_ROOT = path.resolve(process.cwd(), 'generated', 'specs')
+const ASSET_WORKBENCH_CACHE_ROOT = path.resolve(process.cwd(), '.cache')
 const FIGMA_ASSET_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'figma-assets')
+const FIGMA_INTERMEDIATE_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'figma-intermediates')
+const EFFECT_ASSET_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'effect-assets')
 const figmaApiBaseUrl = (process.env.FIGMA_API_BASE_URL ?? 'https://api.figma.com').replace(/\/+$/, '')
 const figma2PrefabBaseUrl = (process.env.FIGMA2PREFAB_BASE_URL ?? 'http://43.134.44.85:3000').replace(/\/+$/, '')
 const figma2PrefabConvertPath = process.env.FIGMA2PREFAB_CONVERT_PATH ?? '/api/convert'
@@ -61,6 +66,8 @@ const FIGMA_ASSET_BUNDLE_TTL_MS = Number.parseInt(process.env.FIGMA_ASSET_BUNDLE
 const FIGMA_EXTRACT_MAX_IMAGES = Math.min(8, Math.max(2, Number.parseInt(process.env.FIGMA_EXTRACT_MAX_IMAGES ?? '4', 10)))
 const FIGMA_IMAGE_SCALE = Math.min(3, Math.max(0.5, Number.parseFloat(process.env.FIGMA_IMAGE_SCALE ?? '1.25')))
 const FIGMA_MAX_IMAGE_BYTES = Math.max(512 * 1024, Number.parseInt(process.env.FIGMA_MAX_IMAGE_BYTES ?? `${4 * 1024 * 1024}`, 10))
+const EFFECT_SCAN_MAX_DEPTH = Math.max(1, Number.parseInt(process.env.EFFECT_SCAN_MAX_DEPTH ?? '5', 10))
+const EFFECT_SCAN_MAX_FILES = Math.max(20, Number.parseInt(process.env.EFFECT_SCAN_MAX_FILES ?? '1200', 10))
 
 interface FigmaAssetBundle {
   createdAt: number
@@ -238,11 +245,30 @@ interface PrototypeRequest {
   variantIndex?: number | null
   history?: string[] | null
   stream?: boolean | null
+  assetManifest?: PrototypeAssetManifest | null
 }
 
 interface FigmaFrameRequest {
   url?: string
   token?: string
+}
+
+type UiAssetKind = 'interface' | 'image_set'
+type UiAssetParseMode = 'intermediate' | 'image_set'
+type EffectAssetKind = 'spine' | 'particle' | 'sequence' | 'prefab' | 'audio' | 'texture' | 'scripted' | 'unknown'
+type EffectAssetPreviewType = 'image' | 'sequence' | 'video' | 'audio'
+
+interface UiAssetFigmaParseRequest extends FigmaFrameRequest {
+  kind?: UiAssetKind
+}
+
+interface ParsedFigmaAssetFile {
+  name: string
+  path: string
+  url?: string | null
+  width?: number | null
+  height?: number | null
+  type?: string | null
 }
 
 interface FigmaExtractedImage {
@@ -265,8 +291,12 @@ interface FigmaFrameResponse {
   panelName: string
   sourceUrl: string
   summary: string
+  thumbnailUrl?: string | null
   images: FigmaExtractedImage[]
   imageCount: number
+  bundleId?: string
+  outputDir?: string | null
+  files?: ParsedFigmaAssetFile[]
 }
 
 interface FigmaPrefabFrameResponse {
@@ -275,11 +305,95 @@ interface FigmaPrefabFrameResponse {
   panelName: string
   taskId: string | null
   sourceUrl: string
+  thumbnailUrl?: string | null
   html: string
   summary: string
   uiSpecPath: string
+  uiSpecZipPath?: string
+  manifestPath: string | null
+  manifestZipPath?: string | null
+  outputDir: string | null
+  zipPath: string | null
+  assetsDir: string | null
+  bundleId: string
+  files: ParsedFigmaAssetFile[]
   assetCount: number
   zipFileCount: number
+}
+
+interface UiAssetParseResult {
+  fileKey: string
+  nodeId: string
+  panelName: string
+  sourceUrl: string
+  summary: string
+  thumbnailUrl?: string | null
+  parseMode: UiAssetParseMode
+  outputDir?: string | null
+  zipPath?: string | null
+  uiSpecPath?: string | null
+  manifestPath?: string | null
+  assetsDir?: string | null
+  html?: string | null
+  assetCount: number
+  zipFileCount?: number | null
+  imageCount?: number | null
+  files: ParsedFigmaAssetFile[]
+}
+
+interface EffectAssetFile {
+  name: string
+  path: string
+  ext: string
+  size: number
+  loadedPath?: string | null
+  previewUrl?: string | null
+}
+
+interface EffectAssetPreviewFile {
+  name: string
+  ext: string
+  url: string
+}
+
+interface EffectAssetRow {
+  id: string
+  name: string
+  kind: EffectAssetKind
+  sourceRoot: string
+  relativePath: string
+  localPath: string
+  purpose: string
+  usageNote: string
+  pageHint: string
+  implementationHint: string
+  linkedNodeIds: string[]
+  status: 'ready'
+  loadStatus: 'not_loaded' | 'loading' | 'loaded' | 'error'
+  loadError: string | null
+  loadedRoot: string | null
+  loadedPath: string | null
+  loadedFileCount: number
+  loadedBytes: number
+  loadedAt: string | null
+  previewType: EffectAssetPreviewType | null
+  previewUrl: string | null
+  previewFiles: EffectAssetPreviewFile[]
+  fileCount: number
+  files: EffectAssetFile[]
+  createdAt: string
+  updatedAt: string
+}
+
+interface EffectAssetScanRequest {
+  rootPath?: unknown
+  smartNotes?: unknown
+  contextHints?: unknown
+}
+
+interface EffectAssetScanOptions {
+  smartNotes?: boolean
+  contextHints?: string[]
 }
 
 type PrototypeVariantMode = 'create' | 'update' | 'rewrite'
@@ -293,6 +407,7 @@ interface PrototypeVariantPayload {
   appliedEdits: number
   history?: string[]
   error?: string
+  assetAudit?: PrototypeAssetAuditIssue[]
 }
 
 interface NodeChatRequest {
@@ -3010,6 +3125,86 @@ app.post('/api/figma/frame-prefab', async (req, res) => {
   }
 })
 
+app.post('/api/assets/ui/figma', async (req, res) => {
+  try {
+    const payload = req.body as UiAssetFigmaParseRequest
+    const kind = normalizeUiAssetKind(payload.kind)
+    const parseMode = parseModeForUiAssetKind(kind)
+    const assetBaseUrl = `${req.protocol}://${req.get('host') ?? `127.0.0.1:${port}`}`
+
+    if (parseMode === 'intermediate') {
+      const result = await importFigmaFrameFromPrefab(payload, assetBaseUrl, { buildHtml: true })
+      res.json(buildUiAssetParseResultFromPrefab(result, parseMode, true))
+      return
+    }
+
+    const imageSet = await importFigmaFrame(payload, assetBaseUrl)
+    res.json(buildUiAssetParseResultFromImageSet(imageSet, parseMode, false))
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : '解析 UI 素材失败。' })
+  }
+})
+
+app.post('/api/assets/effects/scan', (req, res) => {
+  try {
+    const payload = req.body as EffectAssetScanRequest
+    res.json(scanEffectAssetRoot(payload.rootPath, {
+      smartNotes: payload.smartNotes === true,
+      contextHints: normalizeStringArray(payload.contextHints),
+    }))
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : '扫描特效资源目录失败。' })
+  }
+})
+
+app.post('/api/assets/effects/load', (req, res) => {
+  try {
+    const assetBaseUrl = `${req.protocol}://${req.get('host') ?? `127.0.0.1:${port}`}`
+    res.json(loadEffectAssetRow((req.body as { row?: unknown }).row, assetBaseUrl))
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : '加载特效资源失败。' })
+  }
+})
+
+app.post('/api/assets/open-local-path', async (_req, res) => {
+  try {
+    mkdirSync(ASSET_WORKBENCH_CACHE_ROOT, { recursive: true })
+    mkdirSync(FIGMA_ASSET_CACHE_ROOT, { recursive: true })
+    mkdirSync(FIGMA_INTERMEDIATE_CACHE_ROOT, { recursive: true })
+    mkdirSync(EFFECT_ASSET_CACHE_ROOT, { recursive: true })
+    await openLocalPath(ASSET_WORKBENCH_CACHE_ROOT)
+    res.json({ ok: true, path: ASSET_WORKBENCH_CACHE_ROOT })
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : '打开资源缓存目录失败。' })
+  }
+})
+
+app.get(/^\/api\/assets\/effects\/file\/(.+)$/u, (req, res) => {
+  const params = req.params as unknown as { 0?: string }
+  const rawRelativePath = params[0]
+  if (!rawRelativePath) {
+    res.status(400).json({ error: '缺少特效资源路径。' })
+    return
+  }
+
+  const relativePath = normalizeZipPath(decodeURIComponent(rawRelativePath))
+  const ext = path.extname(relativePath).toLowerCase()
+  if (!EFFECT_PREVIEW_EXTENSIONS.has(ext)) {
+    res.status(400).json({ error: '该文件类型不允许作为特效预览。' })
+    return
+  }
+
+  const filePath = resolveEffectCacheFilePath(EFFECT_ASSET_CACHE_ROOT, relativePath)
+  if (!filePath || !existsSync(filePath) || !statSync(filePath).isFile()) {
+    res.status(404).json({ error: '未找到特效预览文件。' })
+    return
+  }
+
+  res.setHeader('Content-Type', mimeTypeForPath(filePath))
+  res.setHeader('Cache-Control', 'private, max-age=86400')
+  res.end(readFileSync(filePath))
+})
+
 app.get(/^\/api\/figma\/assets\/([^/]+)\/(.+)$/u, (req, res) => {
   const params = req.params as unknown as { 0?: string; 1?: string }
   const bundleId = params[0]
@@ -3455,7 +3650,7 @@ ${assets.map((asset, index) => `${index + 1}. ${asset.type}｜${asset.label}\n  
 - 这些 URL 来自当前本地代理 \`/api/figma/assets/\`，允许在预览 HTML 中直接引用。`
 }
 
-function buildCreatePrototypePrompt(requirementState: UXRequirementState, hasImages = false, focus?: string, instruction?: string) {
+function buildCreatePrototypePrompt(requirementState: UXRequirementState, hasImages = false, focus?: string, instruction?: string, assetManifest?: PrototypeAssetManifest | null) {
   const focusSection = focus
     ? `\n## 本变体设计侧重\n${focus}\n（这是同一需求的多个备选方案之一，请在满足上述需求与约束的前提下，按本侧重做出有辨识度的设计。）\n`
     : ''
@@ -3464,7 +3659,7 @@ function buildCreatePrototypePrompt(requirementState: UXRequirementState, hasIma
     : ''
   return `你是 GameUX PromptForge 的游戏 UX 原型生成专家。根据以下 UX 需求状态${hasImages ? '和参考图' : ''}，生成一个可直接预览的自包含 HTML 原型。
 
-${buildPrototypeSpec(requirementState)}${buildFigmaAssetUsageSection(requirementState)}
+${buildPrototypeSpec(requirementState)}${buildFigmaAssetUsageSection(requirementState)}${buildPrototypeAssetManifestSection(assetManifest)}
 ${instructionSection}${hasImages ? `\n${buildScreenshotFidelitySection()}` : ''}${buildFigmaEvidencePolicySection(hasImages)}${focusSection}
 ## 尺寸契约
 - 预览沙盒按参考项目的手机适配方式提供 375px CSS 固定宽度；默认验收视口按 375x812 设计。
@@ -3488,14 +3683,14 @@ ${instructionSection}${hasImages ? `\n${buildScreenshotFidelitySection()}` : ''}
 10. 所有用户可见界面文字、按钮文案和状态提示必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。`
 }
 
-function buildUpdatePrototypePrompt(requirementState: UXRequirementState, currentHtml: string, instruction: string, history: string[] = [], focus?: string, hasImages = false) {
+function buildUpdatePrototypePrompt(requirementState: UXRequirementState, currentHtml: string, instruction: string, history: string[] = [], focus?: string, hasImages = false, assetManifest?: PrototypeAssetManifest | null) {
   const historySection = history.length > 0
     ? `\n## 当前变体历史修改指令\n${history.map((item, index) => `${index + 1}. ${item}`).join('\n')}\n`
     : ''
   const focusSection = focus ? `\n## 本次更新侧重\n${focus}\n` : ''
   return `你是 GameUX PromptForge 的原型迭代代理。请根据用户的修改说明，对当前 HTML 原型做最小必要修改。
 
-${buildPrototypeSpec(requirementState)}${buildFigmaAssetUsageSection(requirementState)}${buildFigmaEvidencePolicySection(hasImages)}${historySection}${focusSection}
+${buildPrototypeSpec(requirementState)}${buildFigmaAssetUsageSection(requirementState)}${buildPrototypeAssetManifestSection(assetManifest)}${buildFigmaEvidencePolicySection(hasImages)}${historySection}${focusSection}
 
 ## 用户修改说明
 ${instruction}
@@ -3833,6 +4028,16 @@ async function downloadFigmaImageBytes(imageUrl: string, label: string) {
   }
 }
 
+async function renderFigmaThumbnailAsset(fileKey: string, nodeId: string, token: string, assetBaseUrl: string, name: string) {
+  const imageUrl = await fetchFigmaImageUrl(fileKey, token, nodeId, 0.35)
+  const image = await downloadFigmaImageBytes(imageUrl, 'Figma 缩略图')
+  const ext = extensionForMediaType(image.mediaType)
+  const safeNodeId = nodeId.replace(/[^a-z0-9_-]+/giu, '-').replace(/-+/g, '-')
+  const assetPath = `figma-thumbnail/${sanitizeFigmaAssetName(name)}-${safeNodeId}.${ext}`
+  const bundleId = registerFigmaAssetBundle({ [assetPath]: image.bytes })
+  return buildAssetUrl(assetBaseUrl, bundleId, assetPath)
+}
+
 async function importFigmaFrame(payload: FigmaFrameRequest, assetBaseUrl: string): Promise<FigmaFrameResponse> {
   const rawUrl = payload.url?.trim()
   if (!rawUrl) throw new Error('请填写 Figma Frame 链接。')
@@ -3897,6 +4102,7 @@ async function importFigmaFrame(payload: FigmaFrameRequest, assetBaseUrl: string
 
   const files = Object.fromEntries(downloaded.map((image) => [image.assetPath, image.bytes]))
   const bundleId = registerFigmaAssetBundle(files)
+  const outputDir = path.resolve(FIGMA_ASSET_CACHE_ROOT, bundleId, 'figma-export')
   const images = downloaded.map((image): FigmaExtractedImage => ({
     nodeId: image.candidate.node.id,
     name: image.candidate.node.name || (image.candidate.isRoot ? 'Selected Frame' : 'Figma Child'),
@@ -3911,6 +4117,7 @@ async function importFigmaFrame(payload: FigmaFrameRequest, assetBaseUrl: string
     numericTextSlots: image.numericTextSlots,
   }))
   const hasRootImage = images.some((image) => image.depth === 0)
+  const thumbnailUrl = images.find((image) => image.depth === 0)?.assetUrl ?? images[0]?.assetUrl ?? null
   const childCount = images.filter((image) => image.depth > 0).length
   const numericSlotCount = images.reduce((sum, image) => sum + image.numericTextSlots.length, 0)
   const panelName = root.name || 'Figma Frame'
@@ -3922,8 +4129,19 @@ async function importFigmaFrame(payload: FigmaFrameRequest, assetBaseUrl: string
     nodeId,
     panelName,
     sourceUrl,
+    thumbnailUrl,
     images,
     imageCount: images.length,
+    bundleId,
+    outputDir,
+    files: images.map((image) => ({
+      name: image.name,
+      path: resolveCachedFigmaAssetPath(bundleId, image.assetPath) ?? image.assetPath,
+      url: image.assetUrl,
+      width: image.width,
+      height: image.height,
+      type: image.type,
+    })),
     summary: `已从 Figma 直接提取「${panelName}」视觉证据：${hasRootImage ? '整帧 1 张、' : ''}子图 ${childCount} 张${skippedText}${numericText}。将结合当前 PRD 节点内容流式生成 HTML 原型。`,
   }
 }
@@ -3995,6 +4213,16 @@ function safeZipPathSegments(value: string) {
   return segments.length > 0 && segments.every((segment) => segment !== '.' && segment !== '..') ? segments : null
 }
 
+function isZipDirectoryEntry(filePath: string, files: Record<string, Uint8Array>) {
+  const normalized = normalizeZipPath(filePath).replace(/\/+$/u, '')
+  if (!normalized) return true
+  if (/\/$/u.test(normalizeZipPath(filePath))) return true
+  return Object.keys(files).some((otherPath) => {
+    const other = normalizeZipPath(otherPath).replace(/\/+$/u, '')
+    return other !== normalized && other.startsWith(`${normalized}/`)
+  })
+}
+
 function resolveCachedFigmaAssetPath(bundleId: string, assetPath: string) {
   if (!/^[a-z0-9-]+$/iu.test(bundleId)) return null
   const segments = safeZipPathSegments(assetPath)
@@ -4006,6 +4234,7 @@ function resolveCachedFigmaAssetPath(bundleId: string, assetPath: string) {
 
 function persistFigmaAssetBundleFiles(bundleId: string, files: Record<string, Uint8Array>) {
   for (const [filePath, bytes] of Object.entries(files)) {
+    if (isZipDirectoryEntry(filePath, files)) continue
     const resolved = resolveCachedFigmaAssetPath(bundleId, filePath)
     if (!resolved) continue
     mkdirSync(path.dirname(resolved), { recursive: true })
@@ -4028,6 +4257,11 @@ function mimeTypeForPath(filePath: string) {
   if (ext === 'webp') return 'image/webp'
   if (ext === 'gif') return 'image/gif'
   if (ext === 'svg') return 'image/svg+xml'
+  if (ext === 'mp4') return 'video/mp4'
+  if (ext === 'webm') return 'video/webm'
+  if (ext === 'mp3') return 'audio/mpeg'
+  if (ext === 'wav') return 'audio/wav'
+  if (ext === 'ogg') return 'audio/ogg'
   return 'image/png'
 }
 
@@ -4157,6 +4391,641 @@ function buildAssetUrl(baseUrl: string, bundleId: string, filePath: string) {
   return `${baseUrl.replace(/\/+$/, '')}/api/figma/assets/${encodeURIComponent(bundleId)}/${normalizeZipPath(filePath).split('/').map(encodeURIComponent).join('/')}`
 }
 
+function sanitizeLocalFileStem(value: string | null | undefined, fallback: string) {
+  const sanitized = String(value ?? '')
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .slice(0, 80)
+    .replace(/^-|-$/g, '')
+  return sanitized || fallback
+}
+
+function resolveWithinRoot(root: string, segments: string[]) {
+  const resolved = path.resolve(root, ...segments)
+  const normalizedRoot = path.resolve(root)
+  return resolved === normalizedRoot || resolved.startsWith(`${normalizedRoot}${path.sep}`) ? resolved : null
+}
+
+function localIntermediateFilePath(extractedRoot: string, filePath: string) {
+  const segments = safeZipPathSegments(filePath)
+  return segments ? resolveWithinRoot(extractedRoot, segments) : null
+}
+
+function persistFigmaIntermediateBundle(
+  bundleId: string,
+  panelName: string,
+  zipBytes: Uint8Array,
+  files: Record<string, Uint8Array>,
+) {
+  const bundleRoot = path.resolve(FIGMA_INTERMEDIATE_CACHE_ROOT, bundleId)
+  const extractedRoot = path.resolve(bundleRoot, 'extracted')
+  mkdirSync(extractedRoot, { recursive: true })
+
+  for (const [filePath, bytes] of Object.entries(files)) {
+    if (isZipDirectoryEntry(filePath, files)) continue
+    const resolved = localIntermediateFilePath(extractedRoot, filePath)
+    if (!resolved) continue
+    mkdirSync(path.dirname(resolved), { recursive: true })
+    writeFileSync(resolved, bytes)
+  }
+
+  const zipPath = path.resolve(bundleRoot, `${sanitizeLocalFileStem(panelName, 'figma-ui')}.zip`)
+  mkdirSync(path.dirname(zipPath), { recursive: true })
+  writeFileSync(zipPath, zipBytes)
+
+  return { bundleRoot, extractedRoot, zipPath }
+}
+
+function findManifestZipPath(files: Record<string, Uint8Array>, uiSpecPath: string) {
+  const lookup = buildZipLookup(files)
+  const folder = normalizeZipPath(uiSpecPath).replace(/\/?ui_spec\.json$/iu, '')
+  const expected = folder ? `${folder}/export_manifest.json` : 'export_manifest.json'
+  if (files[expected]) return expected
+  const byLookup = lookup.get(expected.toLowerCase())
+  if (byLookup) return byLookup
+  return Object.keys(files).find((filePath) => /(^|\/)export_manifest\.json$/iu.test(normalizeZipPath(filePath))) ?? null
+}
+
+function buildPrefabParsedFiles(
+  spec: UiSpecDocument,
+  uiSpecZipPath: string,
+  manifestZipPath: string | null,
+  bundleId: string,
+  assetBaseUrl: string,
+  extractedRoot: string,
+) {
+  const folder = normalizeZipPath(uiSpecZipPath).replace(/\/?ui_spec\.json$/iu, '')
+  const parsedFiles: ParsedFigmaAssetFile[] = [
+    {
+      name: 'ui_spec.json',
+      path: localIntermediateFilePath(extractedRoot, uiSpecZipPath) ?? uiSpecZipPath,
+      url: buildAssetUrl(assetBaseUrl, bundleId, uiSpecZipPath),
+      type: 'json',
+    },
+  ]
+
+  if (manifestZipPath) {
+    parsedFiles.push({
+      name: 'export_manifest.json',
+      path: localIntermediateFilePath(extractedRoot, manifestZipPath) ?? manifestZipPath,
+      url: buildAssetUrl(assetBaseUrl, bundleId, manifestZipPath),
+      type: 'json',
+    })
+  }
+
+  for (const asset of spec.assets ?? []) {
+    if (!asset.name || !asset.path) continue
+    const assetZipPath = folder ? `${folder}/${asset.path}` : asset.path
+    parsedFiles.push({
+      name: asset.name,
+      path: localIntermediateFilePath(extractedRoot, assetZipPath) ?? assetZipPath,
+      url: buildAssetUrl(assetBaseUrl, bundleId, assetZipPath),
+      type: asset.format ?? (path.extname(asset.path).replace(/^\./, '') || 'asset'),
+    })
+  }
+
+  return parsedFiles
+}
+
+function buildFigmaImageSetHtml(frame: FigmaFrameResponse) {
+  const hero = frame.images.find((image) => image.depth === 0) ?? frame.images[0]
+  if (!hero) return null
+  const designWidth = Math.max(1, Math.round(hero.width || 375))
+  const designHeight = Math.max(1, Math.round(hero.height || 812))
+  const imageStrip = frame.images
+    .slice(0, 8)
+    .map((image) => `<img src="${escapeAttr(image.assetUrl)}" alt="${escapeAttr(image.name)}" />`)
+    .join('')
+
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${escapeHtml(frame.panelName)} Figma HTML Fallback</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100vh; background: #05070d; color: #f5f5f5; font-family: Inter, "PingFang SC", "Microsoft YaHei", Arial, sans-serif; }
+    body { display: flex; justify-content: center; align-items: flex-start; padding: 16px; }
+    main { width: min(100vw - 32px, ${designWidth}px); }
+    .stage { width: 100%; aspect-ratio: ${designWidth} / ${designHeight}; background: #111; overflow: hidden; position: relative; }
+    .stage > img { width: 100%; height: 100%; object-fit: contain; display: block; }
+    .strip { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; margin-top: 12px; }
+    .strip img { width: 100%; aspect-ratio: 1; object-fit: contain; background: #111; border: 1px solid rgba(255,255,255,.12); border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="stage"><img src="${escapeAttr(hero.assetUrl)}" alt="${escapeAttr(hero.name)}" /></section>
+    <section class="strip" aria-label="Figma extracted assets">${imageStrip}</section>
+  </main>
+</body>
+</html>`
+}
+
+function normalizeUiAssetKind(value: unknown): UiAssetKind {
+  return value === 'image_set' || value === 'component' ? 'image_set' : 'interface'
+}
+
+function parseModeForUiAssetKind(kind: UiAssetKind): UiAssetParseMode {
+  return kind === 'interface' ? 'intermediate' : 'image_set'
+}
+
+function buildUiAssetParseResultFromImageSet(frame: FigmaFrameResponse, parseMode: UiAssetParseMode, includeHtml: boolean): UiAssetParseResult {
+  const html = includeHtml ? buildFigmaImageSetHtml(frame) : null
+  return {
+    fileKey: frame.fileKey,
+    nodeId: frame.nodeId,
+    panelName: frame.panelName,
+    sourceUrl: frame.sourceUrl,
+    summary: html ? `${frame.summary} 已生成 HTML 保底预览。` : frame.summary,
+    thumbnailUrl: frame.thumbnailUrl ?? frame.images.find((image) => image.depth === 0)?.assetUrl ?? frame.images[0]?.assetUrl ?? null,
+    parseMode,
+    outputDir: frame.outputDir ?? null,
+    zipPath: null,
+    uiSpecPath: null,
+    manifestPath: null,
+    assetsDir: frame.outputDir ?? null,
+    html,
+    assetCount: frame.imageCount,
+    zipFileCount: null,
+    imageCount: frame.imageCount,
+    files: frame.files ?? frame.images.map((image) => ({
+      name: image.name,
+      path: image.assetPath,
+      url: image.assetUrl,
+      width: image.width,
+      height: image.height,
+      type: image.type,
+    })),
+  }
+}
+
+function buildUiAssetParseResultFromPrefab(frame: FigmaPrefabFrameResponse, parseMode: UiAssetParseMode, includeHtml: boolean): UiAssetParseResult {
+  return {
+    fileKey: frame.fileKey,
+    nodeId: frame.nodeId,
+    panelName: frame.panelName,
+    sourceUrl: frame.sourceUrl,
+    summary: frame.summary,
+    thumbnailUrl: frame.thumbnailUrl ?? null,
+    parseMode,
+    outputDir: frame.outputDir,
+    zipPath: frame.zipPath,
+    uiSpecPath: frame.uiSpecPath,
+    manifestPath: frame.manifestPath,
+    assetsDir: frame.assetsDir,
+    html: includeHtml ? frame.html : null,
+    assetCount: frame.assetCount,
+    zipFileCount: frame.zipFileCount,
+    imageCount: frame.assetCount,
+    files: frame.files,
+  }
+}
+
+const EFFECT_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif'])
+const EFFECT_AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg'])
+const EFFECT_VIDEO_EXTENSIONS = new Set(['.mp4', '.webm'])
+const EFFECT_PREVIEW_EXTENSIONS = new Set([
+  ...EFFECT_IMAGE_EXTENSIONS,
+  ...EFFECT_AUDIO_EXTENSIONS,
+  ...EFFECT_VIDEO_EXTENSIONS,
+])
+
+interface ScannedEffectFile {
+  absolutePath: string
+  relativePath: string
+  dirRelativePath: string
+  name: string
+  ext: string
+  size: number
+}
+
+function hashId(value: string) {
+  let hash = 2166136261
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(36)
+}
+
+function normalizeEffectRelativePath(root: string, absolutePath: string) {
+  return path.relative(root, absolutePath).replace(/\\/g, '/')
+}
+
+function collectEffectFiles(root: string) {
+  const files: ScannedEffectFile[] = []
+  let truncated = false
+
+  function walk(current: string, depth: number) {
+    if (files.length >= EFFECT_SCAN_MAX_FILES) {
+      truncated = true
+      return
+    }
+
+    let entries: Dirent[]
+    try {
+      entries = readdirSync(current, { withFileTypes: true })
+    } catch {
+      return
+    }
+
+    for (const entry of entries.sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))) {
+      if (files.length >= EFFECT_SCAN_MAX_FILES) {
+        truncated = true
+        return
+      }
+      const absolutePath = path.join(current, entry.name)
+      if (entry.isDirectory()) {
+        if (depth < EFFECT_SCAN_MAX_DEPTH) walk(absolutePath, depth + 1)
+        continue
+      }
+      if (!entry.isFile()) continue
+      let stat
+      try {
+        stat = statSync(absolutePath)
+      } catch {
+        continue
+      }
+      const relativePath = normalizeEffectRelativePath(root, absolutePath)
+      files.push({
+        absolutePath,
+        relativePath,
+        dirRelativePath: path.dirname(relativePath).replace(/\\/g, '/').replace(/^\.$/u, ''),
+        name: entry.name,
+        ext: path.extname(entry.name).toLowerCase(),
+        size: stat.size,
+      })
+    }
+  }
+
+  walk(root, 0)
+  return { files, truncated }
+}
+
+function effectGroupKey(file: ScannedEffectFile) {
+  if (file.dirRelativePath) return file.dirRelativePath
+  return file.relativePath.replace(/\.[^.]+$/u, '')
+}
+
+function displayNameFromEffectKey(key: string) {
+  const base = path.basename(key) || key
+  return base.replace(/\.[^.]+$/u, '')
+}
+
+function inferEffectKind(name: string, files: ScannedEffectFile[]): EffectAssetKind {
+  const text = `${name} ${files.map((file) => file.name).join(' ')}`.toLowerCase()
+  const exts = new Set(files.map((file) => file.ext))
+  if (exts.has('.skel') || exts.has('.atlas') || exts.has('.spine') || /spine|skeleton/u.test(text)) return 'spine'
+  if (exts.has('.plist') || exts.has('.particle') || /particle|fx_|effect|特效|粒子/u.test(text)) return 'particle'
+  if (exts.has('.prefab')) return 'prefab'
+  if ([...exts].some((ext) => EFFECT_AUDIO_EXTENSIONS.has(ext))) return 'audio'
+  if (files.filter((file) => EFFECT_IMAGE_EXTENSIONS.has(file.ext)).length >= 3 && /[_-]?\d{2,}/u.test(text)) return 'sequence'
+  if ([...exts].some((ext) => EFFECT_IMAGE_EXTENSIONS.has(ext))) return 'texture'
+  if (exts.has('.js') || exts.has('.ts') || exts.has('.lua')) return 'scripted'
+  return 'unknown'
+}
+
+function inferEffectPurpose(name: string, kind: EffectAssetKind) {
+  const text = name.toLowerCase()
+  const hints: string[] = []
+  if (/fire|flame|火/u.test(text)) hints.push('火焰/燃烧氛围')
+  if (/bg|background|背景/u.test(text)) hints.push('背景氛围')
+  if (/particle|dust|star|spark|粒子/u.test(text)) hints.push('粒子点缀')
+  if (/glow|light|shine|高亮|发光/u.test(text)) hints.push('发光高亮')
+  if (/flash|blink|hit|impact|爆|闪/u.test(text)) hints.push('瞬时反馈')
+  if (/win|reward|coin|金币|奖励/u.test(text)) hints.push('中奖/奖励反馈')
+  if (/spin|roll|转/u.test(text)) hints.push('转动过程表现')
+  if (/pillar|pyramid|tower|column|金字塔|柱/u.test(text)) hints.push('金字塔/柱体区域表现')
+  if (hints.length) return hints.join('；')
+  if (kind === 'spine') return '骨骼动画资源，待按页面状态补充触发用途'
+  if (kind === 'particle') return '粒子特效资源，待按交互节点补充触发用途'
+  return '待补充用途：已按目录/文件名完成初步归类'
+}
+
+function effectSearchTerms(name: string, kind: EffectAssetKind, files: ScannedEffectFile[]) {
+  const raw = [
+    name,
+    ...files.map((file) => file.name.replace(/\.[^.]+$/u, '')),
+    kind,
+  ].join(' ')
+  const terms = raw
+    .toLowerCase()
+    .split(/[\s_\-./\\()[\]{}]+/u)
+    .map((item) => item.trim())
+    .filter((item) => item.length >= 2 && !/^\d+$/u.test(item))
+
+  const text = raw.toLowerCase()
+  if (/win|reward|coin|金币|奖励|结算/u.test(text)) terms.push('奖励', '结算', '金币', '中奖')
+  if (/spin|roll|转/u.test(text)) terms.push('转动', '游戏中', '抽奖')
+  if (/hit|impact|flash|blink|爆|闪/u.test(text)) terms.push('命中', '反馈', '高亮')
+  if (/bg|background|背景/u.test(text)) terms.push('背景', '主界面', '氛围')
+  if (/popup|dialog|弹窗/u.test(text)) terms.push('弹窗', '提示')
+  if (/pillar|pyramid|tower|column|金字塔|柱/u.test(text)) terms.push('金字塔', '柱体', '区域')
+  if (kind === 'spine') terms.push('spine', '骨骼动画')
+  if (kind === 'particle') terms.push('粒子', '特效')
+  if (kind === 'sequence') terms.push('序列帧')
+  if (kind === 'prefab') terms.push('prefab', '预制体')
+  if (kind === 'audio') terms.push('音效', '音频')
+
+  return Array.from(new Set(terms)).slice(0, 24)
+}
+
+function findEffectContextMatches(name: string, kind: EffectAssetKind, files: ScannedEffectFile[], contextHints: string[]) {
+  const terms = effectSearchTerms(name, kind, files)
+  return contextHints
+    .map((hint) => {
+      const text = normalizeTextValue(hint) ?? ''
+      const lower = text.toLowerCase()
+      const score = terms.reduce((sum, term) => sum + (lower.includes(term.toLowerCase()) ? 1 : 0), 0)
+      return { text, score }
+    })
+    .filter((item) => item.text && item.score > 0)
+    .sort((a, b) => b.score - a.score || a.text.length - b.text.length)
+    .slice(0, 2)
+    .map((item) => item.text.length > 160 ? `${item.text.slice(0, 160)}...` : item.text)
+}
+
+function inferEffectSmartNote(name: string, kind: EffectAssetKind, files: ScannedEffectFile[], contextHints: string[]) {
+  const purpose = inferEffectPurpose(name, kind)
+  const implementation = effectImplementationHint(kind)
+  const matches = findEffectContextMatches(name, kind, files, contextHints)
+  const basis = matches.length
+    ? `文档依据：${matches.join('；')}`
+    : '文档依据：当前文档中未命中明确节点，先按资源名称和文件类型推断，需人工复核。'
+  return [
+    `推断作用：${purpose}`,
+    `接入备注：${implementation}`,
+    basis,
+  ].join('\n')
+}
+
+function effectImplementationHint(kind: EffectAssetKind) {
+  if (kind === 'spine') return '按 Spine 骨骼动画接入，记录触发时机、loop/once、层级和遮挡关系'
+  if (kind === 'particle') return '按粒子/特效节点接入，补充播放位置、生命周期、混合模式和性能预算'
+  if (kind === 'sequence') return '按序列帧贴图接入，确认帧率、是否可循环、预加载策略和图集归并'
+  if (kind === 'prefab') return '已有预制体资源，确认挂载节点、入参、事件回调和复用范围'
+  if (kind === 'audio') return '音频资源，确认触发事件、互斥/叠加规则和音量分组'
+  if (kind === 'texture') return '静态贴图资源，确认绑定到 UI 节点还是特效材质'
+  if (kind === 'scripted') return '脚本驱动资源，确认运行时参数和与 UI 状态机的关系'
+  return '待人工确认接入方式'
+}
+
+function sanitizeEffectCacheSegment(value: string) {
+  const sanitized = value
+    .replace(/[<>:"|?*\x00-\x1F]/g, '-')
+    .replace(/[\\/]+/g, '-')
+    .trim()
+  return sanitized || 'asset'
+}
+
+function buildEffectAssetFileUrl(baseUrl: string, relativePath: string) {
+  return `${baseUrl.replace(/\/+$/, '')}/api/assets/effects/file/${normalizeZipPath(relativePath).split('/').map(encodeURIComponent).join('/')}`
+}
+
+function loadedEffectRelativePath(loadedPath: string | null | undefined) {
+  if (!loadedPath) return null
+  const relative = path.relative(EFFECT_ASSET_CACHE_ROOT, loadedPath)
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return null
+  return normalizeZipPath(relative)
+}
+
+function effectPreviewTypeForExt(ext: string): EffectAssetPreviewType | null {
+  if (EFFECT_VIDEO_EXTENSIONS.has(ext)) return 'video'
+  if (EFFECT_AUDIO_EXTENSIONS.has(ext)) return 'audio'
+  if (EFFECT_IMAGE_EXTENSIONS.has(ext)) return 'image'
+  return null
+}
+
+function buildEffectPreview(files: EffectAssetFile[], assetBaseUrl: string) {
+  const previewable = files
+    .map((file) => {
+      const ext = file.ext.toLowerCase()
+      const relativePath = loadedEffectRelativePath(file.loadedPath)
+      const previewType = effectPreviewTypeForExt(ext)
+      if (!relativePath || !previewType) return null
+      const previewUrl = buildEffectAssetFileUrl(assetBaseUrl, relativePath)
+      return {
+        file: { ...file, previewUrl },
+        previewFile: { name: file.name, ext, url: previewUrl },
+        previewType,
+        isAnimatedImage: ext === '.gif',
+      }
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
+
+  if (!previewable.length) {
+    return {
+      files,
+      previewType: null,
+      previewUrl: null,
+      previewFiles: [],
+    }
+  }
+
+  const video = previewable.find((item) => item.previewType === 'video')
+  const animatedImage = previewable.find((item) => item.isAnimatedImage)
+  const images = previewable.filter((item) => item.previewType === 'image')
+  const audio = previewable.find((item) => item.previewType === 'audio')
+  const chosen = video ?? animatedImage ?? (images.length >= 2 ? images[0] : images[0]) ?? audio ?? previewable[0]
+  const imageSequence = images.length >= 2 && !video && !animatedImage
+  const previewFiles = imageSequence ? images.map((item) => item.previewFile) : [chosen.previewFile]
+
+  return {
+    files: files.map((file) => previewable.find((item) => item.file.path === file.path)?.file ?? file),
+    previewType: imageSequence ? 'sequence' as const : chosen.previewType,
+    previewUrl: chosen.previewFile.url,
+    previewFiles,
+  }
+}
+
+function relativeEffectFilePath(row: EffectAssetRow, file: EffectAssetFile) {
+  const sourceRoot = normalizeTextValue(row.sourceRoot)
+  if (sourceRoot) {
+    const relative = path.relative(sourceRoot, file.path)
+    if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) return relative
+  }
+  return path.join(row.relativePath || sanitizeEffectCacheSegment(row.name), file.name)
+}
+
+function resolveEffectCacheFilePath(rowRoot: string, relativePath: string) {
+  const segments = relativePath
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter(Boolean)
+    .map(sanitizeEffectCacheSegment)
+  if (!segments.length) return null
+  const resolved = path.resolve(rowRoot, ...segments)
+  return resolved === rowRoot || resolved.startsWith(`${rowRoot}${path.sep}`) ? resolved : null
+}
+
+function normalizeEffectAssetRowForLoad(value: unknown): EffectAssetRow {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('缺少要加载的特效资源行。')
+  const row = value as Partial<EffectAssetRow>
+  const files = Array.isArray(row.files) ? row.files : []
+  if (!row.id || typeof row.id !== 'string') throw new Error('特效资源行缺少 id。')
+  if (!row.sourceRoot || typeof row.sourceRoot !== 'string') throw new Error('特效资源行缺少 sourceRoot。')
+  if (!files.length) throw new Error('特效资源行没有可加载文件。')
+  return {
+    id: row.id,
+    name: typeof row.name === 'string' ? row.name : row.id,
+    kind: row.kind ?? 'unknown',
+    sourceRoot: row.sourceRoot,
+    relativePath: typeof row.relativePath === 'string' ? row.relativePath : '',
+    localPath: typeof row.localPath === 'string' ? row.localPath : row.sourceRoot,
+    purpose: typeof row.purpose === 'string' ? row.purpose : '',
+    usageNote: typeof row.usageNote === 'string' ? row.usageNote : '',
+    pageHint: typeof row.pageHint === 'string' ? row.pageHint : '',
+    implementationHint: typeof row.implementationHint === 'string' ? row.implementationHint : '',
+    linkedNodeIds: Array.isArray(row.linkedNodeIds) ? row.linkedNodeIds : [],
+    status: 'ready',
+    loadStatus: 'loading',
+    loadError: null,
+    loadedRoot: null,
+    loadedPath: null,
+    loadedFileCount: 0,
+    loadedBytes: 0,
+    loadedAt: null,
+    previewType: null,
+    previewUrl: null,
+    previewFiles: [],
+    fileCount: typeof row.fileCount === 'number' ? row.fileCount : files.length,
+    files: files.map((file) => ({
+      name: file.name,
+      path: file.path,
+      ext: file.ext,
+      size: file.size,
+      loadedPath: file.loadedPath ?? null,
+      previewUrl: file.previewUrl ?? null,
+    })),
+    createdAt: typeof row.createdAt === 'string' ? row.createdAt : new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+function loadEffectAssetRow(rawRow: unknown, assetBaseUrl: string) {
+  const row = normalizeEffectAssetRowForLoad(rawRow)
+  mkdirSync(EFFECT_ASSET_CACHE_ROOT, { recursive: true })
+
+  let loadedBytes = 0
+  const files = row.files.map((file) => {
+    if (!existsSync(file.path)) throw new Error(`资源文件不存在或无权限访问：${file.path}`)
+    const stat = statSync(file.path)
+    if (!stat.isFile()) throw new Error(`资源路径不是文件：${file.path}`)
+    const relativePath = relativeEffectFilePath(row, file)
+    const loadedPath = resolveEffectCacheFilePath(EFFECT_ASSET_CACHE_ROOT, relativePath)
+    if (!loadedPath) throw new Error(`资源目标路径无效：${relativePath}`)
+    mkdirSync(path.dirname(loadedPath), { recursive: true })
+    copyFileSync(file.path, loadedPath)
+    loadedBytes += stat.size
+    return {
+      ...file,
+      size: stat.size,
+      loadedPath,
+    }
+  })
+
+  const loadedAt = new Date().toISOString()
+  const loadedPath = row.relativePath
+    ? resolveEffectCacheFilePath(EFFECT_ASSET_CACHE_ROOT, row.relativePath) ?? EFFECT_ASSET_CACHE_ROOT
+    : EFFECT_ASSET_CACHE_ROOT
+  const preview = buildEffectPreview(files, assetBaseUrl)
+
+  return {
+    row: {
+      ...row,
+      localPath: row.localPath,
+      loadStatus: 'loaded' as const,
+      loadError: null,
+      loadedRoot: EFFECT_ASSET_CACHE_ROOT,
+      loadedPath,
+      loadedFileCount: files.length,
+      loadedBytes,
+      loadedAt,
+      previewType: preview.previewType,
+      previewUrl: preview.previewUrl,
+      previewFiles: preview.previewFiles,
+      files: preview.files,
+      updatedAt: loadedAt,
+    },
+  }
+}
+
+function scanEffectAssetRoot(rawRootPath: unknown, options: EffectAssetScanOptions = {}) {
+  const rootPath = normalizeTextValue(rawRootPath)
+  if (!rootPath) throw new Error('请填写特效资源目录路径。')
+  const sourceRoot = path.resolve(rootPath)
+  if (!existsSync(sourceRoot)) throw new Error(`目录不存在或当前账号无权限访问：${sourceRoot}`)
+  const rootStat = statSync(sourceRoot)
+  if (!rootStat.isDirectory()) throw new Error(`路径不是目录：${sourceRoot}`)
+
+  const { files, truncated } = collectEffectFiles(sourceRoot)
+  const groups = new Map<string, ScannedEffectFile[]>()
+  for (const file of files) {
+    const key = effectGroupKey(file)
+    groups.set(key, [...(groups.get(key) ?? []), file])
+  }
+
+  const now = new Date().toISOString()
+  const smartNotes = options.smartNotes === true
+  const contextHints = (options.contextHints ?? []).slice(0, 120)
+  const rows: EffectAssetRow[] = Array.from(groups.entries())
+    .map(([key, groupFiles]) => {
+      const name = displayNameFromEffectKey(key)
+      const kind = inferEffectKind(name, groupFiles)
+      const relativePath = key || (groupFiles[0]?.relativePath ?? '')
+      const localPath = key
+        ? path.resolve(sourceRoot, ...key.split('/').filter(Boolean))
+        : groupFiles[0]?.absolutePath ?? sourceRoot
+      return {
+        id: `effect-${hashId(`${sourceRoot}/${relativePath}`)}`,
+        name,
+        kind,
+        sourceRoot,
+        relativePath,
+        localPath,
+        purpose: '',
+        usageNote: smartNotes ? inferEffectSmartNote(name, kind, groupFiles, contextHints) : '',
+        pageHint: '',
+        implementationHint: '',
+        linkedNodeIds: [],
+        status: 'ready' as const,
+        loadStatus: 'not_loaded' as const,
+        loadError: null,
+        loadedRoot: null,
+        loadedPath: null,
+        loadedFileCount: 0,
+        loadedBytes: 0,
+        loadedAt: null,
+        previewType: null,
+        previewUrl: null,
+        previewFiles: [],
+        fileCount: groupFiles.length,
+        files: groupFiles.map((file) => ({
+          name: file.name,
+          path: file.absolutePath,
+          ext: file.ext,
+          size: file.size,
+          loadedPath: null,
+          previewUrl: null,
+        })),
+        createdAt: now,
+        updatedAt: now,
+      }
+    })
+    .sort((a, b) => a.relativePath.localeCompare(b.relativePath))
+
+  return {
+    sourceRoot,
+    scannedFileCount: files.length,
+    truncated,
+    rows,
+  }
+}
+
 function buildFigmaPrototypeHtml(spec: UiSpecDocument, uiSpecPath: string, bundleId: string, assetBaseUrl: string) {
   if (!spec.root?.rect) throw new Error('ui_spec.json 缺少 root.rect，无法生成 HTML 原型。')
   const folder = normalizeZipPath(uiSpecPath).replace(/\/?ui_spec\.json$/iu, '')
@@ -4223,6 +5092,18 @@ ${body}
 </html>`
 }
 
+function openLocalPath(resolvedPath: string) {
+  const command = process.platform === 'win32' ? 'explorer.exe' : process.platform === 'darwin' ? 'open' : 'xdg-open'
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(command, [resolvedPath], { detached: true, stdio: 'ignore' })
+    child.once('error', reject)
+    child.once('spawn', () => {
+      child.unref()
+      resolve()
+    })
+  })
+}
+
 async function submitFigma2PrefabTask(rawUrl: string, token: string) {
   const response = await fetch(joinServiceUrl(figma2PrefabBaseUrl, figma2PrefabConvertPath), {
     method: 'POST',
@@ -4280,13 +5161,22 @@ function decodeUiSpec(files: Record<string, Uint8Array>, uiSpecPath: string) {
   return JSON.parse(strFromU8(data)) as UiSpecDocument
 }
 
-async function importFigmaFrameFromPrefab(payload: FigmaFrameRequest, assetBaseUrl: string): Promise<FigmaPrefabFrameResponse> {
+async function importFigmaFrameFromPrefab(
+  payload: FigmaFrameRequest,
+  assetBaseUrl: string,
+  options: { buildHtml?: boolean } = {},
+): Promise<FigmaPrefabFrameResponse> {
   const rawUrl = payload.url?.trim()
   if (!rawUrl) throw new Error('请填写 Figma Frame 链接。')
   const token = payload.token?.trim() || figmaToken.trim()
   if (!token) throw new Error('未配置 FIGMA_TOKEN。请在项目 .env 或 server/.env 中配置 Figma token，前端只需要粘贴 Figma 链接。')
 
   const { fileKey, nodeId, sourceUrl } = parseFigmaFrameUrl(rawUrl)
+  const thumbnailPromise = renderFigmaThumbnailAsset(fileKey, nodeId, token, assetBaseUrl, 'figma-thumbnail')
+    .catch((error) => {
+      console.warn('[figma] thumbnail export failed:', error)
+      return null
+    })
   const submitted = await submitFigma2PrefabTask(rawUrl, token)
   let zipBytes = submitted.zipBytes
   if (!zipBytes) {
@@ -4295,12 +5185,19 @@ async function importFigmaFrameFromPrefab(payload: FigmaFrameRequest, assetBaseU
     zipBytes = await downloadFigma2PrefabZip(submitted.taskId)
   }
   const files = unzipSync(zipBytes)
-  const uiSpecPath = findPreferredUiSpecPath(files)
-  const spec = decodeUiSpec(files, uiSpecPath)
+  const uiSpecZipPath = findPreferredUiSpecPath(files)
+  const spec = decodeUiSpec(files, uiSpecZipPath)
   const bundleId = registerFigmaAssetBundle(files)
-  const html = buildFigmaPrototypeHtml(spec, uiSpecPath, bundleId, assetBaseUrl)
-  const panelName = spec.root?.name ?? normalizeZipPath(uiSpecPath).split('/').slice(-2, -1)[0] ?? 'UISlots'
+  const html = options.buildHtml === false ? '' : buildFigmaPrototypeHtml(spec, uiSpecZipPath, bundleId, assetBaseUrl)
+  const panelName = spec.root?.name ?? normalizeZipPath(uiSpecZipPath).split('/').slice(-2, -1)[0] ?? 'UISlots'
+  const persisted = persistFigmaIntermediateBundle(bundleId, panelName, zipBytes, files)
+  const manifestZipPath = findManifestZipPath(files, uiSpecZipPath)
+  const uiSpecPath = localIntermediateFilePath(persisted.extractedRoot, uiSpecZipPath) ?? uiSpecZipPath
+  const manifestPath = manifestZipPath ? localIntermediateFilePath(persisted.extractedRoot, manifestZipPath) : null
+  const outputDir = path.dirname(uiSpecPath)
+  const assetsDir = path.resolve(outputDir, 'assets')
   const assetCount = spec.assets?.length ?? 0
+  const thumbnailUrl = await thumbnailPromise
 
   return {
     fileKey,
@@ -4308,9 +5205,18 @@ async function importFigmaFrameFromPrefab(payload: FigmaFrameRequest, assetBaseU
     panelName,
     taskId: submitted.taskId,
     sourceUrl,
+    thumbnailUrl,
     html,
     summary: `已从 Figma2Prefab 生成 ${panelName} HTML 原型：${assetCount} 个资源、${countUiSpecNodes(spec.root)} 个节点。`,
     uiSpecPath,
+    uiSpecZipPath,
+    manifestPath,
+    manifestZipPath,
+    outputDir,
+    zipPath: persisted.zipPath,
+    assetsDir,
+    bundleId,
+    files: buildPrefabParsedFiles(spec, uiSpecZipPath, manifestZipPath, bundleId, assetBaseUrl, persisted.extractedRoot),
     assetCount,
     zipFileCount: Object.keys(files).length,
   }
@@ -4587,6 +5493,13 @@ async function createClaudePrototypeHtmlWithRepair(
   }
 }
 
+function withPrototypeAssetAudit(variant: PrototypeVariantPayload, assetManifest?: PrototypeAssetManifest | null): PrototypeVariantPayload {
+  return {
+    ...variant,
+    assetAudit: auditPrototypeAssets(variant.html, assetManifest),
+  }
+}
+
 async function generateUpdateVariant(
   requirementState: UXRequirementState,
   currentHtml: string,
@@ -4594,8 +5507,9 @@ async function generateUpdateVariant(
   imageBlocks: Anthropic.ImageBlockParam[],
   cfg: { index: number; focus: string; temperature: number },
   history: string[],
+  assetManifest?: PrototypeAssetManifest | null,
 ): Promise<PrototypeVariantPayload> {
-  const prompt = buildUpdatePrototypePrompt(requirementState, currentHtml, instruction, history, cfg.focus, imageBlocks.length > 0)
+  const prompt = buildUpdatePrototypePrompt(requirementState, currentHtml, instruction, history, cfg.focus, imageBlocks.length > 0, assetManifest)
   if (usesOpenAiPrototypeProvider) {
     return {
       index: cfg.index,
@@ -4654,8 +5568,9 @@ async function generateCreateVariant(
   imageBlocks: Anthropic.ImageBlockParam[],
   cfg: { index: number; focus: string; temperature: number },
   instruction?: string,
+  assetManifest?: PrototypeAssetManifest | null,
 ): Promise<PrototypeVariantPayload> {
-  const prompt = buildCreatePrototypePrompt(requirementState, imageBlocks.length > 0, cfg.focus, instruction)
+  const prompt = buildCreatePrototypePrompt(requirementState, imageBlocks.length > 0, cfg.focus, instruction, assetManifest)
   if (usesOpenAiPrototypeProvider) {
     return {
       index: cfg.index,
@@ -4684,7 +5599,7 @@ function writePrototypeEvent(res: express.Response, event: unknown) {
 }
 
 async function streamPrototype(req: express.Request, res: express.Response) {
-  const { requirementState, currentHtml, instruction, images, numVariants, variantIndex, history } = parsePrototypeRequest(req)
+  const { requirementState, currentHtml, instruction, images, numVariants, variantIndex, history, assetManifest: rawAssetManifest } = parsePrototypeRequest(req)
 
   if (!ensurePrototypeProviderConfigured(res)) return
 
@@ -4699,6 +5614,7 @@ async function streamPrototype(req: express.Request, res: express.Response) {
   res.flushHeaders?.()
 
   const imageBlocks = buildImageBlocks(images)
+  const assetManifest = normalizePrototypeAssetManifest(rawAssetManifest)
   const normalizedCurrentHtml = currentHtml ? normalizePrototypeHtml(currentHtml) : null
   const updateInstruction = instruction?.trim() ?? ''
   const isUpdate = Boolean(normalizedCurrentHtml && updateInstruction)
@@ -4714,29 +5630,29 @@ async function streamPrototype(req: express.Request, res: express.Response) {
     try {
       if (isUpdate) {
         if (usesOpenAiPrototypeProvider) {
-          const prompt = buildUpdatePrototypePrompt(requirementState, normalizedCurrentHtml!, updateInstruction, updateHistory, cfg.focus, imageBlocks.length > 0)
+          const prompt = buildUpdatePrototypePrompt(requirementState, normalizedCurrentHtml!, updateInstruction, updateHistory, cfg.focus, imageBlocks.length > 0, assetManifest)
           const normalized = await streamOpenAiPrototypeHtmlWithRepair(prompt, imageBlocks, cfg.temperature, 'GPT 原型更新', (previewHtml) => {
             writePrototypeEvent(res, { type: 'setCode', variantIndex: cfg.index, html: previewHtml, focus: cfg.focus, history: updateHistory })
           })
           const nextHistory = [...updateHistory, updateInstruction]
           writePrototypeEvent(res, { type: 'setCode', variantIndex: cfg.index, html: normalized, focus: cfg.focus, history: nextHistory })
-          writePrototypeEvent(res, { type: 'variantComplete', variantIndex: cfg.index, html: normalized, focus: cfg.focus, history: nextHistory, mode: 'rewrite', appliedEdits: 0 })
+          writePrototypeEvent(res, { type: 'variantComplete', variantIndex: cfg.index, html: normalized, focus: cfg.focus, history: nextHistory, mode: 'rewrite', appliedEdits: 0, assetAudit: auditPrototypeAssets(normalized, assetManifest) })
           return
         }
 
-        const variant = await generateUpdateVariant(requirementState, normalizedCurrentHtml!, updateInstruction, imageBlocks, cfg, updateHistory)
+        const variant = await generateUpdateVariant(requirementState, normalizedCurrentHtml!, updateInstruction, imageBlocks, cfg, updateHistory, assetManifest)
         writePrototypeEvent(res, { type: 'setCode', variantIndex: cfg.index, html: variant.html, focus: cfg.focus, history: variant.history })
-        writePrototypeEvent(res, { type: 'variantComplete', variantIndex: cfg.index, html: variant.html, focus: cfg.focus, history: variant.history, mode: variant.mode, appliedEdits: variant.appliedEdits })
+        writePrototypeEvent(res, { type: 'variantComplete', variantIndex: cfg.index, html: variant.html, focus: cfg.focus, history: variant.history, mode: variant.mode, appliedEdits: variant.appliedEdits, assetAudit: auditPrototypeAssets(variant.html, assetManifest) })
         return
       }
 
-      const prompt = buildCreatePrototypePrompt(requirementState, imageBlocks.length > 0, cfg.focus, updateInstruction)
+      const prompt = buildCreatePrototypePrompt(requirementState, imageBlocks.length > 0, cfg.focus, updateInstruction, assetManifest)
       if (usesOpenAiPrototypeProvider) {
         const normalized = await streamOpenAiPrototypeHtmlWithRepair(prompt, imageBlocks, cfg.temperature, 'GPT 原型生成', (previewHtml) => {
           writePrototypeEvent(res, { type: 'setCode', variantIndex: cfg.index, html: previewHtml, focus: cfg.focus })
         })
         writePrototypeEvent(res, { type: 'setCode', variantIndex: cfg.index, html: normalized, focus: cfg.focus })
-        writePrototypeEvent(res, { type: 'variantComplete', variantIndex: cfg.index, html: normalized, focus: cfg.focus, mode: 'create', appliedEdits: 0, history: [] })
+        writePrototypeEvent(res, { type: 'variantComplete', variantIndex: cfg.index, html: normalized, focus: cfg.focus, mode: 'create', appliedEdits: 0, history: [], assetAudit: auditPrototypeAssets(normalized, assetManifest) })
         return
       }
 
@@ -4758,7 +5674,7 @@ async function streamPrototype(req: express.Request, res: express.Response) {
         }
       }
       const normalized = normalizePrototypeModelResponse(html, 'Claude 原型生成')
-      writePrototypeEvent(res, { type: 'variantComplete', variantIndex: cfg.index, html: normalized, focus: cfg.focus, mode: 'create', appliedEdits: 0, history: [] })
+      writePrototypeEvent(res, { type: 'variantComplete', variantIndex: cfg.index, html: normalized, focus: cfg.focus, mode: 'create', appliedEdits: 0, history: [], assetAudit: auditPrototypeAssets(normalized, assetManifest) })
     } catch (err) {
       console.error(`[prototype] stream variant ${cfg.index} failed:`, err)
       writePrototypeEvent(res, { type: 'variantError', variantIndex: cfg.index, focus: cfg.focus, message: errorMessageFromUnknown(err) })
@@ -4772,7 +5688,7 @@ async function streamPrototype(req: express.Request, res: express.Response) {
 app.post('/api/prototype/stream', streamPrototype)
 
 app.post('/api/prototype', async (req, res) => {
-  const { requirementState, currentHtml, instruction, images } = parsePrototypeRequest(req)
+  const { requirementState, currentHtml, instruction, images, assetManifest: rawAssetManifest } = parsePrototypeRequest(req)
 
   if (!ensurePrototypeProviderConfigured(res)) return
 
@@ -4782,6 +5698,7 @@ app.post('/api/prototype', async (req, res) => {
   }
 
   const imageBlocks = buildImageBlocks(images)
+  const assetManifest = normalizePrototypeAssetManifest(rawAssetManifest)
 
   const normalizedCurrentHtml = currentHtml ? normalizePrototypeHtml(currentHtml) : null
   const updateInstruction = instruction?.trim() ?? ''
@@ -4798,12 +5715,12 @@ app.post('/api/prototype', async (req, res) => {
     ).map((cfg) => ({ ...cfg, index: baseIndex + cfg.index }))
 
     const settled = await Promise.allSettled(
-      variantConfigs.map((cfg) => generateUpdateVariant(requirementState, normalizedCurrentHtml!, updateInstruction, imageBlocks, cfg, updateHistory)),
+      variantConfigs.map((cfg) => generateUpdateVariant(requirementState, normalizedCurrentHtml!, updateInstruction, imageBlocks, cfg, updateHistory, assetManifest)),
     )
 
     const variants: PrototypeVariantPayload[] = settled.map((result, index) => {
       const cfg = variantConfigs[index]
-      if (result.status === 'fulfilled') return result.value
+      if (result.status === 'fulfilled') return withPrototypeAssetAudit(result.value, assetManifest)
       console.error(`[prototype] update variant ${cfg.index} failed:`, result.reason)
       return { index: cfg.index, html: null, mode: 'update', status: 'error', focus: cfg.focus, appliedEdits: 0, history: updateHistory, error: errorMessageFromUnknown(result.reason) }
     })
@@ -4816,12 +5733,12 @@ app.post('/api/prototype', async (req, res) => {
   const variantConfigs = buildVariantConfigs(clampVariantCount((req.body as PrototypeRequest).numVariants, DEFAULT_CREATE_VARIANTS))
 
   const settled = await Promise.allSettled(
-    variantConfigs.map((cfg) => generateCreateVariant(requirementState, imageBlocks, cfg, updateInstruction)),
+    variantConfigs.map((cfg) => generateCreateVariant(requirementState, imageBlocks, cfg, updateInstruction, assetManifest)),
   )
 
   const variants: PrototypeVariantPayload[] = settled.map((result, index) => {
     const focus = variantConfigs[index].focus
-    if (result.status === 'fulfilled') return result.value
+    if (result.status === 'fulfilled') return withPrototypeAssetAudit(result.value, assetManifest)
     console.error(`[prototype] variant ${index} failed:`, result.reason)
     return { index, html: null, mode: 'create', status: 'error', focus, appliedEdits: 0, history: [], error: errorMessageFromUnknown(result.reason) }
   })
@@ -5283,7 +6200,7 @@ app.post('/api/export-spec-folder', (req, res) => {
   }
 })
 
-app.post('/api/open-doc', (req, res) => {
+app.post('/api/open-doc', async (req, res) => {
   const { docPath } = req.body as { docPath?: string }
   if (!docPath) {
     res.status(400).json({ error: '缺少文档路径' })
@@ -5295,9 +6212,7 @@ app.post('/api/open-doc', (req, res) => {
       res.status(404).json({ error: '文档尚未生成，请先导出 spec 文件夹' })
       return
     }
-    const command = process.platform === 'win32' ? 'explorer' : process.platform === 'darwin' ? 'open' : 'xdg-open'
-    const child = spawn(command, [resolved], { detached: true, stdio: 'ignore', windowsHide: true })
-    child.unref()
+    await openLocalPath(resolved)
     res.json({ ok: true })
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : '打开文档失败' })

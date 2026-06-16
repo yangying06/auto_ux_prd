@@ -11,6 +11,7 @@ import type { CreatePageNodeInput, DecompositionStatus, DecompositionStep, MapAd
 import type { PrototypeVariant } from '../types/prototypeVariant'
 import type { ProjectSourceDocument, ProjectWorkspaceSnapshot } from '../types/archive'
 import type { QaAttachment, QaIssue, QaIssuePatch, QaIssueStatus, QaNodeRef } from '../types/qa'
+import { emptyAssetWorkbench, type AssetWorkbenchState, type EffectAssetRow, type UiAssetRow } from '../types/assetWorkbench'
 
 const emptyRequirement: UXRequirementState = {
   trigger_condition: null,
@@ -26,7 +27,7 @@ const emptyRequirement: UXRequirementState = {
 }
 
 const STORAGE_KEY = 'gameux-promptforge-state'
-const STORAGE_VERSION = 11
+const STORAGE_VERSION = 13
 const PROTOTYPE_HISTORY_LIMIT = 4
 
 export interface PrototypeVersion {
@@ -521,6 +522,133 @@ function issueWithStatus(issue: QaIssue, status: QaIssueStatus): QaIssue {
   }
 }
 
+function emptyAssetWorkbenchState(): AssetWorkbenchState {
+  return {
+    uiRows: [],
+    effectRows: [],
+    lastEffectScanRoot: null,
+  }
+}
+
+function normalizeUiAssetKind(rowOrKind: unknown) {
+  const rawKind = isRecord(rowOrKind) ? rowOrKind.kind : rowOrKind
+  const rawParseMode = isRecord(rowOrKind) ? rowOrKind.parseMode : undefined
+  const rawResult = isRecord(rowOrKind) ? rowOrKind.result : undefined
+  const rawResultParseMode = isRecord(rawResult) ? rawResult.parseMode : undefined
+  const kindText = String(rawKind ?? '').trim().toLowerCase()
+
+  if (
+    kindText === 'image_set'
+    || kindText === 'component'
+    || kindText === 'image'
+    || kindText === 'images'
+    || kindText === 'image-set'
+    || kindText === '散图'
+  ) {
+    return 'image_set'
+  }
+
+  if (rawParseMode === 'image_set' || rawResultParseMode === 'image_set') {
+    return 'image_set'
+  }
+
+  return 'interface'
+}
+
+function normalizeUiAssetParseMode(value: unknown, kind: ReturnType<typeof normalizeUiAssetKind>) {
+  if (kind === 'image_set') return 'image_set'
+  return value === 'image_set' ? 'image_set' : 'intermediate'
+}
+
+function normalizeEffectLoadStatus(value: unknown) {
+  return value === 'loading' || value === 'loaded' || value === 'error' ? value : 'not_loaded'
+}
+
+function normalizeAssetWorkbench(value: AssetWorkbenchState | null | undefined): AssetWorkbenchState {
+  if (!value || typeof value !== 'object') return emptyAssetWorkbenchState()
+  return {
+    uiRows: Array.isArray(value.uiRows)
+      ? value.uiRows.map((row) => {
+          const kind = normalizeUiAssetKind(row)
+          return {
+            ...row,
+            kind,
+            parseMode: normalizeUiAssetParseMode((row as { parseMode?: unknown }).parseMode, kind),
+          }
+        })
+      : [],
+    effectRows: Array.isArray(value.effectRows)
+      ? value.effectRows.map((row) => ({
+          ...row,
+          loadStatus: normalizeEffectLoadStatus((row as { loadStatus?: unknown }).loadStatus),
+          loadError: typeof (row as { loadError?: unknown }).loadError === 'string' ? (row as { loadError: string }).loadError : null,
+          loadedRoot: typeof (row as { loadedRoot?: unknown }).loadedRoot === 'string' ? (row as { loadedRoot: string }).loadedRoot : null,
+          loadedPath: typeof (row as { loadedPath?: unknown }).loadedPath === 'string' ? (row as { loadedPath: string }).loadedPath : null,
+          loadedFileCount: typeof (row as { loadedFileCount?: unknown }).loadedFileCount === 'number' ? (row as { loadedFileCount: number }).loadedFileCount : 0,
+          loadedBytes: typeof (row as { loadedBytes?: unknown }).loadedBytes === 'number' ? (row as { loadedBytes: number }).loadedBytes : 0,
+          loadedAt: typeof (row as { loadedAt?: unknown }).loadedAt === 'string' ? (row as { loadedAt: string }).loadedAt : null,
+          previewType: ['image', 'sequence', 'video', 'audio'].includes(String((row as { previewType?: unknown }).previewType))
+            ? (row as { previewType: EffectAssetRow['previewType'] }).previewType
+            : null,
+          previewUrl: typeof (row as { previewUrl?: unknown }).previewUrl === 'string' ? (row as { previewUrl: string }).previewUrl : null,
+          previewFiles: Array.isArray((row as { previewFiles?: unknown }).previewFiles)
+            ? (row as { previewFiles: EffectAssetRow['previewFiles'] }).previewFiles.filter((file) => (
+                file && typeof file.name === 'string' && typeof file.ext === 'string' && typeof file.url === 'string'
+              ))
+            : [],
+          files: Array.isArray(row.files)
+            ? row.files.map((file) => ({
+                ...file,
+                loadedPath: typeof (file as { loadedPath?: unknown }).loadedPath === 'string' ? (file as { loadedPath: string }).loadedPath : null,
+                previewUrl: typeof (file as { previewUrl?: unknown }).previewUrl === 'string' ? (file as { previewUrl: string }).previewUrl : null,
+              }))
+            : [],
+        }))
+      : [],
+    lastEffectScanRoot: typeof value.lastEffectScanRoot === 'string' ? value.lastEffectScanRoot : null,
+  }
+}
+
+function mergeEffectAssetScanRows(existingRows: EffectAssetRow[], sourceRoot: string, scannedRows: EffectAssetRow[]) {
+  const existingById = new Map(existingRows.filter((row) => row.sourceRoot === sourceRoot).map((row) => [row.id, row]))
+  const mergedRows = scannedRows.map((row) => {
+    const existing = existingById.get(row.id)
+    if (!existing) return row
+    const loadedPathBySourcePath = new Map(existing.files.map((file) => [file.path, file.loadedPath ?? null]))
+    const scannedNote = row.usageNote.trim()
+    return {
+      ...row,
+      name: existing.name,
+      purpose: scannedNote ? '' : existing.purpose,
+      usageNote: scannedNote || existing.usageNote,
+      pageHint: scannedNote ? '' : existing.pageHint,
+      implementationHint: scannedNote ? '' : existing.implementationHint,
+      linkedNodeIds: existing.linkedNodeIds,
+      loadStatus: existing.loadStatus,
+      loadError: existing.loadError,
+      loadedRoot: existing.loadedRoot,
+      loadedPath: existing.loadedPath,
+      loadedFileCount: existing.loadedFileCount,
+      loadedBytes: existing.loadedBytes,
+      loadedAt: existing.loadedAt,
+      previewType: existing.previewType,
+      previewUrl: existing.previewUrl,
+      previewFiles: existing.previewFiles,
+      files: row.files.map((file) => ({
+        ...file,
+        loadedPath: loadedPathBySourcePath.get(file.path) ?? null,
+        previewUrl: existing.files.find((existingFile) => existingFile.path === file.path)?.previewUrl ?? null,
+      })),
+      createdAt: existing.createdAt,
+      updatedAt: row.updatedAt,
+    }
+  })
+  return [
+    ...mergedRows,
+    ...existingRows.filter((row) => row.sourceRoot !== sourceRoot),
+  ]
+}
+
 export interface AppStoreState {
   requirement: UXRequirementState
   messages: ChatMessage[]
@@ -541,6 +669,7 @@ export interface AppStoreState {
   qaIssues: Record<string, QaIssue>
   mapAdjustmentMessages: ChatMessage[]
   pendingMapAdjustmentOperations: MapAdjustmentOperation[]
+  assetWorkbench: AssetWorkbenchState
   sourceDocument: ProjectSourceDocument | null
   currentArchivePath: string | null
   lastSavedAt: string | null
@@ -576,6 +705,14 @@ export interface AppStoreState {
   removeLastMapAdjustmentTurn: () => ChatMessage | null
   setPendingMapAdjustmentOperations: (operations: MapAdjustmentOperation[]) => void
   clearMapAdjustmentState: () => void
+  setAssetWorkbench: (assetWorkbench: AssetWorkbenchState) => void
+  addUiAssetRow: (row: UiAssetRow) => void
+  updateUiAssetRow: (rowId: string, patch: Partial<UiAssetRow>) => void
+  removeUiAssetRow: (rowId: string) => void
+  replaceEffectAssetRows: (sourceRoot: string, rows: EffectAssetRow[]) => void
+  updateEffectAssetRow: (rowId: string, patch: Partial<EffectAssetRow>) => void
+  removeEffectAssetRow: (rowId: string) => void
+  clearAssetWorkbench: () => void
   applyNodePolish: (nodeId: string, patch: NodePolishPatch) => void
   acceptNodePolishRevision: (nodeId: string) => void
   revertNodePolishRevision: (nodeId: string) => void
@@ -633,6 +770,7 @@ export const useAppStore = create<AppStoreState>()(
       qaIssues: {},
       mapAdjustmentMessages: initialMapAdjustmentMessages,
       pendingMapAdjustmentOperations: [],
+      assetWorkbench: emptyAssetWorkbench,
       sourceDocument: null,
       currentArchivePath: null,
       lastSavedAt: null,
@@ -664,6 +802,7 @@ export const useAppStore = create<AppStoreState>()(
             qaIssues: snapshot.qaIssues ?? {},
             mapAdjustmentMessages: snapshot.mapAdjustmentMessages ?? initialMapAdjustmentMessages,
             pendingMapAdjustmentOperations: snapshot.pendingMapAdjustmentOperations ?? [],
+            assetWorkbench: normalizeAssetWorkbench(snapshot.assetWorkbench),
             sourceDocument: snapshot.sourceDocument ?? null,
             currentArchivePath,
             lastSavedAt: savedAt ?? new Date().toISOString(),
@@ -692,6 +831,7 @@ export const useAppStore = create<AppStoreState>()(
           qaIssues: {},
           mapAdjustmentMessages: initialMapAdjustmentMessages,
           pendingMapAdjustmentOperations: [],
+          assetWorkbench: emptyAssetWorkbenchState(),
           sourceDocument: null,
           currentArchivePath: null,
           lastSavedAt: null,
@@ -1141,6 +1281,62 @@ export const useAppStore = create<AppStoreState>()(
           pendingMapAdjustmentOperations: [],
           archiveDirty: true,
         }),
+      setAssetWorkbench: (assetWorkbench) =>
+        set({ assetWorkbench: normalizeAssetWorkbench(assetWorkbench), archiveDirty: true }),
+      addUiAssetRow: (row) =>
+        set((state) => ({
+          assetWorkbench: {
+            ...state.assetWorkbench,
+            uiRows: [row, ...state.assetWorkbench.uiRows],
+          },
+          archiveDirty: true,
+        })),
+      updateUiAssetRow: (rowId, patch) =>
+        set((state) => ({
+          assetWorkbench: {
+            ...state.assetWorkbench,
+            uiRows: state.assetWorkbench.uiRows.map((row) =>
+              row.id === rowId ? { ...row, ...patch, updatedAt: new Date().toISOString() } : row,
+            ),
+          },
+          archiveDirty: true,
+        })),
+      removeUiAssetRow: (rowId) =>
+        set((state) => ({
+          assetWorkbench: {
+            ...state.assetWorkbench,
+            uiRows: state.assetWorkbench.uiRows.filter((row) => row.id !== rowId),
+          },
+          archiveDirty: true,
+        })),
+      replaceEffectAssetRows: (sourceRoot, rows) =>
+        set((state) => ({
+          assetWorkbench: {
+            ...state.assetWorkbench,
+            effectRows: mergeEffectAssetScanRows(state.assetWorkbench.effectRows, sourceRoot, rows),
+            lastEffectScanRoot: sourceRoot,
+          },
+          archiveDirty: true,
+        })),
+      updateEffectAssetRow: (rowId, patch) =>
+        set((state) => ({
+          assetWorkbench: {
+            ...state.assetWorkbench,
+            effectRows: state.assetWorkbench.effectRows.map((row) =>
+              row.id === rowId ? { ...row, ...patch, updatedAt: new Date().toISOString() } : row,
+            ),
+          },
+          archiveDirty: true,
+        })),
+      removeEffectAssetRow: (rowId) =>
+        set((state) => ({
+          assetWorkbench: {
+            ...state.assetWorkbench,
+            effectRows: state.assetWorkbench.effectRows.filter((row) => row.id !== rowId),
+          },
+          archiveDirty: true,
+        })),
+      clearAssetWorkbench: () => set({ assetWorkbench: emptyAssetWorkbenchState(), archiveDirty: true }),
       applyNodePolish: (nodeId, patch) =>
         set((state) => {
           const node = state.prdTree?.[nodeId]
@@ -1421,6 +1617,7 @@ export const useAppStore = create<AppStoreState>()(
           qaIssues: {},
           mapAdjustmentMessages: initialMapAdjustmentMessages,
           pendingMapAdjustmentOperations: [],
+          assetWorkbench: emptyAssetWorkbenchState(),
           nodePrototypeStates: {},
           nodePolishRevisions: {},
           archiveDirty: true,
@@ -1430,7 +1627,7 @@ export const useAppStore = create<AppStoreState>()(
       name: STORAGE_KEY,
       version: STORAGE_VERSION,
       migrate: (persistedState: unknown, version: number): unknown => {
-        if (version === 3 || version === 4 || version === 5 || version === 6 || version === 7 || version === 8 || version === 9 || version === 10) {
+        if (version === 3 || version === 4 || version === 5 || version === 6 || version === 7 || version === 8 || version === 9 || version === 10 || version === 11 || version === 12) {
           const previous = persistedState as {
             requirement?: unknown
             messages?: unknown
@@ -1449,6 +1646,7 @@ export const useAppStore = create<AppStoreState>()(
             qaIssues?: unknown
             mapAdjustmentMessages?: unknown
             pendingMapAdjustmentOperations?: unknown
+            assetWorkbench?: unknown
             sourceDocument?: unknown
             currentArchivePath?: unknown
             lastSavedAt?: unknown
@@ -1473,6 +1671,7 @@ export const useAppStore = create<AppStoreState>()(
             qaIssues: prdTree && previous.qaIssues && typeof previous.qaIssues === 'object' ? previous.qaIssues : {},
             mapAdjustmentMessages: Array.isArray(previous.mapAdjustmentMessages) ? previous.mapAdjustmentMessages : initialMapAdjustmentMessages,
             pendingMapAdjustmentOperations: Array.isArray(previous.pendingMapAdjustmentOperations) ? previous.pendingMapAdjustmentOperations : [],
+            assetWorkbench: normalizeAssetWorkbench(previous.assetWorkbench as AssetWorkbenchState | undefined),
             sourceDocument: previous.sourceDocument && typeof previous.sourceDocument === 'object' ? previous.sourceDocument : null,
             currentArchivePath: typeof previous.currentArchivePath === 'string' ? previous.currentArchivePath : null,
             lastSavedAt: typeof previous.lastSavedAt === 'string' ? previous.lastSavedAt : null,
@@ -1498,6 +1697,7 @@ export const useAppStore = create<AppStoreState>()(
           qaIssues: {},
           mapAdjustmentMessages: initialMapAdjustmentMessages,
           pendingMapAdjustmentOperations: [],
+          assetWorkbench: emptyAssetWorkbenchState(),
           sourceDocument: null,
           currentArchivePath: null,
           lastSavedAt: null,
@@ -1522,6 +1722,7 @@ export const useAppStore = create<AppStoreState>()(
         qaIssues: state.qaIssues,
         mapAdjustmentMessages: state.mapAdjustmentMessages.map(persistableMessage),
         pendingMapAdjustmentOperations: state.pendingMapAdjustmentOperations,
+        assetWorkbench: state.assetWorkbench,
         sourceDocument: state.sourceDocument,
         currentArchivePath: state.currentArchivePath,
         lastSavedAt: state.lastSavedAt,

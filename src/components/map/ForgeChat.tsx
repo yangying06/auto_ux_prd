@@ -787,7 +787,8 @@ export function ForgeChat({
   const [figmaImportProgress, setFigmaImportProgress] = useState<FigmaImportProgress | null>(null)
 
   const hasMultipleVariants = prototypeVariants.length > 1
-  const selectedPrototypeHtml = prototypeVariants.find((variant) => variant.index === selectedVariantIndex)?.html ?? prototypeHtml
+  const selectedPrototypeVariant = prototypeVariants.find((variant) => variant.index === selectedVariantIndex) ?? null
+  const selectedPrototypeHtml = selectedPrototypeVariant?.html ?? prototypeHtml
 
   // Whenever a fresh batch of variants arrives, default back to the comparison grid so the
   // user can choose; collapse to single preview when there is at most one variant.
@@ -1635,6 +1636,7 @@ export function ForgeChat({
                   onRestore={onRestorePrototype}
                   onClearHistory={onClearPrototypeHistory}
                   canClearHistory={prototypeHistory.length > 0 || Boolean(selectedPrototypeHtml)}
+                  assetAudit={selectedPrototypeVariant?.assetAudit}
                 />
               </div>
             )}

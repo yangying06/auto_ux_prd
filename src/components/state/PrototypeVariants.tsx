@@ -36,6 +36,7 @@ export function PrototypeVariants({ variants, selectedIndex, onSelect, onRetry }
       <div className="grid grid-cols-2 gap-sm">
         {variants.map((variant, position) => {
         const isSelected = variant.index === selectedIndex
+        const auditWarningCount = variant.assetAudit?.filter((issue) => issue.severity === 'warning' || issue.severity === 'error').length ?? 0
         return (
           <button
             key={variant.index}
@@ -57,8 +58,22 @@ export function PrototypeVariants({ variants, selectedIndex, onSelect, onRetry }
                 <span className="material-symbols-outlined text-secondary" style={{ fontSize: '16px', fontVariationSettings: "'FILL' 1" }}>
                   check_circle
                 </span>
+              ) : auditWarningCount > 0 ? (
+                <span className="material-symbols-outlined text-secondary" style={{ fontSize: '16px' }} title={`素材审计警告 ${auditWarningCount}`}>
+                  policy_alert
+                </span>
               ) : null}
             </div>
+
+            {auditWarningCount > 0 ? (
+              <div className="border-b border-secondary/20 bg-secondary/10 px-sm py-[3px] font-mono text-[10px] text-secondary">
+                素材审计警告 {auditWarningCount}
+              </div>
+            ) : variant.assetAudit && variant.assetAudit.length === 0 && variant.status === 'complete' ? (
+              <div className="border-b border-tertiary/20 bg-tertiary/10 px-sm py-[3px] font-mono text-[10px] text-tertiary">
+                素材审计通过
+              </div>
+            ) : null}
 
             <div>
               {variant.status === 'complete' && variant.html ? (

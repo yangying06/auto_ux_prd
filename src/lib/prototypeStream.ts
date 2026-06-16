@@ -1,10 +1,11 @@
 import type { PrototypeVariantPayload } from './api'
 import type { ContentBlock } from '../types/chat'
+import type { PrototypeAssetAuditIssue, PrototypeAssetManifest } from '../types/prototypeAssets'
 import type { UXRequirementState } from '../types/uxRequirement'
 
 export type PrototypeStreamEvent =
   | { type: 'setCode'; variantIndex: number; html: string | null; focus?: string; history?: string[] }
-  | ({ type: 'variantComplete'; variantIndex: number; html: string | null; focus?: string; history?: string[] } & Partial<Pick<PrototypeVariantPayload, 'mode' | 'appliedEdits'>>)
+  | ({ type: 'variantComplete'; variantIndex: number; html: string | null; focus?: string; history?: string[]; assetAudit?: PrototypeAssetAuditIssue[] } & Partial<Pick<PrototypeVariantPayload, 'mode' | 'appliedEdits'>>)
   | { type: 'variantError'; variantIndex: number; focus?: string; message?: string }
   | { type: 'done' }
 
@@ -15,6 +16,7 @@ interface PrototypeStreamOptions {
   numVariants?: number
   variantIndex?: number
   history?: string[]
+  assetManifest?: PrototypeAssetManifest
 }
 
 export async function streamPrototype(
@@ -35,6 +37,7 @@ export async function streamPrototype(
       numVariants: options.numVariants ?? null,
       variantIndex: options.variantIndex ?? null,
       history: options.history ?? null,
+      assetManifest: options.assetManifest ?? null,
       stream: true,
     }),
   })

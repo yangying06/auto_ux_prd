@@ -18,6 +18,7 @@ interface TopAppBarProps {
   canValidatePrototype?: boolean
   isValidatingPrototype?: boolean
   prototypeValidationRiskCount?: number
+  onOpenAssets?: () => void
   onOpenQa?: () => void
   qaOpenIssueCount?: number
 }
@@ -46,6 +47,7 @@ export function TopAppBar({
   canValidatePrototype = true,
   isValidatingPrototype = false,
   prototypeValidationRiskCount = 0,
+  onOpenAssets,
   onOpenQa,
   qaOpenIssueCount = 0,
 }: TopAppBarProps) {
@@ -157,6 +159,16 @@ export function TopAppBar({
             </div>
           ) : null}
         </div>
+
+        {onOpenAssets && (
+          <button
+            onClick={onOpenAssets}
+            className="flex items-center gap-sm rounded-lg border border-outline-variant bg-surface-container-high px-md py-sm font-label-md text-label-md text-on-surface transition-colors hover:bg-surface-variant"
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>inventory_2</span>
+            资源库
+          </button>
+        )}
 
         {onOpenQa && (
           <button

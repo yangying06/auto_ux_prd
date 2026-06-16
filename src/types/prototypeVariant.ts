@@ -1,3 +1,5 @@
+import type { PrototypeAssetAuditIssue } from './prototypeAssets'
+
 export type PrototypeVariantStatus = 'pending' | 'streaming' | 'complete' | 'error'
 
 export interface PrototypeVariant {
@@ -8,4 +10,5 @@ export interface PrototypeVariant {
   focus?: string
   history?: string[]
   error?: string
+  assetAudit?: PrototypeAssetAuditIssue[]
 }

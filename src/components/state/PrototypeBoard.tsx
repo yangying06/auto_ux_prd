@@ -1,5 +1,6 @@
 import { formatPrototypeVersionTime } from '../../lib/prototypeUtils'
 import type { PrototypeVersion } from '../../store/appStore'
+import type { PrototypeAssetAuditIssue } from '../../types/prototypeAssets'
 import { PrototypePreviewSurface } from './PrototypeSandboxPreview'
 
 interface PrototypeBoardProps {
@@ -11,6 +12,7 @@ interface PrototypeBoardProps {
   onRestore: (id: string) => void
   onClearHistory: () => void
   canClearHistory?: boolean
+  assetAudit?: PrototypeAssetAuditIssue[]
 }
 
 export function PrototypeBoard({
@@ -22,8 +24,10 @@ export function PrototypeBoard({
   onRestore,
   onClearHistory,
   canClearHistory,
+  assetAudit = [],
 }: PrototypeBoardProps) {
   const clearHistoryEnabled = canClearHistory ?? history.length > 0
+  const auditWarnings = assetAudit.filter((issue) => issue.severity === 'warning' || issue.severity === 'error')
 
   function handleRestore(id: string) {
     if (!id) return
@@ -76,6 +80,29 @@ export function PrototypeBoard({
           </button>
         </div>
       </div>
+
+      {auditWarnings.length > 0 ? (
+        <div className="relative z-10 border-b border-secondary/25 bg-secondary/10 px-sm py-xs text-[11px] text-secondary">
+          <div className="flex items-center gap-xs font-mono uppercase">
+            <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>policy_alert</span>
+            素材审计警告 {auditWarnings.length}
+          </div>
+          <div className="mt-xs flex flex-col gap-[2px] text-on-surface-variant">
+            {auditWarnings.slice(0, 3).map((issue, index) => (
+              <div key={`${issue.code}-${index}`} className="truncate" title={issue.value ?? issue.message}>
+                {issue.message}{issue.value ? `：${issue.value}` : ''}
+              </div>
+            ))}
+            {auditWarnings.length > 3 ? (
+              <div className="font-mono text-[10px] text-secondary">+{auditWarnings.length - 3} more</div>
+            ) : null}
+          </div>
+        </div>
+      ) : assetAudit.length > 0 ? (
+        <div className="relative z-10 border-b border-tertiary/25 bg-tertiary/10 px-sm py-xs font-mono text-[11px] text-tertiary">
+          素材审计通过
+        </div>
+      ) : null}
 
       <div className="relative z-0 flex min-h-0 flex-1 overflow-hidden">
         <PrototypePreviewSurface

@@ -11,8 +11,10 @@ import { buildUiOnlyPrototypeInstruction, chatContentImages, chatContentText, ex
 import { buildFigmaPrototypeIterationInstruction, mergeInstructionIntoPrototypeEvidence } from '../lib/prototypeIteration'
 import { useAppStore } from '../store/appStore'
 import type { FigmaFrameImportResponse, NodeChatOptions } from '../lib/api'
+import type { AssetWorkbenchState } from '../types/assetWorkbench'
 import type { ChatMessage, ContentBlock, ReferenceImageClassificationRequest } from '../types/chat'
 import type { PrdNode } from '../types/prdNode'
+import type { PrototypeAssetManifest } from '../types/prototypeAssets'
 import type { AssetDependency, UXRequirementState } from '../types/uxRequirement'
 
 const MAX_PROTOTYPE_IMAGES = 6
@@ -150,6 +152,102 @@ function collectPrototypeImages(messages: ChatMessage[]): ContentBlock[] {
   }
 
   return [...referenceImages, ...otherImages].slice(0, MAX_PROTOTYPE_IMAGES)
+}
+
+function isPreviewableUiFile(file: { url?: string | null; type?: string | null; path: string }) {
+  const text = `${file.type ?? ''} ${file.path}`.toLowerCase()
+  return /\.(png|jpe?g|webp|gif|svg)$/u.test(text)
+}
+
+interface InterfacePrototypeBase {
+  html: string
+  name: string
+}
+
+function findInterfacePrototypeBase(assetWorkbench: AssetWorkbenchState): InterfacePrototypeBase | null {
+  for (const row of assetWorkbench.uiRows) {
+    const html = row.kind === 'interface' && row.status === 'ready' ? row.result?.html?.trim() : null
+    if (!html) continue
+    return {
+      html,
+      name: row.name || row.result?.panelName || '界面底板',
+    }
+  }
+  return null
+}
+
+function buildInterfacePrototypeBaseInstruction(base: InterfacePrototypeBase, instruction: string) {
+  return [
+    `以素材库界面 HTML「${base.name}」作为本轮原型底板。`,
+    '保留底板已有布局、层级和素材 URL，只围绕当前节点需求做必要的交互状态、文案和局部补充。',
+    '不要重绘底板中已有界面，也不要引用素材库清单外的图片、特效、字体或外链资源。',
+    instruction ? `本轮打磨要求：${instruction}` : '本轮打磨要求：根据当前 PRD 节点补齐可交付的交互状态和必要标注。',
+  ].join('\n')
+}
+
+function buildPrototypeAssetManifest(assetWorkbench: AssetWorkbenchState): PrototypeAssetManifest {
+  const assets: PrototypeAssetManifest['assets'] = []
+  const notes: string[] = []
+
+  for (const row of assetWorkbench.uiRows) {
+    if (row.status !== 'ready' || !row.result) continue
+    if (row.kind === 'interface' && row.result.html?.trim()) {
+      notes.push(`界面类素材「${row.name}」提供可直接复用的 HTML 底板；无现有原型时会优先基于它迭代。`)
+    }
+    const files = row.result.files.filter((file) => file.url && isPreviewableUiFile(file))
+    if (!files.length) {
+      notes.push(`${row.kind === 'interface' ? '界面类素材' : '散图素材'}「${row.name}」没有可直接引用的图片 URL；不要为它虚构路径。`)
+      continue
+    }
+    for (const file of files) {
+      assets.push({
+        id: `${row.id}:${file.path}`,
+        kind: row.kind === 'interface' ? 'interface_html' : 'ui_image',
+        name: row.kind === 'interface' ? `${row.name} / ${file.name}` : `${row.name} / ${file.name}`,
+        url: file.url!,
+        source: 'ui_asset',
+        purpose: row.purpose || row.result.summary,
+        usageNote: row.usageNote || null,
+        originalName: file.name,
+        assetGroupName: row.name,
+      })
+    }
+  }
+
+  for (const row of assetWorkbench.effectRows) {
+    const effectContext = [row.purpose, row.pageHint, row.implementationHint, row.usageNote].filter(Boolean).join(' / ')
+    if (row.status !== 'ready' || row.loadStatus !== 'loaded') {
+      if (effectContext) notes.push(`特效「${row.name}」尚未加载，不允许在 HTML 中表现；用途备注：${effectContext}`)
+      continue
+    }
+    if (!row.previewUrl || row.previewFiles.length === 0) {
+      notes.push(`特效「${row.name}」已加载但没有可预览图片/序列帧/视频/音频，不允许画成真实特效；用途备注：${effectContext || '未填写'}`)
+      continue
+    }
+    for (const [index, file] of row.previewFiles.entries()) {
+      assets.push({
+        id: `${row.id}:preview:${index}`,
+        kind: 'effect_preview',
+        name: row.previewType === 'sequence' ? `${row.name} / 序列帧 ${index + 1}` : `${row.name} / 预览`,
+        url: file.url,
+        source: 'effect_asset',
+        purpose: effectContext || row.purpose || row.pageHint || null,
+        usageNote: row.usageNote || null,
+        originalName: file.name || row.name,
+        assetGroupName: row.name,
+      })
+    }
+  }
+
+  if (assets.length === 0) {
+    notes.push('当前素材库没有可用于 HTML 原型的 ready URL；生成结果只能使用占位和真实界面状态，不能伪造资源。')
+  }
+
+  return {
+    mode: 'audit',
+    assets,
+    notes,
+  }
 }
 
 function buildMvcChildContext(node: PrdNode, tree: Record<string, PrdNode> | null) {
@@ -621,36 +719,49 @@ export function ForgePage() {
     const referenceImages = collectPrototypeImages(evidenceMessages)
     const currentStore = useAppStore.getState()
     const requirementState = buildNodePrototypeRequirement(currentNode, evidenceMessages, currentStore.prdTree)
+    const assetManifest = buildPrototypeAssetManifest(currentStore.assetWorkbench)
     const currentPrototypeState = currentStore.nodePrototypeStates[nodeId ?? '']
     const selectedVariant = currentPrototypeState?.prototypeVariants.find((variant) => variant.index === currentPrototypeState?.selectedVariantIndex)
     const selectedPrototypeHtml = selectedVariant?.html ?? currentPrototypeState?.prototypeHtml ?? null
-    const isUpdate = Boolean(trimmedInstruction && selectedPrototypeHtml)
+    const interfacePrototypeBase = selectedPrototypeHtml ? null : findInterfacePrototypeBase(currentStore.assetWorkbench)
+    const prototypeBaseHtml = selectedVariant?.html ?? selectedPrototypeHtml ?? interfacePrototypeBase?.html ?? null
+    const prototypeBaseIndex = selectedVariant?.index ?? 0
+    const prototypeBaseHistory = selectedVariant?.history ?? []
+    const effectiveInstruction = interfacePrototypeBase
+      ? buildInterfacePrototypeBaseInstruction(interfacePrototypeBase, trimmedInstruction)
+      : trimmedInstruction
+    const isAssetBaseUpdate = Boolean(interfacePrototypeBase && !selectedPrototypeHtml)
+    const isUpdate = Boolean(effectiveInstruction && prototypeBaseHtml)
     const createVariantCount = options?.singlePrototypeOnly ? 1 : 2
     const updateVariantCount = options?.singlePrototypeOnly ? 1 : 2
     let prototypeErrorMessage: string | null = null
 
     setIsGeneratingPrototype(true)
     try {
-      if (isUpdate && selectedVariant?.html) {
-        recordNodePrototypeHistory(nodeId, selectedVariant.html, { mode: 'update', note: `修改前：${trimmedInstruction}` })
+      if (isUpdate && prototypeBaseHtml) {
+        if (!isAssetBaseUpdate) {
+          recordNodePrototypeHistory(nodeId, prototypeBaseHtml, { mode: 'update', note: `修改前：${trimmedInstruction}` })
+        }
         setNodePrototypeVariants(nodeId, Array.from({ length: updateVariantCount }, (_, offset) => ({
-          index: selectedVariant.index + offset,
-          html: offset === 0 ? selectedVariant.html : null,
+          index: prototypeBaseIndex + offset,
+          html: offset === 0 ? prototypeBaseHtml : null,
           status: 'streaming' as const,
-          focus: offset === 0 ? selectedVariant.focus : undefined,
-          history: offset === 0 ? selectedVariant.history : undefined,
+          focus: offset === 0 ? selectedVariant?.focus : undefined,
+          history: offset === 0 ? prototypeBaseHistory : undefined,
+          assetAudit: offset === 0 ? selectedVariant?.assetAudit : undefined,
         })))
         let didReceivePrototypeHtml = false
         await streamPrototype(
           settings.proxyBaseUrl,
           requirementState,
           {
-            currentHtml: selectedVariant.html,
-            instruction: trimmedInstruction,
+            currentHtml: prototypeBaseHtml,
+            instruction: effectiveInstruction,
             images: referenceImages,
             numVariants: updateVariantCount,
-            variantIndex: selectedVariant.index,
-            history: selectedVariant.history ?? [],
+            variantIndex: prototypeBaseIndex,
+            history: prototypeBaseHistory,
+            assetManifest,
           },
           (event) => {
             if (event.type === 'setCode') {
@@ -661,7 +772,7 @@ export function ForgePage() {
                 focus: event.focus,
                 history: event.history,
               })
-              if (event.variantIndex === selectedVariant.index && event.html) selectNodePrototypeVariant(nodeId, event.variantIndex)
+              if (event.variantIndex === prototypeBaseIndex && event.html) selectNodePrototypeVariant(nodeId, event.variantIndex)
             } else if (event.type === 'variantComplete') {
               if (event.html) didReceivePrototypeHtml = true
               updateNodePrototypeVariant(nodeId, event.variantIndex, {
@@ -669,8 +780,9 @@ export function ForgePage() {
                 status: 'complete',
                 focus: event.focus,
                 history: event.history,
+                assetAudit: event.assetAudit,
               })
-              if (event.variantIndex === selectedVariant.index && event.html) selectNodePrototypeVariant(nodeId, event.variantIndex)
+              if (event.variantIndex === prototypeBaseIndex && event.html) selectNodePrototypeVariant(nodeId, event.variantIndex)
             } else if (event.type === 'variantError') {
               prototypeErrorMessage = event.message ?? prototypeErrorMessage
               updateNodePrototypeVariant(nodeId, event.variantIndex, { status: 'error', focus: event.focus, error: event.message })
@@ -681,15 +793,11 @@ export function ForgePage() {
           throw new Error(prototypeErrorMessage ?? 'Prototype update did not return complete HTML.')
         }
         const variants = useAppStore.getState().nodePrototypeStates[nodeId]?.prototypeVariants ?? []
-        const completedVariant = variants.find((variant) => variant.index === selectedVariant.index && variant.status === 'complete' && variant.html)
+        const completedVariant = variants.find((variant) => variant.index === prototypeBaseIndex && variant.status === 'complete' && variant.html)
           ?? variants.find((variant) => variant.status === 'complete' && variant.html)
         if (completedVariant) selectNodePrototypeVariant(nodeId, completedVariant.index)
         prototypeCompleted = didReceivePrototypeHtml
         return prototypeCompleted
-      }
-
-      if (isUpdate && selectedPrototypeHtml) {
-        throw new Error('fallback to non-streaming prototype update')
       }
 
       setNodePrototypeVariants(nodeId, Array.from({ length: createVariantCount }, (_, index) => ({ index, html: null, status: 'streaming' as const })))
@@ -697,7 +805,7 @@ export function ForgePage() {
       await streamPrototype(
         settings.proxyBaseUrl,
         requirementState,
-        { instruction: trimmedInstruction || undefined, images: referenceImages, numVariants: createVariantCount },
+        { instruction: effectiveInstruction || undefined, images: referenceImages, numVariants: createVariantCount, assetManifest },
         (event) => {
           if (event.type === 'setCode') {
             if (event.html) didReceivePrototypeHtml = true
@@ -714,6 +822,7 @@ export function ForgePage() {
               status: 'complete',
               focus: event.focus,
               history: event.history,
+              assetAudit: event.assetAudit,
             })
             if (event.html && useAppStore.getState().nodePrototypeStates[nodeId]?.selectedVariantIndex === -1) {
               selectNodePrototypeVariant(nodeId, event.variantIndex)
@@ -734,12 +843,13 @@ export function ForgePage() {
         settings.proxyBaseUrl,
         requirementState,
         {
-          currentHtml: isUpdate ? selectedPrototypeHtml : null,
-          instruction: trimmedInstruction || undefined,
+          currentHtml: isUpdate ? prototypeBaseHtml : null,
+          instruction: effectiveInstruction || undefined,
           images: referenceImages,
           numVariants: isUpdate ? updateVariantCount : createVariantCount,
-          variantIndex: isUpdate ? selectedVariant?.index : undefined,
-          history: isUpdate ? selectedVariant?.history : undefined,
+          variantIndex: isUpdate ? prototypeBaseIndex : undefined,
+          history: isUpdate ? prototypeBaseHistory : undefined,
+          assetManifest,
         },
       )
 
@@ -751,6 +861,7 @@ export function ForgePage() {
           focus: variant.focus,
           history: variant.history,
           error: variant.error,
+          assetAudit: variant.assetAudit,
         })))
         const chosen = result.variants.find((variant) => variant.status === 'complete' && variant.html) ?? result.variants[0]
         if (chosen?.html) {
@@ -767,6 +878,7 @@ export function ForgePage() {
           focus: variant.focus,
           history: variant.history,
           error: variant.error,
+          assetAudit: variant.assetAudit,
         })))
         const chosen = result.variants.find((variant) => variant.status === 'complete' && variant.html)
         if (chosen?.html) {

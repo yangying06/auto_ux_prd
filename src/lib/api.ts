@@ -13,6 +13,8 @@ import type {
 import type { UXRequirementState } from '../types/uxRequirement'
 import type { MapAdjustmentOperation, PrdImportPreview, PrdNode, PrdNodeBackendContractRef, PrdNodeEvidenceRef, PrdNodeOperationSuggestion, PrdPerformanceSpec } from '../types/prdNode'
 import type { QaChatResponse, QaIssue } from '../types/qa'
+import type { EffectAssetRow, UiAssetKind, UiAssetParseResult } from '../types/assetWorkbench'
+import type { PrototypeAssetAuditIssue, PrototypeAssetManifest } from '../types/prototypeAssets'
 
 async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
   let response: Response
@@ -87,6 +89,7 @@ export interface PrototypeVariantPayload {
   appliedEdits: number
   history?: string[]
   error?: string
+  assetAudit?: PrototypeAssetAuditIssue[]
 }
 
 export interface PrototypeResponse {
@@ -104,6 +107,7 @@ export function generatePrototype(
     variantIndex?: number
     history?: string[]
     stream?: boolean
+    assetManifest?: PrototypeAssetManifest
   } = {},
 ) {
   const imageBlocks = (options.images ?? []).filter((block) => block.type === 'image')
@@ -118,6 +122,7 @@ export function generatePrototype(
       variantIndex: options.variantIndex ?? null,
       history: options.history ?? null,
       stream: options.stream ?? null,
+      assetManifest: options.assetManifest ?? null,
     }),
   })
 }
@@ -250,6 +255,64 @@ export function importFigmaFrame(
   return requestJson<FigmaFrameImportResponse>(baseUrl, '/api/figma/frame', {
     method: 'POST',
     body: JSON.stringify(payload),
+  })
+}
+
+export function parseUiFigmaAsset(
+  baseUrl: string,
+  payload: {
+    url: string
+    kind: UiAssetKind
+  },
+) {
+  return requestJson<UiAssetParseResult>(baseUrl, '/api/assets/ui/figma', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export interface EffectAssetScanResponse {
+  sourceRoot: string
+  scannedFileCount: number
+  truncated: boolean
+  rows: EffectAssetRow[]
+}
+
+export interface EffectAssetScanOptions {
+  smartNotes?: boolean
+  contextHints?: string[]
+}
+
+export function scanEffectAssetDirectory(baseUrl: string, rootPath: string, options: EffectAssetScanOptions = {}) {
+  return requestJson<EffectAssetScanResponse>(baseUrl, '/api/assets/effects/scan', {
+    method: 'POST',
+    body: JSON.stringify({
+      rootPath,
+      smartNotes: options.smartNotes ?? false,
+      contextHints: options.contextHints ?? [],
+    }),
+  })
+}
+
+export interface EffectAssetLoadResponse {
+  row: EffectAssetRow
+}
+
+export function loadEffectAssetRow(baseUrl: string, row: EffectAssetRow) {
+  return requestJson<EffectAssetLoadResponse>(baseUrl, '/api/assets/effects/load', {
+    method: 'POST',
+    body: JSON.stringify({ row }),
+  })
+}
+
+export interface OpenAssetLocalPathResponse {
+  ok: true
+  path: string
+}
+
+export function openAssetLibraryLocalPath(baseUrl: string) {
+  return requestJson<OpenAssetLocalPathResponse>(baseUrl, '/api/assets/open-local-path', {
+    method: 'POST',
   })
 }
 

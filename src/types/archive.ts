@@ -3,6 +3,7 @@ import type { MapAdjustmentOperation, PrdNodeOperationSuggestion, PrdNodePolishR
 import type { PrototypeVariant } from './prototypeVariant'
 import type { QaIssue } from './qa'
 import type { UXRequirementState } from './uxRequirement'
+import type { AssetWorkbenchState } from './assetWorkbench'
 
 export const PROJECT_ARCHIVE_SCHEMA_VERSION = 1
 export const PROJECT_ARCHIVE_EXTENSION = 'gpf'
@@ -48,6 +49,7 @@ export interface ProjectWorkspaceSnapshot {
   qaIssues?: Record<string, QaIssue>
   mapAdjustmentMessages?: ChatMessage[]
   pendingMapAdjustmentOperations?: MapAdjustmentOperation[]
+  assetWorkbench?: AssetWorkbenchState
   sourceDocument: ProjectSourceDocument | null
 }
 

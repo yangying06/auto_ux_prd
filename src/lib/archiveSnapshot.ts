@@ -25,6 +25,7 @@ export function createProjectWorkspaceSnapshot(state: AppStoreState): ProjectWor
     qaIssues: state.qaIssues,
     mapAdjustmentMessages: persistableMessages(state.mapAdjustmentMessages),
     pendingMapAdjustmentOperations: state.pendingMapAdjustmentOperations,
+    assetWorkbench: state.assetWorkbench,
     sourceDocument: state.sourceDocument,
   })
 }
