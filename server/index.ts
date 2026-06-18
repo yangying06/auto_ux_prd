@@ -12,7 +12,7 @@ import { buildDeliverySections, collectBackendContracts, collectDeliveryEvidence
 import { buildUiOnlyPrototypeInstruction, isUiOnlyPrototypeFeedback } from '../src/lib/nodeChatIntent'
 import { applyPrototypeEdit, normalizeGeneratedPrototypeHtml, normalizePrototypeHtml } from '../src/lib/prototypeUtils'
 import type { UXRequirementState } from '../src/types/uxRequirement'
-import type { PrototypeAssetAuditIssue, PrototypeAssetManifest } from '../src/types/prototypeAssets'
+import type { PrototypeAssetAuditIssue, PrototypeAssetManifest, PrototypeInterfaceBlueprint, PrototypeInterfaceBlueprintNode, PrototypeInterfaceRect } from '../src/types/prototypeAssets'
 import type { DocumentKeywordSignal, DocumentSourceIndex, DocumentSourceIssue, DocumentSourceSection, MapAdjustmentOperation, PrdImportCandidateNode, PrdImportPreview, PrdNode, PrdNodeAudience, PrdNodeBackendContractKind, PrdNodeBackendContractRef, PrdNodeEvidenceRef, PrdNodeOperationPatch, PrdNodeOperationSuggestion, PrdNodeReference, PrdNodeSourceKind, PrdNodeStatus } from '../src/types/prdNode'
 import type { ReferenceImageClassificationRequest, ReferenceImageClassificationResponse, ReferenceImageRole } from '../src/types/chat'
 import type { QaAttachment, QaChatRequest, QaChatResponse, QaIssuePatch, QaIssuePriority, QaIssueSeverity } from '../src/types/qa'
@@ -21,6 +21,7 @@ import { collectFigmaNumericTextSlots, redactNumericTextFromPng } from './figmaN
 import { extractNodeChatSuffix } from './nodeChatResponse'
 import { auditPrototypeAssets, buildPrototypeAssetManifestSection, normalizePrototypeAssetManifest } from './prototypeAssetAudit'
 import { buildVariantConfigs, clampVariantCount, DEFAULT_CREATE_VARIANTS, DEFAULT_UPDATE_VARIANTS } from './prototypePrompts'
+import { normalizeAiProviderError } from './aiProviderError'
 import type { FigmaNumericTextSlot } from './figmaNumericText'
 
 dotenv.config()
@@ -66,6 +67,8 @@ const FIGMA_ASSET_BUNDLE_TTL_MS = Number.parseInt(process.env.FIGMA_ASSET_BUNDLE
 const FIGMA_EXTRACT_MAX_IMAGES = Math.min(8, Math.max(2, Number.parseInt(process.env.FIGMA_EXTRACT_MAX_IMAGES ?? '4', 10)))
 const FIGMA_IMAGE_SCALE = Math.min(3, Math.max(0.5, Number.parseFloat(process.env.FIGMA_IMAGE_SCALE ?? '1.25')))
 const FIGMA_MAX_IMAGE_BYTES = Math.max(512 * 1024, Number.parseInt(process.env.FIGMA_MAX_IMAGE_BYTES ?? `${4 * 1024 * 1024}`, 10))
+const FIGMA_IMAGE_EXPORT_RETRY_ATTEMPTS = Math.min(3, Math.max(1, Number.parseInt(process.env.FIGMA_IMAGE_EXPORT_RETRY_ATTEMPTS ?? '2', 10)))
+const FIGMA_IMAGE_EXPORT_RETRY_DELAY_MS = Math.max(100, Number.parseInt(process.env.FIGMA_IMAGE_EXPORT_RETRY_DELAY_MS ?? '700', 10))
 const EFFECT_SCAN_MAX_DEPTH = Math.max(1, Number.parseInt(process.env.EFFECT_SCAN_MAX_DEPTH ?? '5', 10))
 const EFFECT_SCAN_MAX_FILES = Math.max(20, Number.parseInt(process.env.EFFECT_SCAN_MAX_FILES ?? '1200', 10))
 
@@ -317,6 +320,7 @@ interface FigmaPrefabFrameResponse {
   assetsDir: string | null
   bundleId: string
   files: ParsedFigmaAssetFile[]
+  interfaceBlueprint: PrototypeInterfaceBlueprint | null
   assetCount: number
   zipFileCount: number
 }
@@ -335,6 +339,7 @@ interface UiAssetParseResult {
   manifestPath?: string | null
   assetsDir?: string | null
   html?: string | null
+  interfaceBlueprint?: PrototypeInterfaceBlueprint | null
   assetCount: number
   zipFileCount?: number | null
   imageCount?: number | null
@@ -3958,13 +3963,19 @@ async function fetchFigmaSelectedNode(fileKey: string, nodeId: string, token: st
   return document
 }
 
-async function fetchFigmaImageUrl(fileKey: string, token: string, nodeId: string, scale: number) {
+async function fetchFigmaImageUrl(
+  fileKey: string,
+  token: string,
+  nodeId: string,
+  scale: number,
+  options: { contentsOnly?: boolean } = {},
+) {
   const url = new URL(figmaApiUrl(`/v1/images/${encodeURIComponent(fileKey)}`))
   url.searchParams.set('ids', nodeId)
   url.searchParams.set('format', 'png')
   url.searchParams.set('scale', String(scale))
   url.searchParams.set('use_absolute_bounds', 'true')
-  url.searchParams.set('contents_only', 'true')
+  url.searchParams.set('contents_only', options.contentsOnly === false ? 'false' : 'true')
   const data = await fetchFigmaJson<FigmaImageRenderResponse>(url.toString(), token, '导出 Figma 子图失败')
   if (data.err) throw new Error(`导出 Figma 子图失败：${data.err}`)
   const imageUrl = data.images?.[nodeId] ?? data.images?.[nodeId.replace(/:/g, '-')]
@@ -4029,13 +4040,25 @@ async function downloadFigmaImageBytes(imageUrl: string, label: string) {
 }
 
 async function renderFigmaThumbnailAsset(fileKey: string, nodeId: string, token: string, assetBaseUrl: string, name: string) {
-  const imageUrl = await fetchFigmaImageUrl(fileKey, token, nodeId, 0.35)
-  const image = await downloadFigmaImageBytes(imageUrl, 'Figma 缩略图')
-  const ext = extensionForMediaType(image.mediaType)
-  const safeNodeId = nodeId.replace(/[^a-z0-9_-]+/giu, '-').replace(/-+/g, '-')
-  const assetPath = `figma-thumbnail/${sanitizeFigmaAssetName(name)}-${safeNodeId}.${ext}`
-  const bundleId = registerFigmaAssetBundle({ [assetPath]: image.bytes })
-  return buildAssetUrl(assetBaseUrl, bundleId, assetPath)
+  let lastError: unknown = null
+  for (const scale of uniqueScales([0.35, 0.25])) {
+    for (let attempt = 1; attempt <= FIGMA_IMAGE_EXPORT_RETRY_ATTEMPTS; attempt += 1) {
+      try {
+        const imageUrl = await fetchFigmaImageUrl(fileKey, token, nodeId, scale, { contentsOnly: false })
+        const image = await downloadFigmaImageBytes(imageUrl, `Figma 缩略图 @${scale}x`)
+        const ext = extensionForMediaType(image.mediaType)
+        const safeNodeId = nodeId.replace(/[^a-z0-9_-]+/giu, '-').replace(/-+/g, '-')
+        const assetPath = `figma-thumbnail/${sanitizeFigmaAssetName(name)}-${safeNodeId}.${ext}`
+        const bundleId = registerFigmaAssetBundle({ [assetPath]: image.bytes })
+        return buildAssetUrl(assetBaseUrl, bundleId, assetPath)
+      } catch (error) {
+        lastError = error
+        console.warn(`[figma] thumbnail export ${nodeId} at ${scale}x attempt ${attempt} failed:`, error)
+        if (attempt < FIGMA_IMAGE_EXPORT_RETRY_ATTEMPTS) await sleep(FIGMA_IMAGE_EXPORT_RETRY_DELAY_MS)
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('Figma 缩略图导出失败。')
 }
 
 async function importFigmaFrame(payload: FigmaFrameRequest, assetBaseUrl: string): Promise<FigmaFrameResponse> {
@@ -4066,27 +4089,31 @@ async function importFigmaFrame(payload: FigmaFrameRequest, assetBaseUrl: string
     const label = candidate.isRoot ? 'Figma 整帧' : `Figma 子图 ${index + 1}`
     let exported = false
     for (const scale of figmaExportScales(candidate)) {
-      try {
-        const url = await fetchFigmaImageUrl(fileKey, token, candidate.node.id, scale)
-        const image = await downloadFigmaImageBytes(url, `${label} @${scale}x`)
-        const numericTextSlots = collectFigmaNumericTextSlots(candidate.node)
-        const bytes = image.mediaType === 'image/png'
-          ? redactNumericTextFromPng(image.bytes, numericTextSlots, { width: candidate.width, height: candidate.height })
-          : image.bytes
-        downloaded.push({
-          candidate,
-          bytes,
-          mediaType: image.mediaType,
-          scale,
-          numericTextSlots,
-          data: Buffer.from(bytes).toString('base64'),
-          assetPath: figmaAssetPath(candidate, index, image.mediaType),
-        })
-        exported = true
-        break
-      } catch (err) {
-        console.warn(`[figma] export ${candidate.node.id} at ${scale}x failed:`, err)
+      for (let attempt = 1; attempt <= FIGMA_IMAGE_EXPORT_RETRY_ATTEMPTS; attempt += 1) {
+        try {
+          const url = await fetchFigmaImageUrl(fileKey, token, candidate.node.id, scale)
+          const image = await downloadFigmaImageBytes(url, `${label} @${scale}x`)
+          const numericTextSlots = collectFigmaNumericTextSlots(candidate.node)
+          const bytes = image.mediaType === 'image/png'
+            ? redactNumericTextFromPng(image.bytes, numericTextSlots, { width: candidate.width, height: candidate.height })
+            : image.bytes
+          downloaded.push({
+            candidate,
+            bytes,
+            mediaType: image.mediaType,
+            scale,
+            numericTextSlots,
+            data: Buffer.from(bytes).toString('base64'),
+            assetPath: figmaAssetPath(candidate, index, image.mediaType),
+          })
+          exported = true
+          break
+        } catch (err) {
+          console.warn(`[figma] export ${candidate.node.id} at ${scale}x attempt ${attempt} failed:`, err)
+          if (attempt < FIGMA_IMAGE_EXPORT_RETRY_ATTEMPTS) await sleep(FIGMA_IMAGE_EXPORT_RETRY_DELAY_MS)
+        }
       }
+      if (exported) break
     }
 
     if (!exported) {
@@ -4324,6 +4351,75 @@ function labelStyleFor(node: UiSpecNode) {
 function countUiSpecNodes(node: UiSpecNode | undefined): number {
   if (!node) return 0
   return 1 + (node.children ?? []).reduce((sum, child) => sum + countUiSpecNodes(child), 0)
+}
+
+function uiSpecRectSummary(rect: UiSpecRect | undefined): PrototypeInterfaceRect {
+  return {
+    x: Math.round(cssNumber(rect?.x)),
+    y: Math.round(cssNumber(rect?.y)),
+    width: Math.max(1, Math.round(cssNumber(rect?.width, 1))),
+    height: Math.max(1, Math.round(cssNumber(rect?.height, 1))),
+  }
+}
+
+function summarizeUiSpecNodes(
+  node: UiSpecNode,
+  currentPath = 'root',
+  output: PrototypeInterfaceBlueprintNode[] = [],
+): PrototypeInterfaceBlueprintNode[] {
+  output.push({
+    path: currentPath,
+    name: node.name || node.type || 'Node',
+    type: node.type || 'Node',
+    rect: uiSpecRectSummary(node.rect),
+    asset: node.asset || null,
+    text: propString(node.properties, 'text'),
+    visible: typeof node.visible === 'boolean' ? node.visible : null,
+  })
+
+  for (const [index, child] of (node.children ?? []).entries()) {
+    if (output.length >= 80) break
+    summarizeUiSpecNodes(child, `${currentPath}/${index + 1}:${child.name || child.type || 'Node'}`, output)
+  }
+
+  return output
+}
+
+function buildPrototypeInterfaceBlueprint(
+  spec: UiSpecDocument,
+  options: {
+    id: string
+    name: string
+    sourceUrl: string
+    uiSpecPath: string
+    uiSpecUrl: string
+    manifestPath: string | null
+    manifestUrl: string | null
+    htmlAvailable: boolean
+  },
+): PrototypeInterfaceBlueprint | null {
+  if (!spec.root?.rect) return null
+  const nodes = summarizeUiSpecNodes(spec.root).slice(0, 80)
+  return {
+    id: options.id,
+    name: options.name,
+    sourceRowId: null,
+    sourceUrl: options.sourceUrl,
+    uiSpecPath: options.uiSpecPath,
+    uiSpecUrl: options.uiSpecUrl,
+    manifestPath: options.manifestPath,
+    manifestUrl: options.manifestUrl,
+    htmlAvailable: options.htmlAvailable,
+    designSize: {
+      width: typeof spec.designSize?.width === 'number' ? Math.round(spec.designSize.width) : Math.round(cssNumber(spec.root.rect.width, 1)),
+      height: typeof spec.designSize?.height === 'number' ? Math.round(spec.designSize.height) : Math.round(cssNumber(spec.root.rect.height, 1)),
+    },
+    root: nodes[0] ?? null,
+    nodes,
+    assetNames: (spec.assets ?? []).map((asset) => asset.name).filter((name): name is string => Boolean(name)).slice(0, 80),
+    assetCount: spec.assets?.length ?? 0,
+    nodeCount: countUiSpecNodes(spec.root),
+  }
 }
 
 function renderUiSpecNode(node: UiSpecNode, assetUrls: Map<string, string>, depth = 0): string {
@@ -4578,6 +4674,7 @@ function buildUiAssetParseResultFromPrefab(frame: FigmaPrefabFrameResponse, pars
     manifestPath: frame.manifestPath,
     assetsDir: frame.assetsDir,
     html: includeHtml ? frame.html : null,
+    interfaceBlueprint: frame.interfaceBlueprint,
     assetCount: frame.assetCount,
     zipFileCount: frame.zipFileCount,
     imageCount: frame.assetCount,
@@ -5198,6 +5295,16 @@ async function importFigmaFrameFromPrefab(
   const assetsDir = path.resolve(outputDir, 'assets')
   const assetCount = spec.assets?.length ?? 0
   const thumbnailUrl = await thumbnailPromise
+  const interfaceBlueprint = buildPrototypeInterfaceBlueprint(spec, {
+    id: `${fileKey}:${nodeId}`,
+    name: panelName,
+    sourceUrl,
+    uiSpecPath,
+    uiSpecUrl: buildAssetUrl(assetBaseUrl, bundleId, uiSpecZipPath),
+    manifestPath,
+    manifestUrl: manifestZipPath ? buildAssetUrl(assetBaseUrl, bundleId, manifestZipPath) : null,
+    htmlAvailable: Boolean(html.trim()),
+  })
 
   return {
     fileKey,
@@ -5217,6 +5324,7 @@ async function importFigmaFrameFromPrefab(
     assetsDir,
     bundleId,
     files: buildPrefabParsedFiles(spec, uiSpecZipPath, manifestZipPath, bundleId, assetBaseUrl, persisted.extractedRoot),
+    interfaceBlueprint,
     assetCount,
     zipFileCount: Object.keys(files).length,
   }
@@ -5380,7 +5488,7 @@ function normalizePrototypeModelResponse(raw: string, label: string) {
 }
 
 function errorMessageFromUnknown(error: unknown, fallback = '原型生成失败。') {
-  return error instanceof Error && error.message ? error.message : fallback
+  return normalizeAiProviderError(error, fallback).message
 }
 
 function truncateForPrototypeRepair(input: string, maxLength = 8000) {
@@ -6219,10 +6327,18 @@ app.post('/api/open-doc', async (req, res) => {
   }
 })
 
-app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  const status = typeof error === 'object' && error && 'status' in error && typeof error.status === 'number' ? error.status : 500
-  const message = error instanceof Error ? error.message : '本地代理请求失败。'
-  res.status(status).json({ error: message })
+app.use((error: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (res.headersSent) {
+    next(error)
+    return
+  }
+  const normalized = normalizeAiProviderError(error)
+  res.status(normalized.status).json({
+    error: normalized.message,
+    code: normalized.code,
+    retryAfterSeconds: normalized.retryAfterSeconds,
+    modelGroup: normalized.modelGroup,
+  })
 })
 
 app.listen(port, '127.0.0.1', () => {

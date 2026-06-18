@@ -13,7 +13,7 @@ const manifest: PrototypeAssetManifest = {
   assets: [
     {
       id: 'ui-main:bg',
-      kind: 'interface_html',
+      kind: 'interface_image',
       name: '主界面 / 背景',
       url: 'http://127.0.0.1:8787/api/figma/assets/bundle-a/assets/bg.png',
       source: 'ui_asset',
@@ -39,29 +39,84 @@ const manifest: PrototypeAssetManifest = {
       originalName: 'reward_fx',
     },
   ],
+  interfaceBlueprints: [
+    {
+      id: 'ui-main',
+      name: '主界面',
+      sourceRowId: 'ui-main',
+      sourceUrl: 'https://figma.com/design/file?node-id=1-2',
+      uiSpecPath: 'D:/cache/UISlots/ui_spec.json',
+      uiSpecUrl: 'http://127.0.0.1:8787/api/figma/assets/bundle-a/UISlots/ui_spec.json',
+      manifestPath: 'D:/cache/UISlots/export_manifest.json',
+      manifestUrl: 'http://127.0.0.1:8787/api/figma/assets/bundle-a/UISlots/export_manifest.json',
+      htmlAvailable: true,
+      designSize: { width: 750, height: 1624 },
+      root: {
+        path: 'root',
+        name: '主界面',
+        type: 'Frame',
+        rect: { x: 0, y: 0, width: 750, height: 1624 },
+        asset: null,
+        text: null,
+        visible: null,
+      },
+      nodes: [
+        {
+          path: 'root',
+          name: '主界面',
+          type: 'Frame',
+          rect: { x: 0, y: 0, width: 750, height: 1624 },
+          asset: null,
+          text: null,
+          visible: null,
+        },
+        {
+          path: 'root/1:bg',
+          name: '背景',
+          type: 'Sprite',
+          rect: { x: 0, y: 0, width: 750, height: 1624 },
+          asset: 'bg.png',
+          text: null,
+          visible: null,
+        },
+      ],
+      assetNames: ['bg.png'],
+      assetCount: 1,
+      nodeCount: 2,
+    },
+  ],
   notes: ['特效「spin_fx」已加载但没有可预览文件，不允许画成真实特效。'],
 }
 
 const normalized = normalizePrototypeAssetManifest({
-  mode: 'audit',
+  mode: 'strict',
   assets: [
     manifest.assets[0],
     { id: 'bad-kind', kind: 'unknown', name: 'bad', url: 'http://bad', source: 'ui_asset' },
     { id: '', kind: 'ui_image', name: 'empty id', url: 'http://bad', source: 'ui_asset' },
   ],
+  interfaceBlueprints: manifest.interfaceBlueprints,
   notes: ['  keep me  ', '', 404],
 })
 
-assert.equal(normalized?.mode, 'audit')
+assert.equal(normalized?.mode, 'strict')
 assert.equal(normalized?.assets.length, 1, 'invalid manifest assets are dropped')
 assert.deepEqual(normalized?.notes, ['keep me'], 'notes are trimmed and filtered')
+assert.equal(normalized?.interfaceBlueprints?.length, 1, 'interface blueprints are normalized')
+assert.equal(normalized?.interfaceBlueprints[0]?.root?.rect.width, 750, 'interface blueprint root rect is preserved')
 
 const section = buildPrototypeAssetManifestSection(manifest)
-assert.match(section, /素材库审核模式/u)
-assert.match(section, /界面HTML底板/u)
+assert.match(section, /草稿预览素材审核/u)
+assert.match(section, /界面子图/u)
 assert.match(section, /散图\/图标\/item/u)
 assert.match(section, /特效预览/u)
 assert.match(section, /没有预览的 Spine\/Prefab\/粒子资源不要画成真实特效/u)
+assert.match(section, /ui_spec\.json 是“用界面生成”的最高版式依据/u)
+assert.match(section, /root\/1:bg \| 背景 \[Sprite\] \| rect\(x=0, y=0, w=750, h=1624\)/u)
+
+const strictSection = buildPrototypeAssetManifestSection({ ...manifest, mode: 'strict' })
+assert.match(strictSection, /资源库标准模式/u)
+assert.match(strictSection, /硬约束/u)
 
 const refs = extractPrototypeResourceReferences(`
   <link href="https://cdn.tailwindcss.com">
@@ -99,6 +154,14 @@ assert.deepEqual(
   ['data_url', 'external_resource', 'local_path'],
   'audit flags data URLs, external URLs, and unlisted relative paths',
 )
+
+const strictIssues = auditPrototypeAssets('<img src="https://example.com/fake.png">', { ...manifest, mode: 'strict' })
+assert.deepEqual(
+  strictIssues.map((issue) => issue.severity),
+  ['error', 'error'],
+  'strict mode upgrades resource violations to errors and requires interface child images',
+)
+assert.deepEqual(strictIssues.map((issue) => issue.code), ['external_resource', 'missing_interface_asset'])
 
 const emptyIssues = auditPrototypeAssets('<img src="./placeholder.png">', { mode: 'audit', assets: [], notes: [] })
 assert.deepEqual(

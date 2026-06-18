@@ -1,4 +1,41 @@
-export type PrototypeAssetKind = 'interface_html' | 'ui_image' | 'effect_preview'
+export type PrototypeAssetKind = 'interface_html' | 'interface_image' | 'ui_image' | 'effect_preview'
+export type PrototypeAssetManifestMode = 'audit' | 'strict'
+export type PrototypeGenerationMode = 'draft_preview' | 'resource_standard'
+
+export interface PrototypeInterfaceRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface PrototypeInterfaceBlueprintNode {
+  path: string
+  name: string
+  type: string
+  rect: PrototypeInterfaceRect
+  asset?: string | null
+  text?: string | null
+  visible?: boolean | null
+}
+
+export interface PrototypeInterfaceBlueprint {
+  id: string
+  name: string
+  sourceRowId?: string | null
+  sourceUrl?: string | null
+  uiSpecPath?: string | null
+  uiSpecUrl?: string | null
+  manifestPath?: string | null
+  manifestUrl?: string | null
+  htmlAvailable?: boolean
+  designSize?: { width?: number | null; height?: number | null } | null
+  root?: PrototypeInterfaceBlueprintNode | null
+  nodes: PrototypeInterfaceBlueprintNode[]
+  assetNames: string[]
+  assetCount?: number | null
+  nodeCount?: number | null
+}
 
 export interface PrototypeAllowedAsset {
   id: string
@@ -13,9 +50,10 @@ export interface PrototypeAllowedAsset {
 }
 
 export interface PrototypeAssetManifest {
-  mode: 'audit'
+  mode: PrototypeAssetManifestMode
   assets: PrototypeAllowedAsset[]
   notes: string[]
+  interfaceBlueprints?: PrototypeInterfaceBlueprint[]
 }
 
 export type PrototypeAssetAuditSeverity = 'warning' | 'error'
@@ -26,6 +64,7 @@ export type PrototypeAssetAuditIssueCode =
   | 'local_path'
   | 'missing_effect_preview'
   | 'empty_manifest'
+  | 'missing_interface_asset'
 
 export interface PrototypeAssetAuditIssue {
   code: PrototypeAssetAuditIssueCode

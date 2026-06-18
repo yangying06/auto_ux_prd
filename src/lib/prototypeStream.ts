@@ -17,6 +17,20 @@ interface PrototypeStreamOptions {
   variantIndex?: number
   history?: string[]
   assetManifest?: PrototypeAssetManifest
+  signal?: AbortSignal
+}
+
+function streamErrorMessage(data: unknown, status: number) {
+  if (data && typeof data === 'object') {
+    const record = data as Record<string, unknown>
+    if (typeof record.error === 'string' && record.error.trim()) return record.error
+    if (record.error && typeof record.error === 'object') {
+      const nested = record.error as Record<string, unknown>
+      if (typeof nested.message === 'string' && nested.message.trim()) return nested.message
+    }
+    if (typeof record.message === 'string' && record.message.trim()) return record.message
+  }
+  return `Prototype stream failed: ${status}`
 }
 
 export async function streamPrototype(
@@ -40,13 +54,13 @@ export async function streamPrototype(
       assetManifest: options.assetManifest ?? null,
       stream: true,
     }),
+    signal: options.signal,
   })
 
   if (!response.ok) {
     let message = `Prototype stream failed: ${response.status}`
     try {
-      const data = await response.json() as { error?: string }
-      if (data.error) message = data.error
+      message = streamErrorMessage(await response.json(), response.status)
     } catch { /* use status */ }
     throw new Error(message)
   }

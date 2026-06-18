@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useLocation, useParams } from 'wouter'
 import { ForgeChat } from '../components/map/ForgeChat'
 import { ForgeNodePanel } from '../components/map/ForgeNodePanel'
+import { AssetWorkbenchModal } from '../components/map/AssetWorkbenchModal'
 import { classifyReferenceImage, generatePrototype, importFigmaFrame, sendNodeChatMessage } from '../lib/api'
 import { formatPerformanceSpecForPrompt, resolveNodePerformanceSpec } from '../lib/performanceOrchestration'
 import { formatSectionTitle, formatSpecLens, hasNodeSections, resolveNodeSpecLens } from '../lib/prdNodeLens'
@@ -14,18 +15,38 @@ import type { FigmaFrameImportResponse, NodeChatOptions } from '../lib/api'
 import type { AssetWorkbenchState } from '../types/assetWorkbench'
 import type { ChatMessage, ContentBlock, ReferenceImageClassificationRequest } from '../types/chat'
 import type { PrdNode } from '../types/prdNode'
-import type { PrototypeAssetManifest } from '../types/prototypeAssets'
+import type { PrototypeAssetManifest, PrototypeGenerationMode, PrototypeInterfaceBlueprint } from '../types/prototypeAssets'
 import type { AssetDependency, UXRequirementState } from '../types/uxRequirement'
 
 const MAX_PROTOTYPE_IMAGES = 6
 
 type NodePolishPatch = NonNullable<Awaited<ReturnType<typeof sendNodeChatMessage>>['nodePatch']>
-type ForgeSendOptions = NodeChatOptions & { suppressUserEcho?: boolean }
+type ForgeSendOptions = NodeChatOptions & { suppressUserEcho?: boolean; generationMode?: PrototypeGenerationMode }
+type ForgePrototypeOptions = {
+  singlePrototypeOnly?: boolean
+  recordInstruction?: boolean
+  evidenceContent?: ChatMessage['content']
+  currentTurnOnly?: boolean
+  generationMode?: PrototypeGenerationMode
+  preferredInterfaceAssetId?: string | null
+  forceInterfaceBase?: boolean
+}
 
 const POLISH_SECTION_RE = /\n\n## Deep Forge .*\n[\s\S]*$/u
 
 function errorMessageFromUnknown(error: unknown, fallback = 'Prototype update failed.') {
   return error instanceof Error && error.message ? error.message : fallback
+}
+
+function isAbortError(error: unknown) {
+  return typeof error === 'object'
+    && error !== null
+    && 'name' in error
+    && String((error as { name?: unknown }).name) === 'AbortError'
+}
+
+function prototypeGenerationCancelledError() {
+  return new DOMException('已取消原型生成。', 'AbortError')
 }
 
 function contentText(content: ChatMessage['content']) {
@@ -162,37 +183,152 @@ function isPreviewableUiFile(file: { url?: string | null; type?: string | null; 
 interface InterfacePrototypeBase {
   html: string
   name: string
+  rowId: string
+  blueprint: PrototypeInterfaceBlueprint | null
 }
 
-function findInterfacePrototypeBase(assetWorkbench: AssetWorkbenchState): InterfacePrototypeBase | null {
-  for (const row of assetWorkbench.uiRows) {
+type UiAssetWorkbenchRow = AssetWorkbenchState['uiRows'][number]
+type UiAssetWorkbenchFile = NonNullable<UiAssetWorkbenchRow['result']>['files'][number]
+
+function findUiAssetFile(row: UiAssetWorkbenchRow, predicate: (file: UiAssetWorkbenchFile) => boolean) {
+  return row.result?.files.find(predicate) ?? null
+}
+
+function buildFallbackInterfaceBlueprint(row: UiAssetWorkbenchRow): PrototypeInterfaceBlueprint | null {
+  if (row.kind !== 'interface' || row.status !== 'ready' || !row.result) return null
+  const uiSpecFile = findUiAssetFile(row, (file) => /(^|[\\/])ui_spec\.json$/iu.test(file.path) || file.name === 'ui_spec.json')
+  const manifestFile = findUiAssetFile(row, (file) => /(^|[\\/])export_manifest\.json$/iu.test(file.path) || file.name === 'export_manifest.json')
+  if (!uiSpecFile && !row.result.uiSpecPath) return null
+  const imageFiles = row.result.files.filter((file) => file.url && isPreviewableUiFile(file))
+  return {
+    id: row.id,
+    name: row.name || row.result.panelName || '界面底板',
+    sourceRowId: row.id,
+    sourceUrl: row.figmaUrl || row.result.sourceUrl,
+    uiSpecPath: row.result.uiSpecPath ?? uiSpecFile?.path ?? null,
+    uiSpecUrl: uiSpecFile?.url ?? null,
+    manifestPath: row.result.manifestPath ?? manifestFile?.path ?? null,
+    manifestUrl: manifestFile?.url ?? null,
+    htmlAvailable: Boolean(row.result.html?.trim()),
+    designSize: null,
+    root: null,
+    nodes: [],
+    assetNames: imageFiles.map((file) => file.name).slice(0, 80),
+    assetCount: row.result.assetCount,
+    nodeCount: null,
+  }
+}
+
+function interfaceBlueprintForRow(row: UiAssetWorkbenchRow): PrototypeInterfaceBlueprint | null {
+  if (row.kind !== 'interface' || row.status !== 'ready' || !row.result) return null
+  const fallback = buildFallbackInterfaceBlueprint(row)
+  const blueprint = row.result.interfaceBlueprint ?? fallback
+  if (!blueprint) return null
+  const uiSpecFile = findUiAssetFile(row, (file) => /(^|[\\/])ui_spec\.json$/iu.test(file.path) || file.name === 'ui_spec.json')
+  const manifestFile = findUiAssetFile(row, (file) => /(^|[\\/])export_manifest\.json$/iu.test(file.path) || file.name === 'export_manifest.json')
+  return {
+    ...blueprint,
+    id: row.id,
+    name: row.name || blueprint.name || row.result.panelName || '界面底板',
+    sourceRowId: row.id,
+    sourceUrl: row.figmaUrl || blueprint.sourceUrl || row.result.sourceUrl,
+    uiSpecPath: row.result.uiSpecPath ?? blueprint.uiSpecPath ?? uiSpecFile?.path ?? null,
+    uiSpecUrl: blueprint.uiSpecUrl ?? uiSpecFile?.url ?? null,
+    manifestPath: row.result.manifestPath ?? blueprint.manifestPath ?? manifestFile?.path ?? null,
+    manifestUrl: blueprint.manifestUrl ?? manifestFile?.url ?? null,
+    htmlAvailable: Boolean(row.result.html?.trim()),
+    nodes: blueprint.nodes ?? [],
+    assetNames: blueprint.assetNames ?? fallback?.assetNames ?? [],
+  }
+}
+
+function findInterfacePrototypeBase(assetWorkbench: AssetWorkbenchState, preferredRowId?: string | null): InterfacePrototypeBase | null {
+  const rows = preferredRowId
+    ? [
+        ...assetWorkbench.uiRows.filter((row) => row.id === preferredRowId),
+        ...assetWorkbench.uiRows.filter((row) => row.id !== preferredRowId),
+      ]
+    : assetWorkbench.uiRows
+  for (const row of rows) {
     const html = row.kind === 'interface' && row.status === 'ready' ? row.result?.html?.trim() : null
     if (!html) continue
     return {
       html,
       name: row.name || row.result?.panelName || '界面底板',
+      rowId: row.id,
+      blueprint: interfaceBlueprintForRow(row),
     }
   }
   return null
 }
 
 function buildInterfacePrototypeBaseInstruction(base: InterfacePrototypeBase, instruction: string) {
+  const blueprint = base.blueprint
+  const blueprintNodeCount = blueprint ? (blueprint.nodeCount ?? (blueprint.nodes.length || null)) : null
+  const blueprintAssetCount = blueprint ? (blueprint.assetCount ?? (blueprint.assetNames.length || null)) : null
+  const blueprintLines = blueprint
+    ? [
+        `界面蓝图：${blueprint.name}`,
+        `ui_spec.json：${blueprint.uiSpecPath ?? blueprint.uiSpecUrl ?? '已解析但未记录路径'}`,
+        blueprint.designSize?.width && blueprint.designSize?.height ? `设计尺寸：${blueprint.designSize.width}x${blueprint.designSize.height}` : null,
+        blueprint.root ? `根节点：${blueprint.root.name} / ${blueprint.root.type} / ${blueprint.root.rect.width}x${blueprint.root.rect.height}` : null,
+        `节点数量：${blueprintNodeCount ?? '未知'}；子图数量：${blueprintAssetCount ?? '未知'}`,
+      ].filter(Boolean).join('\n')
+    : null
   return [
     `以素材库界面 HTML「${base.name}」作为本轮原型底板。`,
+    blueprintLines,
+    'ui_spec.json 是本轮界面的版式契约：必须保持根尺寸、节点 rect、层级关系、子图映射和原界面视觉风格。',
     '保留底板已有布局、层级和素材 URL，只围绕当前节点需求做必要的交互状态、文案和局部补充。',
     '不要重绘底板中已有界面，也不要引用素材库清单外的图片、特效、字体或外链资源。',
     instruction ? `本轮打磨要求：${instruction}` : '本轮打磨要求：根据当前 PRD 节点补齐可交付的交互状态和必要标注。',
   ].join('\n')
 }
 
-function buildPrototypeAssetManifest(assetWorkbench: AssetWorkbenchState): PrototypeAssetManifest {
+function buildPrototypeGenerationModeInstruction(mode: PrototypeGenerationMode, instruction: string) {
+  const trimmed = instruction.trim()
+  const requestLine = trimmed ? `本轮打磨要求：${trimmed}` : null
+
+  if (mode === 'draft_preview') {
+    return [
+      '本轮使用草稿预览模式：目标是快速看效果、验证交互方向和发现缺口，不作为最终交付标准。',
+      '可以基于 PRD、文字、截图或 Figma 视觉证据生成；如果提供了 Figma/图片，优先对齐其布局和视觉结构。',
+      '当前 PRD 节点负责交互、数据状态和异常分支；不要把 Figma 示例数值当真实业务值。',
+      requestLine,
+    ].filter(Boolean).join('\n')
+  }
+
+  return [
+    '本轮使用资源库标准模式：先把 PRD、草稿预览或补充图片输入归纳为界面 Blueprint，再映射到素材库中的界面底板、散图和特效预览。',
+    '输出 HTML 只能引用素材库允许 URL 和 Tailwind CDN；没有命中的素材用占位块、状态文字或真实 UI 状态表达，不要引用外部图片、base64、随机网络图或本地路径。',
+    '优先保持素材库界面底板的布局和层级；只补充当前节点需要的交互状态、数据分支、按钮反馈、异常态和验收用切换。',
+    requestLine,
+  ].filter(Boolean).join('\n')
+}
+
+function buildPrototypeAssetManifest(
+  assetWorkbench: AssetWorkbenchState,
+  mode: PrototypeAssetManifest['mode'] = 'audit',
+  preferredInterfaceAssetId?: string | null,
+): PrototypeAssetManifest {
   const assets: PrototypeAssetManifest['assets'] = []
   const notes: string[] = []
+  const interfaceBlueprints: PrototypeInterfaceBlueprint[] = []
+  const uiRows = preferredInterfaceAssetId
+    ? [
+        ...assetWorkbench.uiRows.filter((row) => row.id === preferredInterfaceAssetId),
+        ...assetWorkbench.uiRows.filter((row) => row.id !== preferredInterfaceAssetId),
+      ]
+    : assetWorkbench.uiRows
 
-  for (const row of assetWorkbench.uiRows) {
+  for (const row of uiRows) {
     if (row.status !== 'ready' || !row.result) continue
     if (row.kind === 'interface' && row.result.html?.trim()) {
-      notes.push(`界面类素材「${row.name}」提供可直接复用的 HTML 底板；无现有原型时会优先基于它迭代。`)
+      const blueprint = interfaceBlueprintForRow(row)
+      if (blueprint) interfaceBlueprints.push(blueprint)
+      notes.push(mode === 'strict'
+        ? `界面类素材「${row.name}」提供可直接复用的 HTML 底板和 ui_spec.json 蓝图；资源库标准模式必须基于它的 JSON 节点、rect、层级和子图映射迭代。`
+        : `界面类素材「${row.name}」提供可直接复用的 HTML 底板和 ui_spec.json 蓝图；可在资源库标准模式中作为规范底板。`)
     }
     const files = row.result.files.filter((file) => file.url && isPreviewableUiFile(file))
     if (!files.length) {
@@ -202,7 +338,7 @@ function buildPrototypeAssetManifest(assetWorkbench: AssetWorkbenchState): Proto
     for (const file of files) {
       assets.push({
         id: `${row.id}:${file.path}`,
-        kind: row.kind === 'interface' ? 'interface_html' : 'ui_image',
+        kind: row.kind === 'interface' ? 'interface_image' : 'ui_image',
         name: row.kind === 'interface' ? `${row.name} / ${file.name}` : `${row.name} / ${file.name}`,
         url: file.url!,
         source: 'ui_asset',
@@ -244,9 +380,10 @@ function buildPrototypeAssetManifest(assetWorkbench: AssetWorkbenchState): Proto
   }
 
   return {
-    mode: 'audit',
+    mode,
     assets,
     notes,
+    interfaceBlueprints,
   }
 }
 
@@ -312,7 +449,12 @@ function buildBackendContractContext(node: PrdNode, tree: Record<string, PrdNode
   ].join('\n')
 }
 
-function buildNodePrototypeRequirement(node: PrdNode, messages: ChatMessage[], tree: Record<string, PrdNode> | null): UXRequirementState {
+function buildNodePrototypeRequirement(
+  node: PrdNode,
+  messages: ChatMessage[],
+  tree: Record<string, PrdNode> | null,
+  options: { allowFigmaAssetReferences?: boolean } = {},
+): UXRequirementState {
   const transcript = messages
     .slice(-12)
     .map((message) => {
@@ -337,7 +479,7 @@ function buildNodePrototypeRequirement(node: PrdNode, messages: ChatMessage[], t
         is_ready: false,
       }))
     : []
-  const figmaAssets = collectFigmaAssetDependencies(messages)
+  const figmaAssets = options.allowFigmaAssetReferences === false ? [] : collectFigmaAssetDependencies(messages)
   const genericReferenceAssets = Array.from({ length: Math.max(0, referenceCount - figmaAssets.length) }, (_, index) => ({
     type: 'ReferenceImage',
     path: `Reference image ${index + 1} in the current node chat`,
@@ -512,6 +654,7 @@ export function ForgePage() {
   const nodeChats = useAppStore((s) => s.nodeChats)
   const nodeOperationSuggestions = useAppStore((s) => s.nodeOperationSuggestions)
   const settings = useAppStore((s) => s.settings)
+  const assetWorkbench = useAppStore((s) => s.assetWorkbench)
   const appendNodeMessage = useAppStore((s) => s.appendNodeMessage)
   const removeLastNodeChatTurn = useAppStore((s) => s.removeLastNodeChatTurn)
   const clearNodeChat = useAppStore((s) => s.clearNodeChat)
@@ -530,9 +673,13 @@ export function ForgePage() {
   const setNodePrototypeVariants = useAppStore((s) => s.setNodePrototypeVariants)
   const updateNodePrototypeVariant = useAppStore((s) => s.updateNodePrototypeVariant)
   const selectNodePrototypeVariant = useAppStore((s) => s.selectNodePrototypeVariant)
+  const setNodePrototypeHtml = useAppStore((s) => s.setNodePrototypeHtml)
 
   const [nodeComplete, setNodeComplete] = useState(false)
   const [isGeneratingPrototype, setIsGeneratingPrototype] = useState(false)
+  const [isCancellingPrototype, setIsCancellingPrototype] = useState(false)
+  const [assetWorkbenchOpen, setAssetWorkbenchOpen] = useState(false)
+  const prototypeAbortControllerRef = useRef<AbortController | null>(null)
 
   const node = prdTree?.[nodeId ?? ''] ?? null
   const messages = nodeChats[nodeId ?? ''] ?? []
@@ -554,6 +701,18 @@ export function ForgePage() {
   useEffect(() => {
     setNodeComplete(node?.status === 'done')
   }, [nodeId, node?.status])
+
+  useEffect(() => () => {
+    prototypeAbortControllerRef.current?.abort()
+    prototypeAbortControllerRef.current = null
+  }, [nodeId])
+
+  function handleCancelPrototypeGeneration() {
+    const controller = prototypeAbortControllerRef.current
+    if (!controller || controller.signal.aborted) return
+    setIsCancellingPrototype(true)
+    controller.abort()
+  }
 
   useEffect(() => {
     if (!nodeId || !node) return
@@ -597,11 +756,18 @@ export function ForgePage() {
           ? combineUiFeedbackWithFigmaEvidence(content, figmaEvidence)
           : content
 
-        const prototypeUpdated = await handleGeneratePrototype(buildUiOnlyPrototypeInstruction(content), {
-          recordInstruction: false,
-          evidenceContent,
-          currentTurnOnly: true,
-        })
+        let prototypeUpdated = false
+        try {
+          prototypeUpdated = await handleGeneratePrototype(buildUiOnlyPrototypeInstruction(content), {
+            recordInstruction: false,
+            evidenceContent,
+            currentTurnOnly: true,
+            generationMode: options.generationMode,
+          })
+        } catch (err) {
+          if (isAbortError(err)) return
+          throw err
+        }
         appendNodeMessage(nodeId, {
           role: 'assistant',
           content: prototypeUpdated ? 'Completed this UI iteration.' : 'UI iteration failed: no new HTML was generated.',
@@ -640,10 +806,11 @@ export function ForgePage() {
               ? combineUiFeedbackWithFigmaEvidence(content, figmaEvidence)
               : content,
             currentTurnOnly: true,
+            generationMode: options.generationMode,
           })
           if (!prototypeUpdated) prototypeError = 'No new HTML was generated.'
         } catch (err) {
-          prototypeError = err instanceof Error ? err.message : 'UI 迭代失败'
+          if (!isAbortError(err)) prototypeError = err instanceof Error ? err.message : 'UI 迭代失败'
         }
       }
       const shouldKeepAiQuestion = options.performancePolishMode === true && response.reply.trim().length > 0
@@ -656,8 +823,9 @@ export function ForgePage() {
           : formatNodeChatStatus(documentUpdated, prototypeUpdated, response.reply)
       appendNodeMessage(nodeId, { role: 'assistant', content: statusText })
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Send failed.'
-      appendNodeMessage(nodeId, { role: 'assistant', content: `Request failed: ${message}` })
+      if (isAbortError(err)) return
+      const message = err instanceof Error ? err.message : '发送失败，请重试。'
+      appendNodeMessage(nodeId, { role: 'assistant', content: `请求失败：${message}` })
       throw err
     }
   }
@@ -666,11 +834,14 @@ export function ForgePage() {
     return classifyReferenceImage(settings.proxyBaseUrl, input)
   }
 
-  async function handleImportFigmaFrame(input: { url: string }) {
+  async function handleImportFigmaFrame(input: { url: string }, options: { generationMode?: PrototypeGenerationMode } = {}) {
     if (!nodeId) throw new Error('No selected node.')
+    const generationMode = options.generationMode ?? 'draft_preview'
     appendNodeMessage(nodeId, {
       role: 'assistant',
-      content: 'Parsing Figma Frame and generating a right-side HTML prototype from the current node.',
+      content: generationMode === 'resource_standard'
+        ? 'Parsing Figma Frame as standard-generation evidence, then generating with resource-library constraints.'
+        : 'Parsing Figma Frame as draft-preview evidence, then generating a right-side HTML prototype from the current node.',
     })
     try {
       const result = await importFigmaFrame(settings.proxyBaseUrl, input)
@@ -679,15 +850,17 @@ export function ForgePage() {
       const selectedVariant = currentPrototypeState?.prototypeVariants.find((variant) => variant.index === currentPrototypeState.selectedVariantIndex)
       const hasExistingPrototype = Boolean(selectedVariant?.html ?? currentPrototypeState?.prototypeHtml)
       const instruction = buildFigmaPrototypeIterationInstruction(result, hasExistingPrototype)
-      const prototypeUpdated = await handleGeneratePrototype(instruction, { singlePrototypeOnly: true, evidenceContent, currentTurnOnly: true })
+      const prototypeUpdated = await handleGeneratePrototype(instruction, { singlePrototypeOnly: true, evidenceContent, currentTurnOnly: true, generationMode })
       if (!prototypeUpdated) {
         throw new Error('Figma parsed, but no updated HTML prototype was generated.')
       }
       appendNodeMessage(nodeId, {
         role: 'assistant',
-        content: hasExistingPrototype
-          ? `${result.summary}\n\nUpdated the right-side HTML prototype from Figma child images.`
-          : `${result.summary}\n\nGenerated the right-side HTML prototype from the current PRD document and Figma child images.`,
+        content: generationMode === 'resource_standard'
+          ? `${result.summary}\n\nGenerated through the resource-library standard pipeline. Figma is used as visual evidence; final assets are constrained by the library manifest.`
+          : hasExistingPrototype
+            ? `${result.summary}\n\nUpdated the draft preview from Figma child images.`
+            : `${result.summary}\n\nGenerated the draft preview from the current PRD document and Figma child images.`,
       })
       return result
     } catch (err) {
@@ -700,8 +873,13 @@ export function ForgePage() {
     }
   }
 
-  async function handleGeneratePrototype(instruction?: string, options?: { singlePrototypeOnly?: boolean; recordInstruction?: boolean; evidenceContent?: ChatMessage['content']; currentTurnOnly?: boolean }) {
-    if (!node) return false
+  async function handleGeneratePrototype(instruction?: string, options?: ForgePrototypeOptions) {
+    if (!node || !nodeId) return false
+    const runningController = prototypeAbortControllerRef.current
+    if (runningController && !runningController.signal.aborted) return false
+    const abortController = new AbortController()
+    prototypeAbortControllerRef.current = abortController
+    const generationMode = options?.generationMode ?? 'draft_preview'
     const trimmedInstruction = instruction?.trim() ?? ''
     const shouldRecordInstruction = Boolean(options?.recordInstruction && trimmedInstruction && nodeId)
     let prototypeCompleted = false
@@ -718,27 +896,58 @@ export function ForgePage() {
     const currentNode = nodeId ? (useAppStore.getState().prdTree?.[nodeId] ?? node) : node
     const referenceImages = collectPrototypeImages(evidenceMessages)
     const currentStore = useAppStore.getState()
-    const requirementState = buildNodePrototypeRequirement(currentNode, evidenceMessages, currentStore.prdTree)
-    const assetManifest = buildPrototypeAssetManifest(currentStore.assetWorkbench)
+    const requirementState = buildNodePrototypeRequirement(currentNode, evidenceMessages, currentStore.prdTree, {
+      allowFigmaAssetReferences: generationMode !== 'resource_standard',
+    })
+    const assetManifest = buildPrototypeAssetManifest(
+      currentStore.assetWorkbench,
+      generationMode === 'resource_standard' ? 'strict' : 'audit',
+      options?.preferredInterfaceAssetId,
+    )
     const currentPrototypeState = currentStore.nodePrototypeStates[nodeId ?? '']
+    const prototypeSnapshotBeforeGeneration = {
+      prototypeHtml: currentPrototypeState?.prototypeHtml ?? null,
+      prototypeVariants: currentPrototypeState?.prototypeVariants ?? [],
+      selectedVariantIndex: currentPrototypeState?.selectedVariantIndex ?? -1,
+    }
     const selectedVariant = currentPrototypeState?.prototypeVariants.find((variant) => variant.index === currentPrototypeState?.selectedVariantIndex)
     const selectedPrototypeHtml = selectedVariant?.html ?? currentPrototypeState?.prototypeHtml ?? null
-    const interfacePrototypeBase = selectedPrototypeHtml ? null : findInterfacePrototypeBase(currentStore.assetWorkbench)
-    const prototypeBaseHtml = selectedVariant?.html ?? selectedPrototypeHtml ?? interfacePrototypeBase?.html ?? null
-    const prototypeBaseIndex = selectedVariant?.index ?? 0
-    const prototypeBaseHistory = selectedVariant?.history ?? []
+    const shouldUseInterfaceBase = generationMode === 'resource_standard' && (options?.forceInterfaceBase === true || !selectedPrototypeHtml)
+    const interfacePrototypeBase = shouldUseInterfaceBase
+      ? findInterfacePrototypeBase(currentStore.assetWorkbench, options?.preferredInterfaceAssetId)
+      : null
+    const prototypeBaseHtml = interfacePrototypeBase?.html ?? selectedVariant?.html ?? selectedPrototypeHtml ?? null
+    const prototypeBaseIndex = interfacePrototypeBase ? 0 : selectedVariant?.index ?? 0
+    const prototypeBaseHistory = interfacePrototypeBase ? [] : selectedVariant?.history ?? []
+    const generationInstruction = buildPrototypeGenerationModeInstruction(generationMode, trimmedInstruction)
     const effectiveInstruction = interfacePrototypeBase
-      ? buildInterfacePrototypeBaseInstruction(interfacePrototypeBase, trimmedInstruction)
-      : trimmedInstruction
-    const isAssetBaseUpdate = Boolean(interfacePrototypeBase && !selectedPrototypeHtml)
+      ? buildInterfacePrototypeBaseInstruction(interfacePrototypeBase, generationInstruction)
+      : generationInstruction
+    const isAssetBaseUpdate = Boolean(interfacePrototypeBase)
+    const shouldRecordCurrentBeforeAssetBase = Boolean(interfacePrototypeBase && selectedPrototypeHtml && options?.forceInterfaceBase)
     const isUpdate = Boolean(effectiveInstruction && prototypeBaseHtml)
     const createVariantCount = options?.singlePrototypeOnly ? 1 : 2
     const updateVariantCount = options?.singlePrototypeOnly ? 1 : 2
     let prototypeErrorMessage: string | null = null
 
+    const restorePrototypeAfterCancel = () => {
+      setNodePrototypeVariants(nodeId, prototypeSnapshotBeforeGeneration.prototypeVariants)
+      const latestPrototypeHtml = useAppStore.getState().nodePrototypeStates[nodeId]?.prototypeHtml ?? null
+      if (prototypeSnapshotBeforeGeneration.prototypeHtml && latestPrototypeHtml !== prototypeSnapshotBeforeGeneration.prototypeHtml) {
+        setNodePrototypeHtml(nodeId, prototypeSnapshotBeforeGeneration.prototypeHtml, { mode: 'restore', note: '取消生成恢复' })
+      }
+      if (prototypeSnapshotBeforeGeneration.selectedVariantIndex >= 0) {
+        selectNodePrototypeVariant(nodeId, prototypeSnapshotBeforeGeneration.selectedVariantIndex)
+      }
+    }
+
     setIsGeneratingPrototype(true)
+    setIsCancellingPrototype(false)
     try {
       if (isUpdate && prototypeBaseHtml) {
+        if (shouldRecordCurrentBeforeAssetBase && selectedPrototypeHtml) {
+          recordNodePrototypeHistory(nodeId, selectedPrototypeHtml, { mode: 'update', note: `切换到资源库界面：${interfacePrototypeBase?.name ?? '界面底板'}` })
+        }
         if (!isAssetBaseUpdate) {
           recordNodePrototypeHistory(nodeId, prototypeBaseHtml, { mode: 'update', note: `修改前：${trimmedInstruction}` })
         }
@@ -762,6 +971,7 @@ export function ForgePage() {
             variantIndex: prototypeBaseIndex,
             history: prototypeBaseHistory,
             assetManifest,
+            signal: abortController.signal,
           },
           (event) => {
             if (event.type === 'setCode') {
@@ -805,7 +1015,7 @@ export function ForgePage() {
       await streamPrototype(
         settings.proxyBaseUrl,
         requirementState,
-        { instruction: effectiveInstruction || undefined, images: referenceImages, numVariants: createVariantCount, assetManifest },
+        { instruction: effectiveInstruction || undefined, images: referenceImages, numVariants: createVariantCount, assetManifest, signal: abortController.signal },
         (event) => {
           if (event.type === 'setCode') {
             if (event.html) didReceivePrototypeHtml = true
@@ -838,20 +1048,34 @@ export function ForgePage() {
       }
       prototypeCompleted = didReceivePrototypeHtml
     } catch (error) {
+      if (abortController.signal.aborted || isAbortError(error)) {
+        restorePrototypeAfterCancel()
+        throw prototypeGenerationCancelledError()
+      }
       prototypeErrorMessage = errorMessageFromUnknown(error)
-      const result = await generatePrototype(
-        settings.proxyBaseUrl,
-        requirementState,
-        {
-          currentHtml: isUpdate ? prototypeBaseHtml : null,
-          instruction: effectiveInstruction || undefined,
-          images: referenceImages,
-          numVariants: isUpdate ? updateVariantCount : createVariantCount,
-          variantIndex: isUpdate ? prototypeBaseIndex : undefined,
-          history: isUpdate ? prototypeBaseHistory : undefined,
-          assetManifest,
-        },
-      )
+      let result: Awaited<ReturnType<typeof generatePrototype>>
+      try {
+        result = await generatePrototype(
+          settings.proxyBaseUrl,
+          requirementState,
+          {
+            currentHtml: isUpdate ? prototypeBaseHtml : null,
+            instruction: effectiveInstruction || undefined,
+            images: referenceImages,
+            numVariants: isUpdate ? updateVariantCount : createVariantCount,
+            variantIndex: isUpdate ? prototypeBaseIndex : undefined,
+            history: isUpdate ? prototypeBaseHistory : undefined,
+            assetManifest,
+            signal: abortController.signal,
+          },
+        )
+      } catch (fallbackError) {
+        if (abortController.signal.aborted || isAbortError(fallbackError)) {
+          restorePrototypeAfterCancel()
+          throw prototypeGenerationCancelledError()
+        }
+        throw fallbackError
+      }
 
       if (isUpdate) {
         setNodePrototypeVariants(nodeId, result.variants.map((variant) => ({
@@ -892,7 +1116,11 @@ export function ForgePage() {
       if (shouldRecordInstruction && prototypeCompleted) {
         appendNodeMessage(nodeId, { role: 'assistant', content: 'Updated the right-side prototype preview.' })
       }
-      setIsGeneratingPrototype(false)
+      if (prototypeAbortControllerRef.current === abortController) {
+        prototypeAbortControllerRef.current = null
+        setIsCancellingPrototype(false)
+        setIsGeneratingPrototype(false)
+      }
     }
     return prototypeCompleted
   }
@@ -973,15 +1201,19 @@ export function ForgePage() {
           prototypeVariants={prototypeVariants}
           selectedVariantIndex={selectedVariantIndex}
           isGeneratingPrototype={isGeneratingPrototype}
+          isCancellingPrototype={isCancellingPrototype}
           nodeOperationSuggestions={nodeOperationSuggestions[nodeId] ?? []}
           performanceSpec={performanceSpec}
           blockingQuestion={performanceSpec?.blockingQuestion ?? null}
+          assetWorkbench={assetWorkbench}
           onSend={handleSend}
           onClassifyImageAttachment={handleClassifyImageAttachment}
           onImportFigmaFrame={handleImportFigmaFrame}
+          onOpenAssets={() => setAssetWorkbenchOpen(true)}
           onApplyNodeOperationSuggestion={(suggestionId) => applyNodeOperationSuggestion(nodeId, suggestionId)}
           onDismissNodeOperationSuggestion={(suggestionId) => dismissNodeOperationSuggestion(nodeId, suggestionId)}
           onGeneratePrototype={handleGeneratePrototype}
+          onCancelPrototypeGeneration={handleCancelPrototypeGeneration}
           onRestorePrototype={(id) => restoreNodePrototypeVersion(nodeId, id)}
           onClearPrototypeHistory={() => clearNodePrototypeHistory(nodeId)}
           onSelectVariant={(index) => selectNodePrototypeVariant(nodeId, index)}
@@ -989,6 +1221,11 @@ export function ForgePage() {
           onClearChat={() => clearNodeChat(nodeId)}
         />
       </main>
+      <AssetWorkbenchModal
+        isOpen={assetWorkbenchOpen}
+        baseUrl={settings.proxyBaseUrl}
+        onClose={() => setAssetWorkbenchOpen(false)}
+      />
     </div>
   )
 }

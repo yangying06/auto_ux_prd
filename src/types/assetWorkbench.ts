@@ -1,3 +1,5 @@
+import type { PrototypeInterfaceBlueprint } from './prototypeAssets'
+
 export type UiAssetKind = 'interface' | 'image_set'
 export type UiAssetParseMode = 'intermediate' | 'image_set'
 export type AssetRowStatus = 'idle' | 'parsing' | 'ready' | 'error'
@@ -27,6 +29,7 @@ export interface UiAssetParseResult {
   manifestPath?: string | null
   assetsDir?: string | null
   html?: string | null
+  interfaceBlueprint?: PrototypeInterfaceBlueprint | null
   assetCount: number
   zipFileCount?: number | null
   imageCount?: number | null

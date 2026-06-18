@@ -16,6 +16,20 @@ import type { QaChatResponse, QaIssue } from '../types/qa'
 import type { EffectAssetRow, UiAssetKind, UiAssetParseResult } from '../types/assetWorkbench'
 import type { PrototypeAssetAuditIssue, PrototypeAssetManifest } from '../types/prototypeAssets'
 
+function apiErrorMessage(data: unknown, status: number) {
+  if (data && typeof data === 'object') {
+    const record = data as Record<string, unknown>
+    if (typeof record.error === 'string' && record.error.trim()) return record.error
+    if (record.error && typeof record.error === 'object') {
+      const nested = record.error as Record<string, unknown>
+      if (typeof nested.message === 'string' && nested.message.trim()) return nested.message
+      if (typeof nested.error === 'string' && nested.error.trim()) return nested.error
+    }
+    if (typeof record.message === 'string' && record.message.trim()) return record.message
+  }
+  return `Request failed: ${status}`
+}
+
 async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
   let response: Response
   try {
@@ -44,8 +58,7 @@ async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit)
   }
 
   if (!response.ok) {
-    const error = typeof data === 'object' && data && 'error' in data ? String(data.error) : `Request failed: ${response.status}`
-    throw new Error(error)
+    throw new Error(apiErrorMessage(data, response.status))
   }
 
   return data as T
@@ -108,6 +121,7 @@ export function generatePrototype(
     history?: string[]
     stream?: boolean
     assetManifest?: PrototypeAssetManifest
+    signal?: AbortSignal
   } = {},
 ) {
   const imageBlocks = (options.images ?? []).filter((block) => block.type === 'image')
@@ -124,6 +138,7 @@ export function generatePrototype(
       stream: options.stream ?? null,
       assetManifest: options.assetManifest ?? null,
     }),
+    signal: options.signal,
   })
 }
 
@@ -409,8 +424,7 @@ export async function exportNodeMarkdown(
   if (!response.ok) {
     let message = `Request failed: ${response.status}`
     try {
-      const data = await response.json() as { error?: string }
-      if (data.error) message = data.error
+      message = apiErrorMessage(await response.json(), response.status)
     } catch {
       // Keep status message.
     }

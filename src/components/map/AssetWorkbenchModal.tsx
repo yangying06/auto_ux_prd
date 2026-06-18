@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { loadEffectAssetRow, openAssetLibraryLocalPath, parseUiFigmaAsset, scanEffectAssetDirectory } from '../../lib/api'
 import { useAppStore } from '../../store/appStore'
-import type { AssetRowStatus, EffectAssetKind, EffectAssetLoadStatus, EffectAssetRow, UiAssetKind, UiAssetRow } from '../../types/assetWorkbench'
+import type { AssetRowStatus, EffectAssetKind, EffectAssetLoadStatus, EffectAssetRow, UiAssetKind, UiAssetParseResult, UiAssetRow } from '../../types/assetWorkbench'
 import type { ProjectSourceDocument } from '../../types/archive'
 import type { PrdTree } from '../../types/prdNode'
 
@@ -24,7 +24,9 @@ const actionButtonClassName = 'inline-flex min-h-[32px] min-w-[72px] items-cente
 const toolbarFieldClassName = 'grid min-w-0 gap-xs'
 const toolbarLabelClassName = 'whitespace-nowrap text-[11px] leading-4 text-on-surface-variant'
 const toolbarSummaryClassName = 'inline-flex min-h-[36px] min-w-0 items-center gap-xs whitespace-nowrap rounded-md border border-outline-variant bg-surface-container-high px-sm text-label-md text-on-surface-variant'
-const UI_PARSE_ALL_CONCURRENCY = 3
+const UI_PARSE_ALL_CONCURRENCY = 2
+const UI_PARSE_RETRY_DELAY_MS = 900
+const transientFigmaExportErrorText = 'Figma 已返回节点结构，但所有候选图都导出失败'
 
 interface LoadProgressState {
   active: boolean
@@ -52,8 +54,15 @@ function uiAssetKindLabel(kind: UiAssetKind) {
   return kind === 'interface' ? '界面' : '散图'
 }
 
-function defaultUiAssetName(kind: UiAssetKind) {
-  return kind === 'interface' ? '未命名界面' : '未命名散图'
+function uiAssetNamePlaceholder(kind: UiAssetKind) {
+  return kind === 'interface' ? '未命名界面' : '未命名的散图'
+}
+
+function isPlaceholderUiAssetName(value: string, kind: UiAssetKind) {
+  const trimmed = value.trim()
+  return trimmed === uiAssetNamePlaceholder(kind)
+    || trimmed === '未命名散图'
+    || trimmed === '未命名界面'
 }
 
 function derivedParseLabel(kind: UiAssetKind) {
@@ -213,6 +222,121 @@ function extractFigmaUrls(value: string) {
     .filter((url) => /figma\.com/iu.test(url))
 }
 
+function decodeUrlPathSegment(value: string) {
+  try {
+    return decodeURIComponent(value).trim()
+  } catch {
+    return value.trim()
+  }
+}
+
+function figmaUrlTitle(value: string) {
+  try {
+    const parsed = new URL(value)
+    const segments = parsed.pathname.split('/').filter(Boolean)
+    const typeIndex = segments.findIndex((segment) => ['file', 'design', 'proto'].includes(segment.toLowerCase()))
+    const rawTitle = typeIndex >= 0 ? segments[typeIndex + 2] : segments.at(-1)
+    const title = rawTitle ? decodeUrlPathSegment(rawTitle).replace(/\s+/g, ' ').trim() : ''
+    return title || ''
+  } catch {
+    return ''
+  }
+}
+
+function shouldUseParsedUiAssetTitle(row: UiAssetRow) {
+  const current = row.name.trim()
+  return !current || isPlaceholderUiAssetName(current, row.kind) || current === figmaUrlTitle(row.figmaUrl)
+}
+
+function resolvedUiAssetName(row: UiAssetRow, result?: UiAssetParseResult) {
+  const current = row.name.trim()
+  if (shouldUseParsedUiAssetTitle(row)) return result?.panelName?.trim() || ''
+  return current
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function textIncludesAssetName(text: string | null | undefined, name: string) {
+  const term = name.trim()
+  if (!term || !text) return false
+  if (/^[a-z0-9]{1,2}$/iu.test(term)) {
+    return new RegExp(`(^|[^a-z0-9])${escapeRegExp(term)}(?=$|[^a-z0-9])`, 'iu').test(text)
+  }
+  return text.toLowerCase().includes(term.toLowerCase())
+}
+
+function prdNodeContextText(node: PrdTree[string]) {
+  const sectionsText = Object.values(node.sections ?? {})
+    .map((section) => [section.title, section.summary, section.content].filter(Boolean).join(' '))
+    .filter(Boolean)
+    .join(' ')
+  const performanceText = node.performanceSpec
+    ? [
+        node.performanceSpec.eventTypes.join('/'),
+        node.performanceSpec.trigger,
+        node.performanceSpec.branches.join('/'),
+        node.performanceSpec.assets.join('/'),
+        node.performanceSpec.prototypeNotes.join('/'),
+      ].filter(Boolean).join(' ')
+    : ''
+  return [
+    node.label,
+    node.summary,
+    node.content,
+    node.techNotes,
+    sectionsText,
+    performanceText,
+  ].filter(Boolean).join(' ')
+}
+
+function inferUiAssetPurposeFromTree(name: string, prdTree: PrdTree | null) {
+  const nodes = Object.values(prdTree ?? {})
+    .filter((node) => textIncludesAssetName(prdNodeContextText(node), name))
+    .sort((a, b) => {
+      const aLabelMatch = textIncludesAssetName(a.label, name) ? 0 : 1
+      const bLabelMatch = textIncludesAssetName(b.label, name) ? 0 : 1
+      return aLabelMatch - bLabelMatch || a.level - b.level || a.order - b.order
+    })
+  const node = nodes[0]
+  if (!node) return ''
+
+  const detail = compactNotePart(
+    node.summary
+      || Object.values(node.sections ?? {}).map((section) => section.summary || section.content).find(Boolean)
+      || node.content
+      || node.techNotes,
+    180,
+  )
+  return detail ? `用于「${node.label}」：${detail}` : `用于「${node.label}」相关界面素材。`
+}
+
+function inferUiAssetPurposeFromSourceDocument(name: string, sourceDocument: ProjectSourceDocument | null) {
+  const lines = sourceDocument?.text
+    ?.split(/\n+/u)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter((line) => line.length > 0 && textIncludesAssetName(line, name))
+    .sort((a, b) => a.length - b.length)
+  const line = lines?.[0]
+  return line ? `PRD 提到「${name}」：${compactNotePart(line, 180)}` : ''
+}
+
+function inferUiAssetPurpose(name: string, prdTree: PrdTree | null, sourceDocument: ProjectSourceDocument | null) {
+  const trimmedName = name.trim()
+  if (!trimmedName) return ''
+  return inferUiAssetPurposeFromTree(trimmedName, prdTree)
+    || inferUiAssetPurposeFromSourceDocument(trimmedName, sourceDocument)
+}
+
+function isTransientFigmaExportError(error: unknown) {
+  return error instanceof Error && error.message.includes(transientFigmaExportErrorText)
+}
+
+function waitForUiParseRetry() {
+  return new Promise((resolve) => setTimeout(resolve, UI_PARSE_RETRY_DELAY_MS))
+}
+
 function isPreviewableUiFile(path: string | null | undefined, type: string | null | undefined) {
   const value = `${path ?? ''} ${type ?? ''}`.toLowerCase()
   return /\.(png|jpe?g|webp|gif)(\?|$)/u.test(value) || value.includes('image')
@@ -237,7 +361,7 @@ function createUiAssetRow(kind: UiAssetKind, figmaUrl: string): UiAssetRow {
   const now = new Date().toISOString()
   return {
     id: makeRowId('ui-asset'),
-    name: defaultUiAssetName(kind),
+    name: '',
     kind,
     figmaUrl,
     parseMode: parseModeForKind(kind),
@@ -363,6 +487,22 @@ export function AssetWorkbenchModal({ isOpen, baseUrl, onClose }: AssetWorkbench
   const updateEffectAssetRow = useAppStore((s) => s.updateEffectAssetRow)
   const removeEffectAssetRow = useAppStore((s) => s.removeEffectAssetRow)
 
+  useEffect(() => {
+    if (!isOpen) return
+    for (const row of assetWorkbench.uiRows) {
+      const nextName = row.result ? resolvedUiAssetName(row, row.result) : ''
+      const nextPurpose = !row.purpose.trim()
+        ? inferUiAssetPurpose(nextName || row.name, prdTree, sourceDocument)
+        : ''
+      const patch: Partial<UiAssetRow> = {}
+      if (nextName && nextName !== row.name) patch.name = nextName
+      if (nextPurpose) patch.purpose = nextPurpose
+      if (Object.keys(patch).length > 0) {
+        updateUiAssetRow(row.id, patch)
+      }
+    }
+  }, [assetWorkbench.uiRows, isOpen, prdTree, sourceDocument, updateUiAssetRow])
+
   if (!isOpen) return null
 
   function handleAddUiRow() {
@@ -399,14 +539,30 @@ export function AssetWorkbenchModal({ isOpen, baseUrl, onClose }: AssetWorkbench
     setUiRowParsing(rowId, true)
     updateUiAssetRow(rowId, { status: 'parsing', error: null, parseMode: parseModeForKind(row.kind) })
     try {
-      const result = await parseUiFigmaAsset(baseUrl, {
-        url: row.figmaUrl,
-        kind: row.kind,
-      })
+      let result: UiAssetParseResult
+      try {
+        result = await parseUiFigmaAsset(baseUrl, {
+          url: row.figmaUrl,
+          kind: row.kind,
+        })
+      } catch (error) {
+        if (!isTransientFigmaExportError(error)) throw error
+        setUiNotice(`Figma 图片导出第一次失败，正在自动重试「${resolvedUiAssetName(row) || row.figmaUrl}」。`)
+        await waitForUiParseRetry()
+        result = await parseUiFigmaAsset(baseUrl, {
+          url: row.figmaUrl,
+          kind: row.kind,
+        })
+      }
+      const currentStore = useAppStore.getState()
+      const nextName = resolvedUiAssetName(row, result)
+      const nextPurpose = row.purpose.trim()
+        || inferUiAssetPurpose(nextName || result.panelName, currentStore.prdTree, currentStore.sourceDocument)
       updateUiAssetRow(rowId, {
         status: 'ready',
         error: null,
-        name: row.name.trim() || result.panelName,
+        name: nextName,
+        purpose: nextPurpose,
         parseMode: result.parseMode,
         result,
       })
@@ -435,7 +591,7 @@ export function AssetWorkbenchModal({ isOpen, baseUrl, onClose }: AssetWorkbench
     updateUiAssetRow(rowId, {
       kind: nextKind,
       parseMode: parseModeForKind(nextKind),
-      name: row.name === defaultUiAssetName(row.kind) ? defaultUiAssetName(nextKind) : row.name,
+      name: shouldUseParsedUiAssetTitle(row) ? '' : row.name,
       status: 'idle',
       error: null,
       result: null,
@@ -712,7 +868,7 @@ export function AssetWorkbenchModal({ isOpen, baseUrl, onClose }: AssetWorkbench
                           <input
                             value={row.name}
                             onChange={(event) => updateUiAssetRow(row.id, { name: event.target.value })}
-                            placeholder={row.kind === 'interface' ? '补充界面名称' : '补充散图名称'}
+                            placeholder={uiAssetNamePlaceholder(row.kind)}
                             className={inputClassName}
                           />
                         </div>
