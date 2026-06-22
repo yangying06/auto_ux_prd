@@ -3,6 +3,7 @@ import type { ReactElement } from 'react'
 import type { FigmaFrameImportResponse } from '../../lib/api'
 import { findLatestUserMessageIndex, getTextFromMessage } from '../../lib/chatRecall'
 import { getClipboardImageFiles, readImageFileAsClipboardAttachment } from '../../lib/clipboardImages'
+import { formatReusableLogicAssetForPrompt, reusableLogicTypeLabel } from '../../lib/reusableLogicSedimentation'
 import type { PrototypeVersion } from '../../store/appStore'
 import type {
   ChatMessage,
@@ -35,6 +36,8 @@ interface ForgeChatProps {
   performanceSpec: PrdPerformanceSpec | null
   blockingQuestion: PrdPerformanceBlockingQuestion | null
   assetWorkbench: AssetWorkbenchState
+  generationMode: PrototypeGenerationMode
+  onGenerationModeChange: (mode: PrototypeGenerationMode) => void
   onSend: (content: ChatMessage['content'], options?: ForgeChatSendOptions) => void | Promise<void>
   onClassifyImageAttachment: (input: ReferenceImageClassificationRequest) => Promise<ReferenceImageClassificationResponse>
   onImportFigmaFrame: (input: { url: string }, options?: { generationMode?: PrototypeGenerationMode }) => Promise<FigmaFrameImportResponse>
@@ -108,7 +111,7 @@ const PROMPT_SKILLS: PromptSkill[] = [
     id: 'motion-integration',
     label: '动效接入',
     hint: 'Tween/Spine/粒子/Prefab/音效',
-    detail: '请按 Cocos 实际接入方式澄清当前节点的表现编排：先判断触发、分支、播放顺序、接入方式、资源、层级、控制、结束状态这 8 个槽位分别是已确认、AI 推断还是缺失；然后只问当前最阻塞实现的 1 个问题，并说明它卡住的是哪个槽位。接入方式请限定在 Tween、AnimationClip、Spine、ParticleSystem、Prefab、序列帧或音效联动。',
+    detail: '请按目标平台实际接入方式澄清当前节点的表现编排：先判断触发、分支、播放顺序、接入方式、资源、层级、控制、结束状态这 8 个槽位分别是已确认、AI 推断还是缺失；然后只问当前最阻塞实现的 1 个问题，并说明它卡住的是哪个槽位。接入方式可包含 CSS/原生动画、Tween、平台动画资源、Spine、粒子/特效资源、组件/弹窗特效、序列帧或音效联动。',
     keywords: ['动效', '表现', '接入', 'Tween', 'Spine', '粒子', 'Prefab', '音效', 'AnimationClip'],
   },
   {
@@ -647,7 +650,7 @@ function performanceReplies(blockingQuestion: PrdPerformanceBlockingQuestion | n
       { label: '并行后收尾', text: '主要表现可以并行播放，全部结束后统一进入收尾状态。' },
     ],
     integrationModes: [
-      { label: 'Tween+粒子', text: '接入方式优先使用 Cocos Tween 控制位移/缩放，并叠加 ParticleSystem 粒子。' },
+      { label: '动效+粒子', text: '接入方式优先使用平台动效控制位移/缩放，并叠加粒子或特效资源。' },
       { label: 'Animation/Spine', text: '核心表现使用 AnimationClip 或 Spine/Skeleton 资源播放。' },
       { label: 'Prefab 承载', text: '表现由独立 Prefab/弹窗承载，实例化到指定 UI 层级。' },
       { label: '先占位', text: '资源未定，先用占位动画实现，后续替换正式资源。' },
@@ -802,6 +805,8 @@ export function ForgeChat({
   performanceSpec,
   blockingQuestion,
   assetWorkbench,
+  generationMode,
+  onGenerationModeChange,
   onSend,
   onClassifyImageAttachment,
   onImportFigmaFrame,
@@ -825,8 +830,8 @@ export function ForgeChat({
   const [variantView, setVariantView] = useState<'grid' | 'single'>('single')
   const [singlePrototypeOnly, setSinglePrototypeOnly] = useState(true)
   const [performancePolishMode, setPerformancePolishMode] = useState(false)
-  const [generationMode, setGenerationMode] = useState<PrototypeGenerationMode>('draft_preview')
   const [selectedInterfaceAssetId, setSelectedInterfaceAssetId] = useState('')
+  const [selectedReusableLogicAssetId, setSelectedReusableLogicAssetId] = useState('')
   const [showFigmaImporter, setShowFigmaImporter] = useState(false)
   const [figmaUrl, setFigmaUrl] = useState('')
   const [isImportingFigma, setIsImportingFigma] = useState(false)
@@ -841,6 +846,12 @@ export function ForgeChat({
     assetWorkbench.uiRows.filter((row) => row.kind === 'interface' && row.status === 'ready' && Boolean(row.result?.html?.trim()))
   ), [assetWorkbench.uiRows])
   const selectedInterfacePackage = readyInterfacePackages.find((row) => row.id === selectedInterfaceAssetId) ?? readyInterfacePackages[0] ?? null
+  const approvedReusableLogicAssets = useMemo(() => (
+    assetWorkbench.reusableLogicAssets.filter((asset) => asset.status === 'approved')
+  ), [assetWorkbench.reusableLogicAssets])
+  const selectedReusableLogicAsset = approvedReusableLogicAssets.find((asset) => asset.id === selectedReusableLogicAssetId)
+    ?? approvedReusableLogicAssets[0]
+    ?? null
 
   // Whenever a fresh batch of variants arrives, default back to the comparison grid so the
   // user can choose; collapse to single preview when there is at most one variant.
@@ -861,6 +872,16 @@ export function ForgeChat({
       setSelectedInterfaceAssetId(readyInterfacePackages[0].id)
     }
   }, [readyInterfacePackages, selectedInterfaceAssetId])
+
+  useEffect(() => {
+    if (approvedReusableLogicAssets.length === 0) {
+      if (selectedReusableLogicAssetId) setSelectedReusableLogicAssetId('')
+      return
+    }
+    if (!approvedReusableLogicAssets.some((asset) => asset.id === selectedReusableLogicAssetId)) {
+      setSelectedReusableLogicAssetId(approvedReusableLogicAssets[0].id)
+    }
+  }, [approvedReusableLogicAssets, selectedReusableLogicAssetId])
 
 
   function handleSelectVariant(index: number) {
@@ -1178,6 +1199,36 @@ export function ForgeChat({
       generationMode: 'resource_standard',
       preferredInterfaceAssetId: selectedInterfacePackage.id,
       forceInterfaceBase: true,
+    })
+  }
+
+  async function handleGenerateFromReusableLogic() {
+    if (isSending || isClassifying || isImportingFigma || isGeneratingPrototype) return
+    if (!selectedReusableLogicAsset) {
+      setError('请先在草稿模式中确认一条可复用表现逻辑。')
+      return
+    }
+
+    const draftInstruction = draft.trim()
+    const hasPendingEvidence = Boolean(draftInstruction || attachments.length > 0)
+    const pendingEvidenceContent = hasPendingEvidence ? buildMessageContent(draftInstruction) : undefined
+    const instruction = [
+      formatReusableLogicAssetForPrompt(selectedReusableLogicAsset),
+      draftInstruction ? `当前补充要求：${draftInstruction}` : null,
+    ].filter(Boolean).join('\n\n')
+
+    if (hasPendingEvidence) {
+      setDraft('')
+      setAttachments([])
+    }
+    setError(null)
+    await handleGeneratePrototype(instruction, {
+      singlePrototypeOnly,
+      recordInstruction: true,
+      evidenceContent: pendingEvidenceContent,
+      generationMode: 'resource_standard',
+      preferredInterfaceAssetId: selectedInterfacePackage?.id ?? null,
+      forceInterfaceBase: Boolean(selectedInterfacePackage),
     })
   }
 
@@ -1640,6 +1691,32 @@ export function ForgeChat({
                       </span>
                       用界面生成
                     </button>
+                    <span className="h-5 w-px bg-tertiary/30" />
+                    <select
+                      value={selectedReusableLogicAsset?.id ?? ''}
+                      onChange={(event) => setSelectedReusableLogicAssetId(event.target.value)}
+                      disabled={approvedReusableLogicAssets.length === 0 || isGeneratingPrototype}
+                      className="h-7 min-w-[124px] max-w-[190px] rounded-md border border-tertiary/30 bg-surface px-xs text-label-md text-on-surface outline-none disabled:opacity-50"
+                      title={selectedReusableLogicAsset ? `${reusableLogicTypeLabel(selectedReusableLogicAsset.type)} / ${selectedReusableLogicAsset.name}` : '暂无已入库表现逻辑'}
+                    >
+                      {approvedReusableLogicAssets.length === 0 ? (
+                        <option value="">暂无表现逻辑</option>
+                      ) : approvedReusableLogicAssets.map((asset) => (
+                        <option key={asset.id} value={asset.id}>{asset.name}</option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => void handleGenerateFromReusableLogic()}
+                      disabled={!selectedReusableLogicAsset || isGeneratingPrototype || isClassifying || isImportingFigma}
+                      className="flex h-7 shrink-0 items-center gap-[2px] rounded-md border border-secondary bg-secondary-container px-sm text-label-md font-medium text-on-secondary-container transition-opacity hover:opacity-90 disabled:opacity-40"
+                      title={selectedReusableLogicAsset ? '按选中的表现逻辑生成资源库标准 HTML' : '请先从草稿模式沉淀并确认表现逻辑'}
+                    >
+                      <span className={['material-symbols-outlined', isGeneratingPrototype ? 'animate-spin' : ''].join(' ')} style={{ fontSize: '14px' }}>
+                        {isGeneratingPrototype ? 'sync' : 'schema'}
+                      </span>
+                      用逻辑生成
+                    </button>
                     {readyInterfacePackages.length === 0 && onOpenAssets ? (
                       <button
                         type="button"
@@ -1746,7 +1823,7 @@ export function ForgeChat({
                 <button
                   key={item.id}
                   type="button"
-                  onClick={() => setGenerationMode(item.id)}
+                  onClick={() => onGenerationModeChange(item.id)}
                   aria-pressed={generationMode === item.id}
                   className={[
                     'flex items-center gap-xs rounded px-sm text-label-md transition-colors',

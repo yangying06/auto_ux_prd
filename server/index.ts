@@ -12,9 +12,10 @@ import { buildDeliverySections, collectBackendContracts, collectDeliveryEvidence
 import { buildUiOnlyPrototypeInstruction, isUiOnlyPrototypeFeedback } from '../src/lib/nodeChatIntent'
 import { applyPrototypeEdit, normalizeGeneratedPrototypeHtml, normalizePrototypeHtml } from '../src/lib/prototypeUtils'
 import type { UXRequirementState } from '../src/types/uxRequirement'
-import type { PrototypeAssetAuditIssue, PrototypeAssetManifest, PrototypeInterfaceBlueprint, PrototypeInterfaceBlueprintNode, PrototypeInterfaceRect } from '../src/types/prototypeAssets'
+import type { ProjectSourceDocument } from '../src/types/archive'
+import type { PrototypeAssetAuditIssue, PrototypeAssetManifest, PrototypeInterfaceBlueprint, PrototypeInterfaceBlueprintNode, PrototypeInterfaceRect, PrototypeSpineAsset } from '../src/types/prototypeAssets'
 import type { DocumentKeywordSignal, DocumentSourceIndex, DocumentSourceIssue, DocumentSourceSection, MapAdjustmentOperation, PrdImportCandidateNode, PrdImportPreview, PrdNode, PrdNodeAudience, PrdNodeBackendContractKind, PrdNodeBackendContractRef, PrdNodeEvidenceRef, PrdNodeOperationPatch, PrdNodeOperationSuggestion, PrdNodeReference, PrdNodeSourceKind, PrdNodeStatus } from '../src/types/prdNode'
-import type { ReferenceImageClassificationRequest, ReferenceImageClassificationResponse, ReferenceImageRole } from '../src/types/chat'
+import type { ChatMessage as AppChatMessage, ReferenceImageClassificationRequest, ReferenceImageClassificationResponse, ReferenceImageRole } from '../src/types/chat'
 import type { QaAttachment, QaChatRequest, QaChatResponse, QaIssuePatch, QaIssuePriority, QaIssueSeverity } from '../src/types/qa'
 import { contentDispositionHeader } from './exportHeaders'
 import { collectFigmaNumericTextSlots, redactNumericTextFromPng } from './figmaNumericText'
@@ -22,6 +23,7 @@ import { extractNodeChatSuffix } from './nodeChatResponse'
 import { auditPrototypeAssets, buildPrototypeAssetManifestSection, normalizePrototypeAssetManifest } from './prototypeAssetAudit'
 import { buildVariantConfigs, clampVariantCount, DEFAULT_CREATE_VARIANTS, DEFAULT_UPDATE_VARIANTS } from './prototypePrompts'
 import { normalizeAiProviderError } from './aiProviderError'
+import { formatProjectKnowledgeEvidence, searchProjectKnowledge } from './projectKnowledgeIndex'
 import type { FigmaNumericTextSlot } from './figmaNumericText'
 
 dotenv.config()
@@ -38,13 +40,7 @@ const DEFAULT_ENV_CONFIG = {
   FIGMA_TOKEN: '',
 } as const
 let model = process.env.CLAUDE_MODEL ?? 'claude-sonnet-4-6'
-const ragSseUrl = process.env.COCOS_RAG_SSE_URL ?? 'http://43.134.44.85:18000/sse'
-const rawRagProxyScript = process.env.COCOS_RAG_PROXY_SCRIPT ?? '%APPDATA%\\cocos-rag\\remote_proxy.py'
-const ragProxyScript = rawRagProxyScript.replace('%APPDATA%', process.env.APPDATA ?? '').replace('$env:APPDATA', process.env.APPDATA ?? '')
-const MCP_ENDPOINT_TIMEOUT_MS = 8000
-const MCP_RPC_TIMEOUT_MS = 12000
 const SESSION_CLEANUP_DELAY_MS = 5 * 60 * 1000
-const MAX_TOOL_ITERATIONS = 4
 const DECOMPOSITION_HEARTBEAT_MS = 8000
 const DECOMPOSITION_CALL_TIMEOUT_MS = Number.parseInt(process.env.DECOMPOSITION_CALL_TIMEOUT_MS ?? '180000', 10)
 const DECOMPOSITION_BRANCH_CONCURRENCY = 2
@@ -56,6 +52,9 @@ const ASSET_WORKBENCH_CACHE_ROOT = path.resolve(process.cwd(), '.cache')
 const FIGMA_ASSET_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'figma-assets')
 const FIGMA_INTERMEDIATE_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'figma-intermediates')
 const EFFECT_ASSET_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'effect-assets')
+const SPINE_PLAYER_RUNTIME_ROOT = path.resolve(process.cwd(), 'node_modules', '@esotericsoftware', 'spine-player', 'dist')
+const SPINE_PLAYER_JS_URL = '/api/runtime/spine-player/iife/spine-player.min.js'
+const SPINE_PLAYER_CSS_URL = '/api/runtime/spine-player/spine-player.css'
 const figmaApiBaseUrl = (process.env.FIGMA_API_BASE_URL ?? 'https://api.figma.com').replace(/\/+$/, '')
 const figma2PrefabBaseUrl = (process.env.FIGMA2PREFAB_BASE_URL ?? 'http://43.134.44.85:3000').replace(/\/+$/, '')
 const figma2PrefabConvertPath = process.env.FIGMA2PREFAB_CONVERT_PATH ?? '/api/convert'
@@ -259,7 +258,7 @@ interface FigmaFrameRequest {
 type UiAssetKind = 'interface' | 'image_set'
 type UiAssetParseMode = 'intermediate' | 'image_set'
 type EffectAssetKind = 'spine' | 'particle' | 'sequence' | 'prefab' | 'audio' | 'texture' | 'scripted' | 'unknown'
-type EffectAssetPreviewType = 'image' | 'sequence' | 'video' | 'audio'
+type EffectAssetPreviewType = 'image' | 'sequence' | 'video' | 'audio' | 'spine'
 
 interface UiAssetFigmaParseRequest extends FigmaFrameRequest {
   kind?: UiAssetKind
@@ -384,6 +383,7 @@ interface EffectAssetRow {
   previewType: EffectAssetPreviewType | null
   previewUrl: string | null
   previewFiles: EffectAssetPreviewFile[]
+  spine?: PrototypeSpineAsset | null
   fileCount: number
   files: EffectAssetFile[]
   createdAt: string
@@ -420,6 +420,7 @@ interface NodeChatRequest {
   currentMessage?: ChatMessage
   messages?: ChatMessage[]
   tree: Record<string, PrdNode>
+  sourceDocument?: ProjectSourceDocument | null
   performancePolishMode?: boolean
 }
 
@@ -441,34 +442,26 @@ interface PrdNodeSuggestionRequest {
   sources?: NodeOperationSourceInput[]
 }
 
-interface RagSearchRequest {
+interface ProjectKnowledgeSearchRequest {
   query: string
-}
-
-interface McpJsonRpcSuccess<T> {
-  jsonrpc: '2.0'
-  id: number
-  result: T
-}
-
-interface McpToolCallResult {
-  content?: Array<{ type?: string; text?: string }>
-  structuredContent?: unknown
-  isError?: boolean
+  tree?: Record<string, PrdNode>
+  sourceDocument?: ProjectSourceDocument | null
+  nodeId?: string | null
+  messages?: ChatMessage[]
+  limit?: number
 }
 
 const systemPrompt = `你是 GameUX PromptForge 的需求质量检查员。
-你的任务是把模糊的游戏 UX 交互需求，整理成可直接交给 Cocos Creator 3.8.8 实现的提示词。
+你的任务是把模糊的 UX 交互需求，整理成可直接交给 H5、Android、iOS 或游戏客户端实现的提示词。
 每轮最多问一个高价值追问，并且只在它真正阻塞实现时追问。
-当 completion_rate 达到 60 或更高时，停止确认式提问，直接在 reply 中输出最终 Cocos Creator 实现提示词草案。
+当 completion_rate 达到 60 或更高时，停止确认式提问，直接在 reply 中输出最终跨平台交互实现提示词草案。
 每轮都必须根据最新对话重新评估所有槽位；如果用户新增范围或出现矛盾，要相应降低 completion_rate 和置信度。
 重点检查缺失槽位：trigger_condition、sequence_rules、asset_dependencies、engine_constraints。
 如果用户提供图片，把它们当作游戏 UI 截图或视觉参考：识别可见功能、布局层级、间距、对齐、导航、主要控件、装饰素材、文本区域，以及哪些图片只是参考、哪些图片应作为资源纳入。
 同时提取 ui_components 树：对描述画面中的每个可见 UI 元素，创建包含 name、type、states、animation_in、animation_out、z_order、notes、children 的组件条目。
-Component types 和 Component states 可以保留英文枚举值；其他用户可见内容必须使用中文。
-只有当 Cocos 引擎行为、Tween、动画、音频、Prefab、资源或实现约束会影响结论时，才调用 query_cocos_knowledge。
-如果当前信息已经足够，不要调用工具。
-所有生成给用户看的文字必须是中文，包括 reply、state_patch 中的描述性字段、suggested_answers、最终实现提示词、组件 notes。
+Component types 和 Component states 可以保留英文枚举值；AI 对话、规格说明和补全建议使用中文；从设计稿、截图、Figma 或原型证据中提取到的界面文案必须保留原语言，不要擅自翻译。
+当平台、动画、音频、资源、端能力或实现约束会影响结论时，请基于当前项目知识与用户确认内容明确标注适用平台；如果证据不足，不要编造平台细节。
+项目中的 AI 对话环境必须使用中文，包括 reply、state_patch 中的描述性字段、suggested_answers、最终实现提示词的说明性文字、组件 notes；但界面内容生成必须以设计稿/视觉证据为准，设计稿是英文时界面文案也使用英文。
 唯一允许保留英文的是：代码标识、接口字段名、文件路径、库/API 名称、枚举值、专有产品名。
 用简洁中文回复，并返回 JSON state_patch 对象。
 reply 必须易读：
@@ -525,23 +518,6 @@ completion_rate 必须始终是 0 到 100 的整数。
     "next_question": "string or null"
   }
 }`
-
-const tools: Anthropic.Tool[] = [
-  {
-    name: 'query_cocos_knowledge',
-    description: 'Search Cocos Creator 3.8.8 knowledge when engine constraints or API usage need authoritative support.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        query: {
-          type: 'string',
-          description: 'The Cocos Creator engine question to search for.',
-        },
-      },
-      required: ['query'],
-    },
-  },
-]
 
 function textFromClaudeContent(content: Anthropic.Messages.ContentBlock[]) {
   return content
@@ -902,216 +878,14 @@ async function runClaudeRequirementLoop(messages: ChatMessage[], requirementStat
     { role: 'user', content: firstUserContent },
   ]
 
-  let latestRagResult: Awaited<ReturnType<typeof queryCocosKnowledge>> | undefined
-
-  for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration += 1) {
-    const response = await anthropic!.messages.create({
-      model,
-      max_tokens: 16000,
-      system: systemPrompt,
-      tools,
-      messages: conversation,
-    })
-
-    if (response.stop_reason === 'end_turn') {
-      return {
-        response,
-        rag: latestRagResult,
-      }
-    }
-
-    const toolUseBlocks = response.content.filter((block): block is Anthropic.ToolUseBlock => block.type === 'tool_use')
-    conversation.push({ role: 'assistant', content: response.content })
-
-    if (!toolUseBlocks.length) {
-      return {
-        response,
-        rag: latestRagResult,
-      }
-    }
-
-    const toolResults: Anthropic.ToolResultBlockParam[] = []
-    for (const toolUse of toolUseBlocks) {
-      if (toolUse.name === 'query_cocos_knowledge') {
-        const input = (toolUse.input ?? {}) as { query?: unknown }
-        const query = typeof input.query === 'string' ? input.query : ''
-        latestRagResult = await queryCocosKnowledge(query)
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolUse.id,
-          content: JSON.stringify(latestRagResult),
-        })
-      }
-    }
-
-    conversation.push({ role: 'user', content: toolResults })
-  }
-
-  throw new Error(`Claude tool loop exceeded ${MAX_TOOL_ITERATIONS} iterations`)
-}
-
-function extractToolText(result: McpToolCallResult) {
-  const contentText = result.content?.map((item) => item.text).filter(Boolean).join('\n')
-  if (contentText) {
-    try {
-      const parsed = JSON.parse(contentText) as { results?: Array<{ section_title?: string; content?: string; source_url?: string }> }
-      if (parsed.results?.length) {
-        return parsed.results
-          .slice(0, 3)
-          .map((item, index) => `${index + 1}. ${item.section_title ?? 'Cocos 文档片段'}\n${item.content ?? ''}\n来源：${item.source_url ?? 'unknown'}`)
-          .join('\n\n')
-      }
-    } catch {
-      return contentText
-    }
-    return contentText
-  }
-  if (typeof result.structuredContent === 'string') return result.structuredContent
-  if (result.structuredContent) return JSON.stringify(result.structuredContent, null, 2)
-  return 'Cocos RAG 未返回文本内容。'
-}
-
-async function callMcpTool(method: string, params: Record<string, unknown>) {
-  const proxyProcess = spawn('uv', ['run', ragProxyScript, ragSseUrl], {
-    stdio: ['pipe', 'pipe', 'pipe'],
-    windowsHide: true,
+  const response = await anthropic!.messages.create({
+    model,
+    max_tokens: 16000,
+    system: systemPrompt,
+    messages: conversation,
   })
 
-  let requestId = 1
-  const pending = new Map<number, { resolve: (value: unknown) => void; reject: (reason?: unknown) => void }>()
-  let stdoutBuffer = ''
-  let endpointReady = false
-  let stderrLog = ''
-
-  proxyProcess.stderr.setEncoding('utf8')
-  proxyProcess.stderr.on('data', (chunk: string) => {
-    stderrLog += chunk
-    if (chunk.includes('Connected. Post endpoint:')) {
-      endpointReady = true
-    }
-  })
-
-  proxyProcess.stdout.setEncoding('utf8')
-  proxyProcess.stdout.on('data', (chunk: string) => {
-    stdoutBuffer += chunk
-    const lines = stdoutBuffer.split(/\r?\n/)
-    stdoutBuffer = lines.pop() ?? ''
-
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (!trimmed) continue
-      try {
-        const payload = JSON.parse(trimmed) as McpJsonRpcSuccess<unknown> & { error?: { message?: string }; method?: string }
-        if ('id' in payload && typeof payload.id === 'number' && pending.has(payload.id)) {
-          const deferred = pending.get(payload.id)
-          pending.delete(payload.id)
-          if (payload.error) {
-            deferred?.reject(new Error(payload.error.message ?? 'MCP tool call failed'))
-          } else {
-            deferred?.resolve(payload.result)
-          }
-        }
-      } catch {
-        // ignore non-json lines
-      }
-    }
-  })
-
-  proxyProcess.on('error', (error) => {
-    for (const deferred of pending.values()) deferred.reject(error)
-    pending.clear()
-  })
-
-  proxyProcess.on('exit', () => {
-    for (const deferred of pending.values()) deferred.reject(new Error(`MCP proxy exited early. ${stderrLog}`.trim()))
-    pending.clear()
-  })
-
-  async function waitForEndpoint() {
-    const startedAt = Date.now()
-    while (!endpointReady) {
-      if (Date.now() - startedAt > MCP_ENDPOINT_TIMEOUT_MS) {
-        throw new Error(`Timed out waiting for Cocos RAG MCP proxy. ${stderrLog}`.trim())
-      }
-      await new Promise((resolve) => setTimeout(resolve, 100))
-    }
-  }
-
-  function sendRpc<T>(payload: Record<string, unknown>) {
-    const id = requestId++
-    const body = JSON.stringify({ jsonrpc: '2.0', id, ...payload })
-    return new Promise<T>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        pending.delete(id)
-        reject(new Error(`Timed out waiting for MCP RPC response: ${String(payload.method ?? 'unknown')}`))
-      }, MCP_RPC_TIMEOUT_MS)
-      pending.set(id, {
-        resolve: (value: unknown) => {
-          clearTimeout(timeout)
-          resolve(value as T)
-        },
-        reject: (reason?: unknown) => {
-          clearTimeout(timeout)
-          reject(reason)
-        },
-      })
-      proxyProcess.stdin.write(`${body}\n`)
-    })
-  }
-
-  try {
-    await waitForEndpoint()
-    await sendRpc({ method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'gameux-promptforge-proxy', version: '0.1.0' } } })
-    proxyProcess.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} })}\n`)
-    await sendRpc({ method: 'tools/list', params: {} })
-    return await sendRpc<ToolResultEnvelope>({ method: 'tools/call', params: { name: method, arguments: params } })
-  } finally {
-    proxyProcess.stdin.end()
-    proxyProcess.kill()
-  }
-}
-
-type ToolResultEnvelope = McpToolCallResult
-
-async function queryCocosKnowledge(query: string) {
-  if (!query.trim()) {
-    return {
-      status: 'error' as const,
-      answer: 'Cocos RAG 查询内容为空。',
-      references: [],
-    }
-  }
-
-  try {
-    const result = await callMcpTool('search_cocos_docs', {
-      query,
-      version: '3.8.8',
-      top_k: 5,
-    })
-
-    return {
-      status: result.isError ? ('error' as const) : ('connected' as const),
-      answer: extractToolText(result),
-      references: [
-        {
-          title: 'Cocos Creator 3.8.8 RAG MCP SSE',
-          source: ragSseUrl,
-        },
-      ],
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown Cocos RAG error'
-    return {
-      status: 'error' as const,
-      answer: `Cocos RAG 连接失败：${message}`,
-      references: [
-        {
-          title: 'Cocos Creator 3.8.8 RAG MCP SSE',
-          source: ragSseUrl,
-        },
-      ],
-    }
-  }
+  return { response }
 }
 
 // ── Decomposition Tool ──────────────────────────────────────────────────────
@@ -2540,10 +2314,15 @@ void decomposeBranch
 const allowedOrigins = new Set([
   'http://127.0.0.1:5173',
   'http://localhost:5173',
+  'http://127.0.0.1:5174',
+  'http://localhost:5174',
+  'http://127.0.0.1:5175',
+  'http://localhost:5175',
   'http://127.0.0.1:4173',
   'http://localhost:4173',
   'http://tauri.localhost',
   'tauri://localhost',
+  'null',
 ])
 
 app.use(cors({
@@ -2647,11 +2426,10 @@ app.get('/api/health', (_req, res) => {
       apiKeyPresent: usesOpenAiPrototypeProvider ? Boolean(openAiApiKey) : Boolean(process.env.ANTHROPIC_API_KEY),
       baseUrl: usesOpenAiPrototypeProvider ? openAiBaseUrl : process.env.ANTHROPIC_BASE_URL,
     },
-    cocosRag: {
-      mode: 'mcp-sse-proxy',
-      sseUrl: ragSseUrl,
-      proxyScript: ragProxyScript,
-      status: 'configured',
+    projectKnowledge: {
+      mode: 'local-in-memory-index',
+      status: 'ready',
+      description: 'Indexes the current PRD source document, node tree, evidence references, backend contracts, and recent node-chat confirmations per request.',
     },
   })
 })
@@ -2721,14 +2499,21 @@ app.get('/api/decompose/:sessionId', (req, res) => {
   }
 })
 
-app.post('/api/rag/search', async (req, res) => {
-  const { query } = req.body as RagSearchRequest
+app.post('/api/project-knowledge/search', async (req, res) => {
+  const { query, tree = {}, sourceDocument = null, nodeId = null, messages = [], limit } = req.body as ProjectKnowledgeSearchRequest
   if (!query?.trim()) {
     res.status(400).json({ error: '缺少查询内容' })
     return
   }
 
-  res.json(await queryCocosKnowledge(query.trim()))
+  res.json(searchProjectKnowledge({
+    query: query.trim(),
+    tree,
+    sourceDocument,
+    currentNodeId: nodeId,
+    messages: Array.isArray(messages) ? messages as AppChatMessage[] : [],
+    limit,
+  }))
 })
 
 app.post('/api/chat', async (req, res) => {
@@ -2746,21 +2531,13 @@ app.post('/api/chat', async (req, res) => {
     return
   }
 
-  const latestUserMessage = extractText([...messages].reverse().find((message) => message.role === 'user')?.content ?? '')
-  const shouldWarmRag = /cocos|audio|audiosource|tween|动画|引擎|预制体|资源路径/i.test(latestUserMessage)
-  const warmedRag = shouldWarmRag ? await queryCocosKnowledge(latestUserMessage) : undefined
-
-  const { response, rag } = await runClaudeRequirementLoop(messages, {
-    ...requirementState,
-    engine_constraints: requirementState.engine_constraints ?? warmedRag?.answer ?? requirementState.engine_constraints,
-  })
+  const { response } = await runClaudeRequirementLoop(messages, requirementState)
   const parsed = safeParseClaudeJson(textFromClaudeContent(response.content))
   const { normalizedPatch } = mergeRequirementState(requirementState, parsed.state_patch)
 
   res.json({
     reply: parsed.reply ?? '我已经分析了当前需求，请继续补充缺失信息。',
     statePatch: normalizedPatch,
-    rag: rag ?? warmedRag,
     usage: response.usage,
   })
 })
@@ -3049,7 +2826,6 @@ function normalizePrdNodeSuggestions(
   })
 }
 
-
 app.post('/api/prd-node-suggestions', async (req, res) => {
   const { tree, selectedNodeId, supplementText, sources = [] } = req.body as PrdNodeSuggestionRequest
   if (!tree || !selectedNodeId || !tree[selectedNodeId]) {
@@ -3171,6 +2947,32 @@ app.post('/api/assets/effects/load', (req, res) => {
   }
 })
 
+app.get(/^\/api\/runtime\/spine-player\/(.+)$/u, (req, res) => {
+  const params = req.params as unknown as { 0?: string }
+  const rawRelativePath = params[0]
+  if (!rawRelativePath) {
+    res.status(400).json({ error: '缺少 Spine Player 运行时路径。' })
+    return
+  }
+
+  const relativePath = normalizeZipPath(decodeURIComponent(rawRelativePath))
+  const ext = path.extname(relativePath).toLowerCase()
+  if (!['.js', '.css', '.wasm', '.map'].includes(ext)) {
+    res.status(400).json({ error: '该 Spine Player 运行时文件类型不允许访问。' })
+    return
+  }
+
+  const filePath = resolveEffectCacheFilePath(SPINE_PLAYER_RUNTIME_ROOT, relativePath)
+  if (!filePath || !existsSync(filePath) || !statSync(filePath).isFile()) {
+    res.status(404).json({ error: '未找到 Spine Player 运行时文件。' })
+    return
+  }
+
+  res.setHeader('Content-Type', mimeTypeForPath(filePath))
+  res.setHeader('Cache-Control', 'private, max-age=86400')
+  res.end(readFileSync(filePath))
+})
+
 app.post('/api/assets/open-local-path', async (_req, res) => {
   try {
     mkdirSync(ASSET_WORKBENCH_CACHE_ROOT, { recursive: true })
@@ -3193,8 +2995,8 @@ app.get(/^\/api\/assets\/effects\/file\/(.+)$/u, (req, res) => {
   }
 
   const relativePath = normalizeZipPath(decodeURIComponent(rawRelativePath))
-  const ext = path.extname(relativePath).toLowerCase()
-  if (!EFFECT_PREVIEW_EXTENSIONS.has(ext)) {
+  const ext = effectFileExtForName(relativePath)
+  if (!EFFECT_PREVIEW_EXTENSIONS.has(ext) && !EFFECT_SPINE_EXTENSIONS.has(ext)) {
     res.status(400).json({ error: '该文件类型不允许作为特效预览。' })
     return
   }
@@ -3345,7 +3147,7 @@ app.post('/api/reference-image-classification', async (req, res) => {
 })
 
 app.post('/api/node-chat', async (req, res) => {
-  const { nodeId, currentMessage, messages = [], tree, performancePolishMode = false } = req.body as NodeChatRequest
+  const { nodeId, currentMessage, messages = [], tree, sourceDocument = null, performancePolishMode = false } = req.body as NodeChatRequest
   const latestUserMessage = currentMessage ?? [...messages].reverse().find((message) => message.role === 'user')
   const isPerformancePolishMode = performancePolishMode === true
 
@@ -3408,6 +3210,30 @@ app.post('/api/node-chat', async (req, res) => {
   }
 
   const performanceContext = `\n\n表现编排扫描：\n${formatPerformanceSpecForPrompt(performanceSpec)}`
+  const projectKnowledgeQuery = [
+    latestUserText,
+    targetNode.label,
+    targetNode.summary,
+    targetNode.content,
+    targetNode.techNotes,
+    targetNode.handoffGoal,
+    targetNode.qualityGate,
+    Object.values(targetNode.sections ?? {}).map((section) => [
+      section?.title,
+      section?.summary,
+      section?.content,
+      section?.openQuestions?.join('\n'),
+    ].filter(Boolean).join('\n')).join('\n'),
+  ].filter(Boolean).join('\n\n')
+  const projectKnowledge = searchProjectKnowledge({
+    query: projectKnowledgeQuery,
+    tree,
+    sourceDocument,
+    messages: messages as AppChatMessage[],
+    currentNodeId: nodeId,
+    limit: 8,
+  })
+  const projectKnowledgeContext = formatProjectKnowledgeEvidence(projectKnowledge.hits)
 
   const nodeContext = `目标节点：
 编号: ${targetNode.id}
@@ -3419,7 +3245,7 @@ app.post('/api/node-chat', async (req, res) => {
 规格视角: ${formatSpecLens(resolveNodeSpecLens(targetNode))}
 AI 接力目标: ${targetNode.handoffGoal ?? '未指定'}
 质量门槛: ${targetNode.qualityGate ?? '未指定'}
-内容: ${compactExcerpt(targetNode.content, 6000)}${pageSectionContext}${performanceContext}${targetNode.techNotes ? `\n技术备注: ${targetNode.techNotes}` : ''}${parentNode ? `\n\n父节点上下文：\n标题: ${parentNode.label}\n摘要: ${parentNode.summary}` : ''}${mvcChildContext}`
+内容: ${compactExcerpt(targetNode.content, 6000)}${projectKnowledgeContext ? `\n\n${projectKnowledgeContext}` : ''}${pageSectionContext}${performanceContext}${targetNode.techNotes ? `\n技术备注: ${targetNode.techNotes}` : ''}${parentNode ? `\n\n父节点上下文：\n标题: ${parentNode.label}\n摘要: ${parentNode.summary}` : ''}${mvcChildContext}`
 
   const hasReferenceImages = hasImages(latestUserMessage.content)
   const conversationText = latestUserText
@@ -3454,7 +3280,7 @@ ${nodeContext}
 你的任务：通过对话补齐这篇文档包的缺口，直到它足够低噪音、可独立、可执行，后续 AI 不需要再阅读整篇 PRD 也能完成对应任务。
 
 规则：
-- 用中文回复；所有展示给用户或写入导出文档的生成内容都必须是中文
+- 用中文回复；AI 对话、追问、总结和写入导出规格文档的说明性内容必须使用中文；界面文案、按钮文字和状态提示以设计稿、截图、Figma 或已有原型证据为准，证据是英文时保持英文
 - 当前工作模式：${isPerformancePolishMode ? 'AI 追问表现（AI 问、用户答）' : '自由迭代（用户主动补充或修改）'}
 - 回复正文只写给用户看的简短 Markdown 总结，不要输出整篇重写文档；可用标题、列表、加粗或行内代码，最多8行
 - 默认回复必须短：最多 3 行；除非用户要求总结或导出，不要列长清单
@@ -3470,7 +3296,7 @@ ${nodeContext}
 - 默认扫描目标节点中的表现编排缺口：结果/奖励表现、金币/数值获得、连线/命中、宝石/图标特效、弹窗揭晓、阶段演出、成功/失败反馈等都算表现编排
 - 不要问用户“这个表现重不重要”；这些表现通常是设计师已知但 PRD 未写清。你的角色是代替程序员追问 UI 设计师，把“会播什么、怎么播、播完怎么办”追问成可实现 spec
 - 追问表现编排时只围绕 8 类实现缺口：触发条件、分支规则、播放顺序、接入方式、资源清单、层级位置、控制规则、结束状态
-- 接入方式必须使用 Cocos 程序能落地的语言：Tween/AnimationClip/Spine/ParticleSystem/Prefab/序列帧/音效联动；不要停留在“更酷一点”“有氛围感”等视觉形容
+- 接入方式必须使用目标平台能落地的语言：CSS/JS 动画、原生动画、Tween、AnimationClip、Spine/Skeleton、ParticleSystem、组件/弹窗特效、序列帧、音效联动；不要停留在“更酷一点”“有氛围感”等视觉形容
 - 只有在原型/视觉资源问题和主流程问题都不阻塞时，才根据节点内容整理播放流程草案；再问最阻塞实现的 1 个具体问题，例如“连线是逐条亮还是同时亮”“金币飞入用 Tween 走贝塞尔还是复用 prefab 动画”“Spine 播完是否等待回调再开弹窗”“粒子和音效是否跟随跳过一起停止”“弹窗自动关闭还是点击关闭”
 - 进入表现追问时，必须明确这个问题卡住了哪个槽位：trigger、branches、sequence、integrationModes、assets、layers、controls、endState；回复正文只问这 1 个问题，不要同轮列多问
 - 单个追问必须给出 2-4 个可直接选择的回答方向，写在问题后面，例如“可选：逐段等待 / 并行播放后收尾 / 我来描述”；选项要短、具体、互斥，不要复述问题
@@ -3489,14 +3315,14 @@ ${nodeContext}
 - 当用户上传参考图或界面截图时，仅对 client/UI 类文档像 screenshot-to-code 一样提取布局层级、控件分组、间距、对齐、视觉权重、可交互元素、状态反馈和素材/参考图边界，并转化为文档内容
 - 本轮是否包含图片参考：${hasReferenceImages ? '是' : '否'}
 - 当用户补充或确认的内容应合并进当前文档时，即使文档尚未完成，也要在回复末尾附加 JSON：{"nodeComplete": false, "intents": ["document_polish"], "prototypeInstruction": null, "nodePatch": {"summary": "中文一句话总结当前文档用途或 null", "content": "中文 Markdown 文档正文或本轮已采纳后的当前文档段落", "techNotes": "中文实现/接力注意事项或 null", "performanceSpec": null}}
-- 如果本轮补齐或修正了表现编排，nodePatch.performanceSpec 必须写入结构化对象：{"detected": true, "source": "ai", "confidence": 0-100, "eventTypes": ["表现类型"], "integrationModes": ["Cocos Tween 变换 / AnimationClip/cc.Animation / Spine/Skeleton / ParticleSystem 粒子 / Prefab 特效/弹窗 / 序列帧 / 音效联动"], "trigger": "触发条件或 null", "branches": ["分支规则"], "sequence": [{"title":"阶段名","detail":"播放内容","layer":"层级或 null","assets":["资源"],"waitFor":"等待条件或 null"}], "assets": ["资源"], "layers": ["层级"], "controls": ["可跳过/可打断/重复触发规则"], "endState": "播放完成后的状态或 null", "openQuestions": ["仍待确认的问题"], "prototypeNotes": ["原型应模拟的表现重点"], "slotStatus": {"trigger":{"status":"missing/inferred/confirmed/waived","detail":"已知内容或 null","question":"该槽位待问问题或 null"}, "branches":{"status":"missing/inferred/confirmed/waived"}, "sequence":{"status":"missing/inferred/confirmed/waived"}, "integrationModes":{"status":"missing/inferred/confirmed/waived"}, "assets":{"status":"missing/inferred/confirmed/waived"}, "layers":{"status":"missing/inferred/confirmed/waived"}, "controls":{"status":"missing/inferred/confirmed/waived"}, "endState":{"status":"missing/inferred/confirmed/waived"}}, "blockingQuestion":{"slot":"当前最阻塞槽位","question":"只问 1 个问题"}, "readiness":{"score":0-100,"level":"ready/risk/blocked/waived","confirmedSlots":["已确认槽位"],"inferredSlots":["AI 推断槽位"],"missingSlots":["缺失槽位"],"waivedSlots":["豁免槽位"],"riskSummary":"中文风险说明或 null"}, "waivedReason":"豁免原因或 null"}
+- 如果本轮补齐或修正了表现编排，nodePatch.performanceSpec 必须写入结构化对象：{"detected": true, "source": "ai", "confidence": 0-100, "eventTypes": ["表现类型"], "integrationModes": ["平台动效变换 / CSS或原生动画 / Spine/Skeleton / 粒子或特效资源 / 组件或弹窗特效 / 序列帧 / 音效联动"], "trigger": "触发条件或 null", "branches": ["分支规则"], "sequence": [{"title":"阶段名","detail":"播放内容","layer":"层级或 null","assets":["资源"],"waitFor":"等待条件或 null"}], "assets": ["资源"], "layers": ["层级"], "controls": ["可跳过/可打断/重复触发规则"], "endState": "播放完成后的状态或 null", "openQuestions": ["仍待确认的问题"], "prototypeNotes": ["原型应模拟的表现重点"], "slotStatus": {"trigger":{"status":"missing/inferred/confirmed/waived","detail":"已知内容或 null","question":"该槽位待问问题或 null"}, "branches":{"status":"missing/inferred/confirmed/waived"}, "sequence":{"status":"missing/inferred/confirmed/waived"}, "integrationModes":{"status":"missing/inferred/confirmed/waived"}, "assets":{"status":"missing/inferred/confirmed/waived"}, "layers":{"status":"missing/inferred/confirmed/waived"}, "controls":{"status":"missing/inferred/confirmed/waived"}, "endState":{"status":"missing/inferred/confirmed/waived"}}, "blockingQuestion":{"slot":"当前最阻塞槽位","question":"只问 1 个问题"}, "readiness":{"score":0-100,"level":"ready/risk/blocked/waived","confirmedSlots":["已确认槽位"],"inferredSlots":["AI 推断槽位"],"missingSlots":["缺失槽位"],"waivedSlots":["豁免槽位"],"riskSummary":"中文风险说明或 null"}, "waivedReason":"豁免原因或 null"}
 - 当同一轮还要求更新右侧原型时，把 prototype_update 加入 intents，并填写中文 prototypeInstruction；如果没有原型相关要求，prototypeInstruction 必须为 null
 - 如果用户确认了表现流程，且右侧原型需要同步表现顺序，prototypeInstruction 应简短说明要更新的播放阶段、弹窗/特效/数值表现和结束状态
 - 当你判断该文档已经足够交给后续 AI 执行时，把同一个 JSON 的 nodeComplete 设为 true，并让 nodePatch 包含最终文档内容
 - JSON 只能放在回复末尾；回复正文不能包含 JSON、大括号、schema 说明或原始回包
 - nodePatch.content 必须整合当前节点原始内容、用户补充和图片观察结论，写成可导出的当前文档正文；不要只写本轮摘要，也不要重复堆叠旧的 Deep Forge 段落
 - nodePatch 可以额外写入 sections.view / sections.interaction / sections.data、handoffGoal、qualityGate、backendContracts、evidenceRefs；页面节点的 View/Flow/Data 细节优先写 sections，接口/配置/服务端规则/数据模型依赖写入 backendContracts，作为页面的服务端交互内容，不要把服务端实现细节堆进页面正文
-- nodePatch.summary、nodePatch.content、nodePatch.techNotes、nodePatch.performanceSpec、prototypeInstruction 以及 content 内部 Markdown 标题必须使用中文；只有代码标识、文件路径、接口字段名、库/API 名称、枚举值和专有产品名可以保留英文
+- nodePatch.summary、nodePatch.content、nodePatch.techNotes、nodePatch.performanceSpec、prototypeInstruction 以及 content 内部 Markdown 标题必须使用中文；只有代码标识、文件路径、接口字段名、库/API 名称、枚举值和专有产品名可以保留英文；如果 nodePatch 记录的是设计稿/截图/Figma/已有原型中可见的界面文案，必须按证据原语言保留，不要翻译
 - 保持专业、简洁、直接的语气`
 
   const currentTurnOnlySystemPrompt = [
@@ -3606,7 +3432,7 @@ function buildFigmaEvidencePolicySection(hasImages: boolean) {
   return `
 ## Figma / 参考图优先级
 - 如果附件来自 Figma Frame、布局参考图或界面截图，它是视觉结构的主来源：布局、层级、间距、颜色、控件位置、文字和素材位置都优先按图还原。
-- PRD 和节点文档只用于补充交互逻辑、状态流转、数据条件、Cocos 制作约束和图中不可见的异常状态。
+- PRD 和节点文档只用于补充交互逻辑、状态流转、数据条件、目标平台制作约束和图中不可见的异常状态。
 - 如果 Figma 证据列出“数值占位”，说明原图中的示例数字已从位图中去除；生成 HTML 时必须在对应坐标叠加真实业务数值或动态占位，不要还原 Figma 示例数字。
 - 不要自行发明参考图/Figma 中不存在的装饰图、角色图、背景图或外层设备框。`
 }
@@ -3677,15 +3503,15 @@ ${instructionSection}${hasImages ? `\n${buildScreenshotFidelitySection()}` : ''}
 
 ## 输出约束
 1. 只输出单个完整 HTML 文件；可以用 \`\`\`html 包裹，但不要解释。
-2. 必须是单个 HTML 文件：不需要 npm 或构建步骤；如果上方提供了 Figma 图片 URL，必须直接引用这些 URL 作为真实视觉资产。
-3. 可使用 Tailwind CDN（https://cdn.tailwindcss.com）、上方提供的 Figma 图片 URL 和少量内联 CSS/JS；不要引用未提供或不可访问的本地路径。
+2. 必须是单个 HTML 文件：不需要 npm 或构建步骤；如果上方提供了 Figma/素材库 URL，必须直接引用这些 URL 作为真实视觉资产。
+3. 可使用 Tailwind CDN（https://cdn.tailwindcss.com）、上方提供的 Figma 图片 URL、素材库 URL、Spine Player 本地 runtime URL 和少量内联 CSS/JS；不要引用未提供或不可访问的本地路径。
 4. 画面要像游戏交互原型，不要做营销页：包含设备内界面、状态切换、关键按钮反馈、禁用/加载/错误态。
 5. 如果需求状态、PRD 或附件里包含多组 mock 数据、多个列表 item、多个奖励档位、多个接口示例或多种服务端返回，原型必须提供可验证的多数据态：用自动循环/轮播/分页展示，或提供一个紧凑的 GM/调试面板让用户切换 mock 数据、状态、奖励档位、错误码和空数据；不要只固定展示第一组 mock 数据。
 6. 如果需求状态包含表现编排，必须模拟播放流程的大致顺序：前置特效、命中/高亮、弹窗/揭晓、数值滚动/飞入、收尾关闭等可以用占位特效和中文阶段标签表达；不要只画静态最终态。
 7. 不要生成提示性标注、组件标注、注释说明小标签、注释栏、引线或 callout；原型只保留用户真实会看到和操作的界面内容。
 8. 未确认资源用占位块，不要伪造真实素材路径。
 9. 脚本必须安全自包含，不要访问父窗口、cookie、localStorage 或外部 API。
-10. 所有用户可见界面文字、按钮文案和状态提示必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。`
+10. 用户可见界面文字、按钮文案和状态提示必须跟随设计稿、截图、Figma、已有原型或用户明确要求的语言；证据是英文时保持英文，不要翻译。没有语言证据时，默认使用简洁中文占位文案；代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。`
 }
 
 function buildUpdatePrototypePrompt(requirementState: UXRequirementState, currentHtml: string, instruction: string, history: string[] = [], focus?: string, hasImages = false, assetManifest?: PrototypeAssetManifest | null) {
@@ -3708,14 +3534,14 @@ ${currentHtml}
 2. old_string 必须逐字符来自当前 HTML，不能概括、不能省略。
 3. 如果需要多处修改，可以调用多次 edit_prototype。
 4. 如果无法安全定位精确片段，直接输出修改后的完整 HTML 文件。
-5. 保持单文件可运行、Tailwind CDN 可用、无构建步骤；如果上方提供了 Figma 图片 URL，继续保留并真实引用这些 URL。
+5. 保持单文件可运行、Tailwind CDN 可用、无构建步骤；如果上方提供了 Figma/素材库 URL，继续保留并真实引用这些 URL；如果提供 Spine Player runtime 和 jsonUrl/atlasUrl/textureUrls，使用 spine.SpinePlayer 播放真实骨骼动画。
 6. 预览 iframe 是 375px CSS 固定宽度；默认验收视口按 375x812 设计，html、body 和唯一主根容器必须使用 width:100vw; min-width:375px; min-height:100vh; overflow-x:hidden; overflow-y:auto。
 7. 修改时优先保持核心界面、主要按钮和关键状态在首屏可见；新增内容超过首屏时，用弹层、抽屉、折叠区、标签页或状态切换承载，不要直接把主页面继续拉长。
 8. 禁止生成额外的 750px 设计稿容器，禁止 max-width/mx-auto/scale()/zoom 让界面缩在中间，也不要新增手机壳、浏览器壳或外层设备框；内容过长时允许纵向滚动，不要横向溢出。
 9. 如果需求状态、PRD 或附件里包含多组 mock 数据、多个列表 item、多个奖励档位、多个接口示例或多种服务端返回，本次更新必须保留或补齐多数据态切换：用自动循环/轮播/分页展示，或提供一个紧凑的 GM/调试面板让用户切换 mock 数据、状态、奖励档位、错误码和空数据；不要把原型退化成只展示第一组 mock 数据。
 10. 如果需求状态包含表现编排，本次更新必须优先对齐播放顺序、阶段标签、弹窗/特效/数值表现和结束状态；可以用占位粒子、光效、震屏模拟、音效标签表达尚未接入的资源。
 11. 不要新增提示性标注、组件标注、注释说明小标签、注释栏、引线或 callout；需要说明的设计意图只体现在真实界面状态、文案和交互反馈中。
-12. 所有用户可见界面文字、按钮文案和状态提示必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。
+12. 用户可见界面文字、按钮文案和状态提示必须跟随设计稿、截图、Figma、已有原型或用户明确要求的语言；证据是英文时保持英文，不要翻译。没有语言证据时，默认使用简洁中文占位文案；代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。
 13. 最终返回不能是说明、diff、patch、局部片段或 Markdown 清单；非工具路径必须返回以 <!doctype html> 或 <html> 开始、包含 </html> 的完整 HTML 文档。`
 }
 
@@ -4280,6 +4106,12 @@ function findZipFile(files: Record<string, Uint8Array>, lookup: Map<string, stri
 
 function mimeTypeForPath(filePath: string) {
   const ext = filePath.split('.').pop()?.toLowerCase()
+  if (ext === 'js' || ext === 'mjs') return 'application/javascript'
+  if (ext === 'css') return 'text/css'
+  if (ext === 'json') return 'application/json'
+  if (ext === 'txt' || ext === 'atlas') return 'text/plain'
+  if (ext === 'skel') return 'application/octet-stream'
+  if (ext === 'wasm') return 'application/wasm'
   if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg'
   if (ext === 'webp') return 'image/webp'
   if (ext === 'gif') return 'image/gif'
@@ -4685,6 +4517,7 @@ function buildUiAssetParseResultFromPrefab(frame: FigmaPrefabFrameResponse, pars
 const EFFECT_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif'])
 const EFFECT_AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg'])
 const EFFECT_VIDEO_EXTENSIONS = new Set(['.mp4', '.webm'])
+const EFFECT_SPINE_EXTENSIONS = new Set(['.json', '.skel', '.atlas', '.atlas.txt'])
 const EFFECT_PREVIEW_EXTENSIONS = new Set([
   ...EFFECT_IMAGE_EXTENSIONS,
   ...EFFECT_AUDIO_EXTENSIONS,
@@ -4753,7 +4586,7 @@ function collectEffectFiles(root: string) {
         relativePath,
         dirRelativePath: path.dirname(relativePath).replace(/\\/g, '/').replace(/^\.$/u, ''),
         name: entry.name,
-        ext: path.extname(entry.name).toLowerCase(),
+        ext: effectFileExtForName(entry.name),
         size: stat.size,
       })
     }
@@ -4763,8 +4596,15 @@ function collectEffectFiles(root: string) {
   return { files, truncated }
 }
 
+function effectFileExtForName(name: string) {
+  const lower = name.toLowerCase()
+  if (lower.endsWith('.atlas.txt')) return '.atlas.txt'
+  return path.extname(lower)
+}
+
 function effectGroupKey(file: ScannedEffectFile) {
   if (file.dirRelativePath) return file.dirRelativePath
+  if (file.relativePath.toLowerCase().endsWith('.atlas.txt')) return file.relativePath.slice(0, -'.atlas.txt'.length)
   return file.relativePath.replace(/\.[^.]+$/u, '')
 }
 
@@ -4773,10 +4613,20 @@ function displayNameFromEffectKey(key: string) {
   return base.replace(/\.[^.]+$/u, '')
 }
 
+function isLikelySpineJsonFile(file: ScannedEffectFile) {
+  if (file.ext !== '.json') return false
+  try {
+    const text = readFileSync(file.absolutePath, 'utf8').slice(0, 4096)
+    return /"skeleton"\s*:/u.test(text) && /"animations"\s*:/u.test(text) && /"spine"\s*:/u.test(text)
+  } catch {
+    return false
+  }
+}
+
 function inferEffectKind(name: string, files: ScannedEffectFile[]): EffectAssetKind {
   const text = `${name} ${files.map((file) => file.name).join(' ')}`.toLowerCase()
   const exts = new Set(files.map((file) => file.ext))
-  if (exts.has('.skel') || exts.has('.atlas') || exts.has('.spine') || /spine|skeleton/u.test(text)) return 'spine'
+  if (exts.has('.skel') || exts.has('.atlas') || exts.has('.atlas.txt') || exts.has('.spine') || files.some(isLikelySpineJsonFile) || /spine|skeleton/u.test(text)) return 'spine'
   if (exts.has('.plist') || exts.has('.particle') || /particle|fx_|effect|特效|粒子/u.test(text)) return 'particle'
   if (exts.has('.prefab')) return 'prefab'
   if ([...exts].some((ext) => EFFECT_AUDIO_EXTENSIONS.has(ext))) return 'audio'
@@ -4883,11 +4733,105 @@ function buildEffectAssetFileUrl(baseUrl: string, relativePath: string) {
   return `${baseUrl.replace(/\/+$/, '')}/api/assets/effects/file/${normalizeZipPath(relativePath).split('/').map(encodeURIComponent).join('/')}`
 }
 
+function buildSpineRuntimeUrl(assetBaseUrl: string, runtimePath: string) {
+  return `${assetBaseUrl.replace(/\/+$/, '')}${runtimePath}`
+}
+
 function loadedEffectRelativePath(loadedPath: string | null | undefined) {
   if (!loadedPath) return null
   const relative = path.relative(EFFECT_ASSET_CACHE_ROOT, loadedPath)
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return null
   return normalizeZipPath(relative)
+}
+
+function isSpineAtlasFile(file: EffectAssetFile) {
+  const name = file.name.toLowerCase()
+  return file.ext === '.atlas' || file.ext === '.atlas.txt' || name.endsWith('.atlas.txt')
+}
+
+function parseSpineAtlasTextureNames(text: string) {
+  return Array.from(new Set(text
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.includes(':') && /\.(png|jpe?g|webp)$/iu.test(line))))
+}
+
+function parseSpineJsonMetadata(filePath: string | null | undefined) {
+  if (!filePath) return { animationNames: [] as string[], skinNames: [] as string[], defaultAnimation: null as string | null, skeletonVersion: null as string | null }
+  try {
+    const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as {
+      skeleton?: { spine?: unknown }
+      animations?: Record<string, unknown>
+      skins?: unknown
+    }
+    const animationNames = parsed.animations && typeof parsed.animations === 'object'
+      ? Object.keys(parsed.animations).filter(Boolean)
+      : []
+    const skinNames = Array.isArray(parsed.skins)
+      ? parsed.skins
+          .map((skin) => (skin && typeof skin === 'object' && 'name' in skin ? String((skin as { name?: unknown }).name ?? '') : ''))
+          .filter(Boolean)
+      : parsed.skins && typeof parsed.skins === 'object'
+        ? Object.keys(parsed.skins)
+        : []
+    return {
+      animationNames,
+      skinNames,
+      defaultAnimation: animationNames[0] ?? null,
+      skeletonVersion: normalizeTextValue(parsed.skeleton?.spine),
+    }
+  } catch {
+    return { animationNames: [] as string[], skinNames: [] as string[], defaultAnimation: null, skeletonVersion: null }
+  }
+}
+
+function buildEffectSpineAsset(rowName: string, files: EffectAssetFile[], assetBaseUrl: string): PrototypeSpineAsset | null {
+  const jsonFile = files.find((file) => file.ext === '.json' && file.loadedPath)
+  const binaryFile = files.find((file) => file.ext === '.skel' && file.loadedPath)
+  const atlasFile = files.find((file) => isSpineAtlasFile(file) && file.loadedPath)
+  if ((!jsonFile && !binaryFile) || !atlasFile) return null
+
+  const atlasRelativePath = loadedEffectRelativePath(atlasFile.loadedPath)
+  if (!atlasRelativePath) return null
+  let atlasText = ''
+  try {
+    atlasText = readFileSync(atlasFile.loadedPath!, 'utf8')
+  } catch {
+    return null
+  }
+
+  const textureNames = parseSpineAtlasTextureNames(atlasText)
+  const imageFiles = files.filter((file) => EFFECT_IMAGE_EXTENSIONS.has(effectFileExtForName(file.name)) && file.loadedPath)
+  const texturesFromAtlas = textureNames
+    .map((textureName) => {
+      const matched = imageFiles.find((file) => file.name.toLowerCase() === textureName.toLowerCase())
+      const relativePath = matched ? loadedEffectRelativePath(matched.loadedPath) : null
+      return relativePath ? buildEffectAssetFileUrl(assetBaseUrl, relativePath) : null
+    })
+    .filter((url): url is string => Boolean(url))
+  const fallbackTextures = imageFiles
+    .map((file) => loadedEffectRelativePath(file.loadedPath))
+    .filter((relativePath): relativePath is string => Boolean(relativePath))
+    .map((relativePath) => buildEffectAssetFileUrl(assetBaseUrl, relativePath))
+  const textureUrls = texturesFromAtlas.length ? texturesFromAtlas : fallbackTextures
+  if (!textureUrls.length) return null
+
+  const jsonRelativePath = jsonFile ? loadedEffectRelativePath(jsonFile.loadedPath) : null
+  const binaryRelativePath = binaryFile ? loadedEffectRelativePath(binaryFile.loadedPath) : null
+  const metadata = parseSpineJsonMetadata(jsonFile?.loadedPath)
+  return {
+    jsonUrl: jsonRelativePath ? buildEffectAssetFileUrl(assetBaseUrl, jsonRelativePath) : null,
+    binaryUrl: binaryRelativePath ? buildEffectAssetFileUrl(assetBaseUrl, binaryRelativePath) : null,
+    atlasUrl: buildEffectAssetFileUrl(assetBaseUrl, atlasRelativePath),
+    textureUrls,
+    animationNames: metadata.animationNames,
+    skinNames: metadata.skinNames.length ? metadata.skinNames : ['default'],
+    defaultAnimation: metadata.defaultAnimation ?? rowName,
+    skeletonVersion: metadata.skeletonVersion,
+    premultipliedAlpha: true,
+    playerJsUrl: buildSpineRuntimeUrl(assetBaseUrl, SPINE_PLAYER_JS_URL),
+    playerCssUrl: buildSpineRuntimeUrl(assetBaseUrl, SPINE_PLAYER_CSS_URL),
+  }
 }
 
 function effectPreviewTypeForExt(ext: string): EffectAssetPreviewType | null {
@@ -4897,7 +4841,23 @@ function effectPreviewTypeForExt(ext: string): EffectAssetPreviewType | null {
   return null
 }
 
-function buildEffectPreview(files: EffectAssetFile[], assetBaseUrl: string) {
+function buildEffectPreview(rowName: string, files: EffectAssetFile[], assetBaseUrl: string) {
+  const spine = buildEffectSpineAsset(rowName, files, assetBaseUrl)
+  if (spine) {
+    const previewFiles = spine.textureUrls.map((url, index) => ({
+      name: `texture-${index + 1}`,
+      ext: '.png',
+      url,
+    }))
+    return {
+      files,
+      previewType: 'spine' as const,
+      previewUrl: spine.textureUrls[0] ?? spine.jsonUrl ?? spine.binaryUrl ?? null,
+      previewFiles,
+      spine,
+    }
+  }
+
   const previewable = files
     .map((file) => {
       const ext = file.ext.toLowerCase()
@@ -4920,6 +4880,7 @@ function buildEffectPreview(files: EffectAssetFile[], assetBaseUrl: string) {
       previewType: null,
       previewUrl: null,
       previewFiles: [],
+      spine: null,
     }
   }
 
@@ -4936,6 +4897,7 @@ function buildEffectPreview(files: EffectAssetFile[], assetBaseUrl: string) {
     previewType: imageSequence ? 'sequence' as const : chosen.previewType,
     previewUrl: chosen.previewFile.url,
     previewFiles,
+    spine: null,
   }
 }
 
@@ -4989,6 +4951,7 @@ function normalizeEffectAssetRowForLoad(value: unknown): EffectAssetRow {
     previewType: null,
     previewUrl: null,
     previewFiles: [],
+    spine: null,
     fileCount: typeof row.fileCount === 'number' ? row.fileCount : files.length,
     files: files.map((file) => ({
       name: file.name,
@@ -5029,7 +4992,7 @@ function loadEffectAssetRow(rawRow: unknown, assetBaseUrl: string) {
   const loadedPath = row.relativePath
     ? resolveEffectCacheFilePath(EFFECT_ASSET_CACHE_ROOT, row.relativePath) ?? EFFECT_ASSET_CACHE_ROOT
     : EFFECT_ASSET_CACHE_ROOT
-  const preview = buildEffectPreview(files, assetBaseUrl)
+  const preview = buildEffectPreview(row.name, files, assetBaseUrl)
 
   return {
     row: {
@@ -5045,6 +5008,7 @@ function loadEffectAssetRow(rawRow: unknown, assetBaseUrl: string) {
       previewType: preview.previewType,
       previewUrl: preview.previewUrl,
       previewFiles: preview.previewFiles,
+      spine: preview.spine,
       files: preview.files,
       updatedAt: loadedAt,
     },
@@ -5074,9 +5038,12 @@ function scanEffectAssetRoot(rawRootPath: unknown, options: EffectAssetScanOptio
       const name = displayNameFromEffectKey(key)
       const kind = inferEffectKind(name, groupFiles)
       const relativePath = key || (groupFiles[0]?.relativePath ?? '')
-      const localPath = key
-        ? path.resolve(sourceRoot, ...key.split('/').filter(Boolean))
-        : groupFiles[0]?.absolutePath ?? sourceRoot
+      const candidateLocalPath = key ? path.resolve(sourceRoot, ...key.split('/').filter(Boolean)) : null
+      const localPath = candidateLocalPath && existsSync(candidateLocalPath)
+        ? candidateLocalPath
+        : groupFiles[0]?.dirRelativePath
+          ? path.resolve(sourceRoot, ...groupFiles[0].dirRelativePath.split('/').filter(Boolean))
+          : sourceRoot
       return {
         id: `effect-${hashId(`${sourceRoot}/${relativePath}`)}`,
         name,
@@ -5100,6 +5067,7 @@ function scanEffectAssetRoot(rawRootPath: unknown, options: EffectAssetScanOptio
         previewType: null,
         previewUrl: null,
         previewFiles: [],
+        spine: null,
         fileCount: groupFiles.length,
         files: groupFiles.map((file) => ({
           name: file.name,
@@ -5862,7 +5830,7 @@ app.post('/api/export-prompt', async (req, res) => {
     return
   }
 
-  const prompt = `你是一位资深游戏 UX 设计师，请根据下面的需求状态和对话摘要，输出一份完整的 Cocos Creator 3.8.8 UX 交互实现设计文档（Markdown 格式）。
+  const prompt = `你是一位资深 UX 设计师，请根据下面的需求状态和对话摘要，输出一份完整的跨平台 UX 交互实现设计文档（Markdown 格式）。
 
 ## 需求状态
 ${JSON.stringify(requirementState, null, 2)}
@@ -5895,9 +5863,9 @@ ${conversationSummary}
 ### 6. 资源依赖清单
 列出所有需要的资源（Prefab、Spine、纹理、音效等），用表格呈现。
 
-### 7. 引擎实现方案
-基于 Cocos Creator 3.8.8 给出具体的实现建议：
-- 推荐使用的 API（Tween、Animation、AudioSource 等）
+### 7. 平台实现方案
+基于目标平台（H5、Android、iOS 或游戏客户端）给出具体的实现建议：
+- 推荐使用的 API、组件或动画/音频机制
 - 节点层级结构建议
 - 性能注意事项
 
@@ -6202,6 +6170,272 @@ function generateIndexMarkdown(exportedNodes: PrdNode[], tree: Record<string, Pr
   ].join('\n')
 }
 
+interface AssetExportSummary {
+  exportDir: string
+  manifestPath: string
+  copiedFiles: number
+  copiedBytes: number
+  skippedItems: number
+}
+
+interface MutableAssetExportSummary extends AssetExportSummary {
+  manifestLines: string[]
+  skippedLines: string[]
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+}
+
+function safeAssetExportSegment(value: string | null | undefined, fallback: string) {
+  return sanitizeDocPathSegment((value?.trim() || fallback).replace(/[\\/]+/g, '-'))
+}
+
+function normalizeAssetExportPath(relativePath: string) {
+  const parts = relativePath
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '')
+    .split('/')
+    .map((part) => part.trim())
+    .filter((part) => part && part !== '.' && part !== '..')
+    .map(sanitizeDocPathSegment)
+  return parts.length ? parts.join('/') : null
+}
+
+function resolveGeneratedAssetExportPath(relativePath: string) {
+  const safeRelative = normalizeAssetExportPath(`assets/${relativePath}`)
+  if (!safeRelative) throw new Error('素材导出路径无效')
+  const resolved = path.resolve(SPEC_EXPORT_ROOT, safeRelative)
+  const rootWithSep = SPEC_EXPORT_ROOT.endsWith(path.sep) ? SPEC_EXPORT_ROOT : `${SPEC_EXPORT_ROOT}${path.sep}`
+  if (resolved !== SPEC_EXPORT_ROOT && !resolved.startsWith(rootWithSep)) {
+    throw new Error('素材导出路径越界')
+  }
+  return { resolved, relative: safeRelative }
+}
+
+function addAssetSkip(summary: MutableAssetExportSummary, label: string, reason: string) {
+  summary.skippedItems += 1
+  summary.skippedLines.push(`- ${label}：${reason}`)
+}
+
+function copyAssetFile(sourcePath: string, targetRelativePath: string, summary: MutableAssetExportSummary, label: string) {
+  try {
+    if (!existsSync(sourcePath)) {
+      addAssetSkip(summary, label, `源文件不存在：${sourcePath}`)
+      return
+    }
+    const stat = statSync(sourcePath)
+    if (!stat.isFile()) {
+      addAssetSkip(summary, label, `不是文件：${sourcePath}`)
+      return
+    }
+    const target = resolveGeneratedAssetExportPath(targetRelativePath)
+    mkdirSync(path.dirname(target.resolved), { recursive: true })
+    copyFileSync(sourcePath, target.resolved)
+    summary.copiedFiles += 1
+    summary.copiedBytes += stat.size
+  } catch (error) {
+    addAssetSkip(summary, label, error instanceof Error ? error.message : '复制失败')
+  }
+}
+
+function copyAssetDirectory(sourcePath: string, targetRelativeDir: string, summary: MutableAssetExportSummary, label: string) {
+  try {
+    if (!existsSync(sourcePath)) {
+      addAssetSkip(summary, label, `源目录不存在：${sourcePath}`)
+      return
+    }
+    const stat = statSync(sourcePath)
+    if (stat.isFile()) {
+      copyAssetFile(sourcePath, `${targetRelativeDir}/${path.basename(sourcePath)}`, summary, label)
+      return
+    }
+    if (!stat.isDirectory()) {
+      addAssetSkip(summary, label, `不是目录：${sourcePath}`)
+      return
+    }
+    const entries = readdirSync(sourcePath, { withFileTypes: true }) as Dirent[]
+    for (const entry of entries) {
+      const sourceChild = path.join(sourcePath, entry.name)
+      const targetChild = `${targetRelativeDir}/${entry.name}`
+      if (entry.isSymbolicLink()) {
+        addAssetSkip(summary, `${label}/${entry.name}`, '跳过符号链接')
+      } else if (entry.isDirectory()) {
+        copyAssetDirectory(sourceChild, targetChild, summary, `${label}/${entry.name}`)
+      } else if (entry.isFile()) {
+        copyAssetFile(sourceChild, targetChild, summary, `${label}/${entry.name}`)
+      }
+    }
+  } catch (error) {
+    addAssetSkip(summary, label, error instanceof Error ? error.message : '复制目录失败')
+  }
+}
+
+function copyAssetSource(sourcePath: string | null | undefined, targetRelativePath: string, summary: MutableAssetExportSummary, label: string) {
+  if (!sourcePath) return
+  try {
+    const stat = existsSync(sourcePath) ? statSync(sourcePath) : null
+    if (!stat) {
+      addAssetSkip(summary, label, `源路径不存在：${sourcePath}`)
+      return
+    }
+    if (stat.isDirectory()) {
+      copyAssetDirectory(sourcePath, targetRelativePath, summary, label)
+    } else if (stat.isFile()) {
+      copyAssetFile(sourcePath, targetRelativePath, summary, label)
+    } else {
+      addAssetSkip(summary, label, `无法复制该路径类型：${sourcePath}`)
+    }
+  } catch (error) {
+    addAssetSkip(summary, label, error instanceof Error ? error.message : '读取素材路径失败')
+  }
+}
+
+function relativePathUnderRoot(rootPath: string | null, sourcePath: string, fallbackName: string) {
+  if (rootPath) {
+    const relative = path.relative(rootPath, sourcePath)
+    if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) return normalizeZipPath(relative)
+  }
+  return fallbackName
+}
+
+function assetWorkbenchRows(assetWorkbench: unknown, key: 'uiRows' | 'effectRows') {
+  const record = objectRecord(assetWorkbench)
+  const rows = record ? record[key] : null
+  return Array.isArray(rows) ? rows : []
+}
+
+function writeUiAssetExports(assetWorkbench: unknown, summary: MutableAssetExportSummary) {
+  const rows = assetWorkbenchRows(assetWorkbench, 'uiRows')
+  if (!rows.length) return
+  summary.manifestLines.push('', '## UI / Figma 素材')
+
+  rows.forEach((rawRow, index) => {
+    const row = objectRecord(rawRow)
+    if (!row) return
+    const result = objectRecord(row.result)
+    const name = normalizeTextValue(row.name) ?? normalizeTextValue(result?.panelName) ?? `UI 素材 ${index + 1}`
+    const id = normalizeTextValue(row.id) ?? `ui-${index + 1}`
+    const baseDir = `ui/${safeAssetExportSegment(`${id}-${name}`, `ui-${index + 1}`)}`
+    const before = summary.copiedFiles
+
+    summary.manifestLines.push('', `### ${name}`)
+    summary.manifestLines.push(`- 类型：${normalizeTextValue(row.kind) ?? 'ui'}`)
+    if (normalizeTextValue(row.purpose)) summary.manifestLines.push(`- 用途：${normalizeTextValue(row.purpose)}`)
+    if (normalizeTextValue(row.usageNote)) summary.manifestLines.push(`- 备注：${normalizeTextValue(row.usageNote)}`)
+    if (normalizeTextValue(row.figmaUrl)) summary.manifestLines.push(`- 来源：${normalizeTextValue(row.figmaUrl)}`)
+    summary.manifestLines.push(`- 导出目录：assets/${baseDir}/`)
+
+    if (!result) {
+      addAssetSkip(summary, name, 'UI 素材尚未解析')
+      return
+    }
+
+    copyAssetSource(normalizeTextValue(result.outputDir), `${baseDir}/output`, summary, `${name} outputDir`)
+    copyAssetSource(normalizeTextValue(result.assetsDir), `${baseDir}/assets`, summary, `${name} assetsDir`)
+    copyAssetSource(normalizeTextValue(result.zipPath), `${baseDir}/${path.basename(normalizeTextValue(result.zipPath) ?? 'figma-assets.zip')}`, summary, `${name} zipPath`)
+    copyAssetSource(normalizeTextValue(result.uiSpecPath), `${baseDir}/${path.basename(normalizeTextValue(result.uiSpecPath) ?? 'ui_spec.json')}`, summary, `${name} uiSpecPath`)
+    copyAssetSource(normalizeTextValue(result.manifestPath), `${baseDir}/${path.basename(normalizeTextValue(result.manifestPath) ?? 'export_manifest.json')}`, summary, `${name} manifestPath`)
+
+    const files = Array.isArray(result.files) ? result.files : []
+    if (summary.copiedFiles === before) {
+      files.forEach((rawFile, fileIndex) => {
+        const file = objectRecord(rawFile)
+        const sourcePath = normalizeTextValue(file?.path)
+        const fileName = normalizeTextValue(file?.name) ?? (sourcePath ? path.basename(sourcePath) : `asset-${fileIndex + 1}`)
+        copyAssetSource(sourcePath, `${baseDir}/files/${fileName}`, summary, `${name}/${fileName}`)
+      })
+    }
+    summary.manifestLines.push(`- 文件数量：${summary.copiedFiles - before}`)
+  })
+}
+
+function writeEffectAssetExports(assetWorkbench: unknown, summary: MutableAssetExportSummary) {
+  const rows = assetWorkbenchRows(assetWorkbench, 'effectRows')
+  if (!rows.length) return
+  summary.manifestLines.push('', '## 特效 / 音频 / Prefab 素材')
+
+  rows.forEach((rawRow, index) => {
+    const row = objectRecord(rawRow)
+    if (!row) return
+    const name = normalizeTextValue(row.name) ?? `特效素材 ${index + 1}`
+    const id = normalizeTextValue(row.id) ?? `effect-${index + 1}`
+    const kind = normalizeTextValue(row.kind) ?? 'unknown'
+    const baseDir = `effects/${safeAssetExportSegment(`${id}-${name}`, `effect-${index + 1}`)}`
+    const sourceRoot = normalizeTextValue(row.sourceRoot)
+    const before = summary.copiedFiles
+
+    summary.manifestLines.push('', `### ${name}`)
+    summary.manifestLines.push(`- 类型：${kind}`)
+    if (normalizeTextValue(row.purpose)) summary.manifestLines.push(`- 用途：${normalizeTextValue(row.purpose)}`)
+    if (normalizeTextValue(row.usageNote)) summary.manifestLines.push(`- 备注：${normalizeTextValue(row.usageNote)}`)
+    if (normalizeTextValue(row.implementationHint)) summary.manifestLines.push(`- 接入建议：${normalizeTextValue(row.implementationHint)}`)
+    summary.manifestLines.push(`- 导出目录：assets/${baseDir}/`)
+
+    const loadedPath = normalizeTextValue(row.loadedPath)
+    const loadedRelative = loadedEffectRelativePath(loadedPath)
+    if (loadedPath && loadedRelative) {
+      copyAssetSource(loadedPath, `${baseDir}/loaded`, summary, `${name} loadedPath`)
+    }
+
+    if (summary.copiedFiles === before) {
+      const files = Array.isArray(row.files) ? row.files : []
+      files.forEach((rawFile, fileIndex) => {
+        const file = objectRecord(rawFile)
+        const sourcePath = normalizeTextValue(file?.loadedPath) ?? normalizeTextValue(file?.path)
+        if (!sourcePath) return
+        const fileName = normalizeTextValue(file?.name) ?? path.basename(sourcePath) ?? `asset-${fileIndex + 1}`
+        const relative = relativePathUnderRoot(sourceRoot, sourcePath, fileName)
+        copyAssetSource(sourcePath, `${baseDir}/source/${relative}`, summary, `${name}/${fileName}`)
+      })
+    }
+    summary.manifestLines.push(`- 文件数量：${summary.copiedFiles - before}`)
+  })
+}
+
+function writeProjectAssetExports(assetWorkbench: unknown): AssetExportSummary {
+  const assetDir = resolveGeneratedAssetExportPath('.')
+  mkdirSync(assetDir.resolved, { recursive: true })
+  const summary: MutableAssetExportSummary = {
+    exportDir: assetDir.resolved,
+    manifestPath: 'assets/ASSET-MANIFEST.md',
+    copiedFiles: 0,
+    copiedBytes: 0,
+    skippedItems: 0,
+    manifestLines: [
+      '# 项目素材导出清单',
+      '',
+      '> 本清单由 GameUX PromptForge 自动生成。素材路径均相对于当前 spec 导出目录。',
+    ],
+    skippedLines: [],
+  }
+
+  writeUiAssetExports(assetWorkbench, summary)
+  writeEffectAssetExports(assetWorkbench, summary)
+
+  summary.manifestLines.push(
+    '',
+    '## 汇总',
+    '',
+    `- 已复制文件：${summary.copiedFiles}`,
+    `- 已复制体积：${summary.copiedBytes} bytes`,
+    `- 跳过项：${summary.skippedItems}`,
+  )
+  if (summary.skippedLines.length) {
+    summary.manifestLines.push('', '## 跳过或失败项', '', ...summary.skippedLines)
+  }
+  const manifest = resolveGeneratedAssetExportPath('ASSET-MANIFEST.md')
+  writeFileSync(manifest.resolved, summary.manifestLines.join('\n'), 'utf-8')
+
+  return {
+    exportDir: summary.exportDir,
+    manifestPath: summary.manifestPath,
+    copiedFiles: summary.copiedFiles,
+    copiedBytes: summary.copiedBytes,
+    skippedItems: summary.skippedItems,
+  }
+}
+
 function resolveGeneratedSpecPath(docPath: string) {
   const normalized = docPath.replace(/\\/g, '/').trim()
   if (!normalized || normalized.startsWith('/') || /^[a-zA-Z]:\//.test(normalized) || normalized.split('/').some((part) => part === '..')) {
@@ -6217,7 +6451,7 @@ function resolveGeneratedSpecPath(docPath: string) {
   return { resolved, relative: safeRelative }
 }
 
-function writeSpecFolder(tree: Record<string, PrdNode>) {
+function writeSpecFolder(tree: Record<string, PrdNode>, options: { includeAssets?: boolean; assetWorkbench?: unknown } = {}) {
   const pageNodes = collectDeliveryNodes(tree).filter((node) => node.status === 'done')
   if (!pageNodes.length) throw new Error('没有找到已确认的页面 spec 节点')
   mkdirSync(SPEC_EXPORT_ROOT, { recursive: true })
@@ -6232,11 +6466,17 @@ function writeSpecFolder(tree: Record<string, PrdNode>) {
     documents.push({ nodeId: node.id, docPath: target.relative })
   }
   writeFileSync(path.join(SPEC_EXPORT_ROOT, '00-INDEX.md'), generateIndexMarkdown(pageNodes, tree, pathByNodeId), 'utf-8')
-  return { exportDir: SPEC_EXPORT_ROOT, documents }
+  const assets = options.includeAssets ? writeProjectAssetExports(options.assetWorkbench) : null
+  return { exportDir: SPEC_EXPORT_ROOT, documents, assets }
 }
 
 interface ExportZipRequest {
   tree: Record<string, PrdNode>
+}
+
+interface ExportSpecFolderRequest extends ExportZipRequest {
+  includeAssets?: boolean
+  assetWorkbench?: unknown
 }
 
 interface ExportNodeRequest {
@@ -6296,13 +6536,13 @@ app.post('/api/export-zip', (req, res) => {
 })
 
 app.post('/api/export-spec-folder', (req, res) => {
-  const { tree } = req.body as ExportZipRequest
+  const { tree, includeAssets, assetWorkbench } = req.body as ExportSpecFolderRequest
   if (!tree || typeof tree !== 'object') {
     res.status(400).json({ error: '缺少导图树数据' })
     return
   }
   try {
-    res.json(writeSpecFolder(tree))
+    res.json(writeSpecFolder(tree, { includeAssets: includeAssets === true, assetWorkbench }))
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : '导出页面 spec 文件夹失败' })
   }

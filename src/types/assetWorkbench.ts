@@ -1,10 +1,11 @@
-import type { PrototypeInterfaceBlueprint } from './prototypeAssets'
+import type { PrototypeInterfaceBlueprint, PrototypeSpineAsset } from './prototypeAssets'
+import type { ReusableLogicAsset } from './reusableLogic'
 
 export type UiAssetKind = 'interface' | 'image_set'
 export type UiAssetParseMode = 'intermediate' | 'image_set'
 export type AssetRowStatus = 'idle' | 'parsing' | 'ready' | 'error'
 export type EffectAssetLoadStatus = 'not_loaded' | 'loading' | 'loaded' | 'error'
-export type EffectAssetPreviewType = 'image' | 'sequence' | 'video' | 'audio'
+export type EffectAssetPreviewType = 'image' | 'sequence' | 'video' | 'audio' | 'spine'
 
 export interface ParsedFigmaAssetFile {
   name: string
@@ -100,6 +101,7 @@ export interface EffectAssetRow {
   previewType: EffectAssetPreviewType | null
   previewUrl: string | null
   previewFiles: EffectAssetPreviewFile[]
+  spine?: PrototypeSpineAsset | null
   fileCount: number
   files: EffectAssetFile[]
   createdAt: string
@@ -109,11 +111,13 @@ export interface EffectAssetRow {
 export interface AssetWorkbenchState {
   uiRows: UiAssetRow[]
   effectRows: EffectAssetRow[]
+  reusableLogicAssets: ReusableLogicAsset[]
   lastEffectScanRoot: string | null
 }
 
 export const emptyAssetWorkbench: AssetWorkbenchState = {
   uiRows: [],
   effectRows: [],
+  reusableLogicAssets: [],
   lastEffectScanRoot: null,
 }

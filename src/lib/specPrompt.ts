@@ -34,12 +34,12 @@ export function requirementToBoltPrompt(requirement: UXRequirementState) {
 - 使用内联 CSS/JS 或 CDN，界面应有游戏 UX 质感。
 - 覆盖主要状态、按钮反馈、加载/禁用/错误态和关键动画。
 - 不要生成提示性标注、组件标注、注释说明小标签、注释栏、引线或 callout；原型只保留用户真实会看到和操作的界面内容。
-- 所有用户可见界面文字、按钮文案和状态提示必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。
+- 用户可见界面文字、按钮文案和状态提示必须跟随设计稿、截图、Figma、已有原型或用户明确要求的语言；证据是英文时保持英文，不要翻译。没有语言证据时，默认使用简洁中文占位文案；代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。
 
 交互规格：
 触发条件：${formatValue(requirement.trigger_condition)}
 执行规则：${formatValue(requirement.sequence_rules)}
-引擎约束：${formatValue(requirement.engine_constraints, '无特殊 Cocos 约束')}
+引擎约束：${formatValue(requirement.engine_constraints, '无特殊平台约束')}
 完成度：${requirement.completion_rate}%
 
 表现编排：
@@ -159,7 +159,7 @@ export function prdTreeToBoltPrompt(tree: PrdTree) {
 - 优先实现已完成的 client/UI 文档包；如果没有已完成文档包，则从全部叶子文档中抽取可视化界面需求。
 - 用游戏交互设计规格的方式呈现，不要做营销页。
 - 不要生成提示性标注、组件标注、注释说明小标签、注释栏、引线或 callout；原型只保留用户真实会看到和操作的界面内容。
-- 所有用户可见界面文字、按钮文案和状态提示必须是中文；只有代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。
+- 用户可见界面文字、按钮文案和状态提示必须跟随设计稿、截图、Figma、已有原型或用户明确要求的语言；证据是英文时保持英文，不要翻译。没有语言证据时，默认使用简洁中文占位文案；代码标识、CSS 类名、库/API 名称、枚举值、文件路径和专有产品名可以保留英文。
 
 导图叶子文档包：
 ${specs || '暂无节点内容'}

@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useParams } from 'wouter'
 import { ForgeChat } from '../components/map/ForgeChat'
 import { ForgeNodePanel } from '../components/map/ForgeNodePanel'
 import { AssetWorkbenchModal } from '../components/map/AssetWorkbenchModal'
+import { ReusableLogicSedimentationDialog } from '../components/map/ReusableLogicSedimentationDialog'
 import { classifyReferenceImage, generatePrototype, importFigmaFrame, sendNodeChatMessage } from '../lib/api'
 import { formatPerformanceSpecForPrompt, resolveNodePerformanceSpec } from '../lib/performanceOrchestration'
 import { formatSectionTitle, formatSpecLens, hasNodeSections, resolveNodeSpecLens } from '../lib/prdNodeLens'
@@ -10,12 +11,14 @@ import { buildDeliverySections, collectBackendContracts, isDeliveryNode } from '
 import { streamPrototype } from '../lib/prototypeStream'
 import { buildUiOnlyPrototypeInstruction, chatContentImages, chatContentText, extractFigmaUrlsFromText, isUiOnlyPrototypeFeedback } from '../lib/nodeChatIntent'
 import { buildFigmaPrototypeIterationInstruction, mergeInstructionIntoPrototypeEvidence } from '../lib/prototypeIteration'
+import { deriveReusableLogicCandidates, formatReusableLogicAssetForPrompt } from '../lib/reusableLogicSedimentation'
 import { useAppStore } from '../store/appStore'
 import type { FigmaFrameImportResponse, NodeChatOptions } from '../lib/api'
 import type { AssetWorkbenchState } from '../types/assetWorkbench'
 import type { ChatMessage, ContentBlock, ReferenceImageClassificationRequest } from '../types/chat'
 import type { PrdNode } from '../types/prdNode'
 import type { PrototypeAssetManifest, PrototypeGenerationMode, PrototypeInterfaceBlueprint } from '../types/prototypeAssets'
+import type { ReusableLogicAsset } from '../types/reusableLogic'
 import type { AssetDependency, UXRequirementState } from '../types/uxRequirement'
 
 const MAX_PROTOTYPE_IMAGES = 6
@@ -314,6 +317,7 @@ function buildPrototypeAssetManifest(
   const assets: PrototypeAssetManifest['assets'] = []
   const notes: string[] = []
   const interfaceBlueprints: PrototypeInterfaceBlueprint[] = []
+  const reusableLogicAssets = assetWorkbench.reusableLogicAssets.filter((asset) => asset.status === 'approved')
   const uiRows = preferredInterfaceAssetId
     ? [
         ...assetWorkbench.uiRows.filter((row) => row.id === preferredInterfaceAssetId),
@@ -357,7 +361,47 @@ function buildPrototypeAssetManifest(
       continue
     }
     if (!row.previewUrl || row.previewFiles.length === 0) {
-      notes.push(`特效「${row.name}」已加载但没有可预览图片/序列帧/视频/音频，不允许画成真实特效；用途备注：${effectContext || '未填写'}`)
+      if (row.spine?.atlasUrl && (row.spine.jsonUrl || row.spine.binaryUrl)) {
+        const animationNames = row.spine.animationNames.length ? row.spine.animationNames.join(', ') : 'not listed'
+        const skinNames = row.spine.skinNames.length ? row.spine.skinNames.join(', ') : 'default'
+        assets.push({
+          id: `${row.id}:spine`,
+          kind: 'effect_spine',
+          name: `${row.name} / Spine`,
+          url: row.spine.jsonUrl ?? row.spine.binaryUrl ?? row.spine.atlasUrl,
+          source: 'effect_asset',
+          purpose: effectContext || row.purpose || row.pageHint || null,
+          usageNote: [
+            row.usageNote || null,
+            `Use spine.SpinePlayer with the provided local playerJsUrl/playerCssUrl. animation=${row.spine.defaultAnimation ?? animationNames}; skins=${skinNames}; spine=${row.spine.skeletonVersion ?? 'unknown'}; pma=${row.spine.premultipliedAlpha === true ? 'true' : 'false'}.`,
+          ].filter(Boolean).join('\n'),
+          originalName: row.name,
+          assetGroupName: row.name,
+          spine: row.spine,
+        })
+        continue
+      }
+      notes.push(`特效「${row.name}」已加载但没有可预览图片/序列帧/视频/音频或 Spine 元数据，不允许画成真实特效；用途备注：${effectContext || '未填写'}`)
+      continue
+    }
+    if (row.spine?.atlasUrl && (row.spine.jsonUrl || row.spine.binaryUrl)) {
+      const animationNames = row.spine.animationNames.length ? row.spine.animationNames.join(', ') : 'not listed'
+      const skinNames = row.spine.skinNames.length ? row.spine.skinNames.join(', ') : 'default'
+      assets.push({
+        id: `${row.id}:spine`,
+        kind: 'effect_spine',
+        name: `${row.name} / Spine`,
+        url: row.spine.jsonUrl ?? row.spine.binaryUrl ?? row.spine.atlasUrl,
+        source: 'effect_asset',
+        purpose: effectContext || row.purpose || row.pageHint || null,
+        usageNote: [
+          row.usageNote || null,
+          `Use spine.SpinePlayer with the provided local playerJsUrl/playerCssUrl. animation=${row.spine.defaultAnimation ?? animationNames}; skins=${skinNames}; spine=${row.spine.skeletonVersion ?? 'unknown'}; pma=${row.spine.premultipliedAlpha === true ? 'true' : 'false'}.`,
+        ].filter(Boolean).join('\n'),
+        originalName: row.name,
+        assetGroupName: row.name,
+        spine: row.spine,
+      })
       continue
     }
     for (const [index, file] of row.previewFiles.entries()) {
@@ -379,11 +423,16 @@ function buildPrototypeAssetManifest(
     notes.push('当前素材库没有可用于 HTML 原型的 ready URL；生成结果只能使用占位和真实界面状态，不能伪造资源。')
   }
 
+  if (reusableLogicAssets.length) {
+    notes.push(`已沉淀 ${reusableLogicAssets.length} 条可复用表现逻辑；资源库标准模式可按名称引用，但仍必须映射到当前界面底板和素材清单。`)
+  }
+
   return {
     mode,
     assets,
     notes,
     interfaceBlueprints,
+    reusableLogicAssets,
   }
 }
 
@@ -501,7 +550,7 @@ function buildNodePrototypeRequirement(
       ...genericReferenceAssets,
       ...performanceAssets,
     ],
-    engine_constraints: node.techNotes ?? 'Game UI for Cocos Creator; restore mobile portrait UI and key interaction states.',
+    engine_constraints: node.techNotes ?? 'Cross-platform mobile UI; restore key interaction states for H5, Android, iOS, or game clients as needed.',
     ui_components: [],
     suggested_answers: [],
     completion_rate: node.status === 'done' ? 85 : 68,
@@ -653,6 +702,7 @@ export function ForgePage() {
   const prdTree = useAppStore((s) => s.prdTree)
   const nodeChats = useAppStore((s) => s.nodeChats)
   const nodeOperationSuggestions = useAppStore((s) => s.nodeOperationSuggestions)
+  const sourceDocument = useAppStore((s) => s.sourceDocument)
   const settings = useAppStore((s) => s.settings)
   const assetWorkbench = useAppStore((s) => s.assetWorkbench)
   const appendNodeMessage = useAppStore((s) => s.appendNodeMessage)
@@ -674,16 +724,39 @@ export function ForgePage() {
   const updateNodePrototypeVariant = useAppStore((s) => s.updateNodePrototypeVariant)
   const selectNodePrototypeVariant = useAppStore((s) => s.selectNodePrototypeVariant)
   const setNodePrototypeHtml = useAppStore((s) => s.setNodePrototypeHtml)
+  const upsertReusableLogicAssets = useAppStore((s) => s.upsertReusableLogicAssets)
+  const updateReusableLogicAsset = useAppStore((s) => s.updateReusableLogicAsset)
+  const approveReusableLogicAsset = useAppStore((s) => s.approveReusableLogicAsset)
+  const ignoreReusableLogicAsset = useAppStore((s) => s.ignoreReusableLogicAsset)
 
   const [nodeComplete, setNodeComplete] = useState(false)
   const [isGeneratingPrototype, setIsGeneratingPrototype] = useState(false)
   const [isCancellingPrototype, setIsCancellingPrototype] = useState(false)
   const [assetWorkbenchOpen, setAssetWorkbenchOpen] = useState(false)
+  const [generationMode, setGenerationMode] = useState<PrototypeGenerationMode>('draft_preview')
+  const [sedimentationOpen, setSedimentationOpen] = useState(false)
+  const [pendingSedimentationAction, setPendingSedimentationAction] = useState<'confirm_node' | 'resource_mode' | null>(null)
   const prototypeAbortControllerRef = useRef<AbortController | null>(null)
 
   const node = prdTree?.[nodeId ?? ''] ?? null
   const messages = nodeChats[nodeId ?? ''] ?? []
   const performanceSpec = node ? resolveNodePerformanceSpec(node) : null
+  const performanceSpecFingerprint = JSON.stringify(performanceSpec ?? null)
+  const hasDraftPrototypeArtifact = Boolean(
+    prototypeHtml?.trim()
+    || prototypeHistory.some((version) => version.html.trim())
+    || prototypeVariants.some((variant) => variant.status === 'complete' && variant.html?.trim()),
+  )
+  const reusableLogicCandidates = useMemo(
+    () => node && hasDraftPrototypeArtifact ? deriveReusableLogicCandidates(node, performanceSpec) : [],
+    [hasDraftPrototypeArtifact, node, performanceSpecFingerprint],
+  )
+  const currentNodeReusableLogicAssets = useMemo(() => (
+    hasDraftPrototypeArtifact
+      ? assetWorkbench.reusableLogicAssets.filter((asset) => asset.source.nodeId === nodeId && asset.status !== 'ignored')
+      : []
+  ), [assetWorkbench.reusableLogicAssets, hasDraftPrototypeArtifact, nodeId])
+  const currentNodeCandidateLogicAssets = currentNodeReusableLogicAssets.filter((asset) => asset.status === 'candidate')
   const hasPerformanceRisk = Boolean(
     nodeComplete
     && performanceSpec?.detected
@@ -702,6 +775,11 @@ export function ForgePage() {
     setNodeComplete(node?.status === 'done')
   }, [nodeId, node?.status])
 
+  useEffect(() => {
+    if (!reusableLogicCandidates.length) return
+    upsertReusableLogicAssets(reusableLogicCandidates)
+  }, [reusableLogicCandidates, upsertReusableLogicAssets])
+
   useEffect(() => () => {
     prototypeAbortControllerRef.current?.abort()
     prototypeAbortControllerRef.current = null
@@ -716,20 +794,30 @@ export function ForgePage() {
 
   useEffect(() => {
     if (!nodeId || !node) return
-    if ((useAppStore.getState().nodeChats[nodeId] ?? []).length > 0) return
     const performanceSpec = resolveNodePerformanceSpec(node)
     const hasPerformanceSpec = Boolean(performanceSpec?.detected && !performanceSpec.disabled)
     const visualPrompt = prototypeHtml
-      ? 'I see an existing prototype on the right. Can it be used as the visual reference for this interface?'
-      : 'Please upload a prototype screenshot/reference image or paste a Figma link. If none, reply: no prototype resource.'
+      ? '我看到右侧已有原型。它可以作为这个界面的视觉参考吗？'
+      : '请先上传原型截图/参考图，或粘贴 Figma 链接。如果没有，请回复“无原型资源”。'
     const nextStep = prototypeHtml
-      ? `After confirmation I will continue polishing main flow, edge states, dependency fields, and acceptance criteria${hasPerformanceSpec ? ', then handle performance orchestration' : ''}.`
-      : 'After receiving a prototype resource or a no-resource answer, I will continue with the next concrete question.'
+      ? `确认后，我会继续打磨主流程、边界状态、依赖字段和验收标准${hasPerformanceSpec ? '，再处理表现编排' : ''}。`
+      : '收到原型资源或“无原型资源”后，我会继续追问下一个具体问题。'
+    const initialMessage = `正在打磨「${node.label}」。\n${visualPrompt}\n${nextStep}`
+    const currentMessages = useAppStore.getState().nodeChats[nodeId] ?? []
+    if (currentMessages.length > 0) {
+      const [onlyMessage] = currentMessages
+      const oldEnglishIntro = onlyMessage?.role === 'assistant'
+        && typeof onlyMessage.content === 'string'
+        && onlyMessage.content.includes(`Polishing ${node.label}.`)
+        && onlyMessage.content.includes('Please upload a prototype screenshot/reference image')
+      if (!oldEnglishIntro) return
+      clearNodeChat(nodeId)
+    }
     appendNodeMessage(nodeId, {
       role: 'assistant',
-      content: `Polishing ${node.label}.\n${visualPrompt}\n${nextStep}`,
+      content: initialMessage,
     })
-  }, [appendNodeMessage, node, nodeId, prototypeHtml])
+  }, [appendNodeMessage, clearNodeChat, node, nodeId, prototypeHtml])
 
   async function handleSend(content: ChatMessage['content'], options: ForgeSendOptions = {}) {
     if (!nodeId || !prdTree || !node) return
@@ -780,7 +868,11 @@ export function ForgePage() {
         nodeId,
         userMsg,
         prdTree,
-        options,
+        {
+          ...options,
+          sourceDocument,
+          contextMessages: useAppStore.getState().nodeChats[nodeId] ?? [...messages, userMsg],
+        },
       )
       const documentUpdated = Boolean(
         response.nodePatch
@@ -857,17 +949,17 @@ export function ForgePage() {
       appendNodeMessage(nodeId, {
         role: 'assistant',
         content: generationMode === 'resource_standard'
-          ? `${result.summary}\n\nGenerated through the resource-library standard pipeline. Figma is used as visual evidence; final assets are constrained by the library manifest.`
+          ? `${result.summary}\n\n已通过资源库标准流程生成。Figma 作为视觉证据使用，最终素材受资源库清单约束。`
           : hasExistingPrototype
-            ? `${result.summary}\n\nUpdated the draft preview from Figma child images.`
-            : `${result.summary}\n\nGenerated the draft preview from the current PRD document and Figma child images.`,
+            ? `${result.summary}\n\n已根据 Figma 子图更新草稿预览。`
+            : `${result.summary}\n\n已根据当前 PRD 文档和 Figma 子图生成草稿预览。`,
       })
       return result
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Figma import or HTML prototype generation failed.'
+      const message = err instanceof Error ? err.message : 'Figma 导入或 HTML 原型生成失败。'
       appendNodeMessage(nodeId, {
         role: 'assistant',
-        content: `Figma import or HTML generation failed: ${message}`,
+        content: `Figma 导入或 HTML 生成失败：${message}`,
       })
       throw err
     }
@@ -884,7 +976,7 @@ export function ForgePage() {
     const shouldRecordInstruction = Boolean(options?.recordInstruction && trimmedInstruction && nodeId)
     let prototypeCompleted = false
     if (shouldRecordInstruction) {
-      appendNodeMessage(nodeId, { role: 'user', content: `Prototype edit: ${trimmedInstruction}` })
+      appendNodeMessage(nodeId, { role: 'user', content: `原型修改：${trimmedInstruction}` })
     }
     const prototypeEvidenceContent = mergeInstructionIntoPrototypeEvidence(trimmedInstruction, options?.evidenceContent)
     const currentMessages = options?.currentTurnOnly
@@ -1114,7 +1206,7 @@ export function ForgePage() {
       }
     } finally {
       if (shouldRecordInstruction && prototypeCompleted) {
-        appendNodeMessage(nodeId, { role: 'assistant', content: 'Updated the right-side prototype preview.' })
+        appendNodeMessage(nodeId, { role: 'assistant', content: '已更新右侧原型预览。' })
       }
       if (prototypeAbortControllerRef.current === abortController) {
         prototypeAbortControllerRef.current = null
@@ -1125,13 +1217,13 @@ export function ForgePage() {
     return prototypeCompleted
   }
 
-  function handleConfirm() {
+  function approveReusableLogicWithPatch(assetId: string, patch?: Partial<ReusableLogicAsset>) {
+    if (patch) updateReusableLogicAsset(assetId, patch)
+    approveReusableLogicAsset(assetId)
+  }
+
+  function completeCurrentNode() {
     if (!nodeId || !node) return
-    if (node.status === 'done') {
-      updateNodeStatus(nodeId, 'pending_refine')
-      setNodeComplete(false)
-      return
-    }
     const currentState = useAppStore.getState()
     const currentNode = currentState.prdTree?.[nodeId] ?? node
     if (!POLISH_SECTION_RE.test(currentNode.content)) {
@@ -1139,6 +1231,59 @@ export function ForgePage() {
     }
     updateNodeStatus(nodeId, 'done')
     setNodeComplete(true)
+  }
+
+  function continuePendingSedimentationAction() {
+    const pendingAction = pendingSedimentationAction
+    setSedimentationOpen(false)
+    setPendingSedimentationAction(null)
+    if (pendingAction === 'resource_mode') {
+      setGenerationMode('resource_standard')
+      return
+    }
+    if (pendingAction === 'confirm_node') {
+      completeCurrentNode()
+    }
+  }
+
+  function handleGenerationModeChange(mode: PrototypeGenerationMode) {
+    if (mode === generationMode) return
+    if (mode === 'resource_standard' && currentNodeCandidateLogicAssets.length > 0) {
+      setPendingSedimentationAction('resource_mode')
+      setSedimentationOpen(true)
+      return
+    }
+    setGenerationMode(mode)
+  }
+
+  async function handleUseReusableLogic(assetId: string, patch?: Partial<ReusableLogicAsset>) {
+    approveReusableLogicWithPatch(assetId, patch)
+    setSedimentationOpen(false)
+    setPendingSedimentationAction(null)
+    setGenerationMode('resource_standard')
+    const latestAsset = useAppStore.getState().assetWorkbench.reusableLogicAssets.find((asset) => asset.id === assetId)
+    if (!latestAsset) return
+    const effectiveAsset = { ...latestAsset, ...patch, status: 'approved' as const }
+    await handleGeneratePrototype(formatReusableLogicAssetForPrompt(effectiveAsset), {
+      singlePrototypeOnly: true,
+      recordInstruction: true,
+      generationMode: 'resource_standard',
+    })
+  }
+
+  function handleConfirm() {
+    if (!nodeId || !node) return
+    if (node.status === 'done') {
+      updateNodeStatus(nodeId, 'pending_refine')
+      setNodeComplete(false)
+      return
+    }
+    if (currentNodeCandidateLogicAssets.length > 0) {
+      setPendingSedimentationAction('confirm_node')
+      setSedimentationOpen(true)
+      return
+    }
+    completeCurrentNode()
   }
 
   if (!node || !nodeId) return null
@@ -1165,29 +1310,45 @@ export function ForgePage() {
           </span>
         </div>
 
-        <button
-          onClick={handleConfirm}
-          aria-pressed={nodeComplete}
-          className={[
-            'flex min-h-[44px] items-center gap-xs rounded-lg border px-md py-sm text-label-md font-medium transition-all',
-            nodeComplete && !hasPerformanceRisk
-              ? 'border-tertiary bg-tertiary-container text-on-tertiary-container active-glow'
-              : hasPerformanceRisk
-                ? 'border-secondary bg-secondary-container text-on-secondary-container'
-                : 'border-outline-variant bg-secondary-container text-on-secondary-container',
-          ].join(' ')}
-        >
-          <span
-            className="material-symbols-outlined"
-            style={{
-              fontSize: '16px',
-              fontVariationSettings: nodeComplete ? "'FILL' 1" : "'FILL' 0",
-            }}
+        <div className="flex shrink-0 items-center gap-sm">
+          {currentNodeCandidateLogicAssets.length > 0 ? (
+            <button
+              type="button"
+              onClick={() => {
+                setPendingSedimentationAction(null)
+                setSedimentationOpen(true)
+              }}
+              className="flex min-h-[40px] items-center gap-xs rounded-lg border border-secondary/50 bg-secondary/10 px-md text-label-md font-medium text-secondary transition-colors hover:bg-secondary/15"
+              title="确认并沉淀草稿模式中可复用的表现逻辑"
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>schema</span>
+              可沉淀 {currentNodeCandidateLogicAssets.length}
+            </button>
+          ) : null}
+          <button
+            onClick={handleConfirm}
+            aria-pressed={nodeComplete}
+            className={[
+              'flex min-h-[44px] items-center gap-xs rounded-lg border px-md py-sm text-label-md font-medium transition-all',
+              nodeComplete && !hasPerformanceRisk
+                ? 'border-tertiary bg-tertiary-container text-on-tertiary-container active-glow'
+                : hasPerformanceRisk
+                  ? 'border-secondary bg-secondary-container text-on-secondary-container'
+                  : 'border-outline-variant bg-secondary-container text-on-secondary-container',
+            ].join(' ')}
           >
-            {nodeComplete ? hasPerformanceRisk ? 'warning' : 'check_circle' : 'auto_awesome'}
-          </span>
-          {nodeComplete ? hasPerformanceRisk ? 'Done / performance risk' : 'Done' : 'Pending polish'}
-        </button>
+            <span
+              className="material-symbols-outlined"
+              style={{
+                fontSize: '16px',
+                fontVariationSettings: nodeComplete ? "'FILL' 1" : "'FILL' 0",
+              }}
+            >
+              {nodeComplete ? hasPerformanceRisk ? 'warning' : 'check_circle' : 'auto_awesome'}
+            </span>
+            {nodeComplete ? hasPerformanceRisk ? '已完成 / 表现风险' : '已完成' : '待打磨'}
+          </button>
+        </div>
       </header>
 
       <main className="flex min-h-0 flex-1 overflow-hidden">
@@ -1206,6 +1367,8 @@ export function ForgePage() {
           performanceSpec={performanceSpec}
           blockingQuestion={performanceSpec?.blockingQuestion ?? null}
           assetWorkbench={assetWorkbench}
+          generationMode={generationMode}
+          onGenerationModeChange={handleGenerationModeChange}
           onSend={handleSend}
           onClassifyImageAttachment={handleClassifyImageAttachment}
           onImportFigmaFrame={handleImportFigmaFrame}
@@ -1225,6 +1388,18 @@ export function ForgePage() {
         isOpen={assetWorkbenchOpen}
         baseUrl={settings.proxyBaseUrl}
         onClose={() => setAssetWorkbenchOpen(false)}
+      />
+      <ReusableLogicSedimentationDialog
+        isOpen={sedimentationOpen}
+        assets={currentNodeReusableLogicAssets.length ? currentNodeReusableLogicAssets : reusableLogicCandidates}
+        onClose={() => {
+          setSedimentationOpen(false)
+          setPendingSedimentationAction(null)
+        }}
+        onApprove={approveReusableLogicWithPatch}
+        onIgnore={ignoreReusableLogicAsset}
+        onApproveAndUse={(assetId, patch) => { void handleUseReusableLogic(assetId, patch) }}
+        onContinue={pendingSedimentationAction ? continuePendingSedimentationAction : undefined}
       />
     </div>
   )

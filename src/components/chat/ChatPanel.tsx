@@ -49,7 +49,7 @@ function getFallbackQuestion(requirement: ReturnType<typeof useAppStore.getState
   if (!requirement.asset_dependencies.length || requirement.asset_dependencies.some((asset) => !asset.is_ready || !asset.path)) {
     return requirement.missing_reasons.asset_dependencies ?? '请补充：这个交互需要哪些资源路径、预制体、音效或特效？'
   }
-  if (!requirement.engine_constraints) return requirement.missing_reasons.engine_constraints ?? '请补充：有没有 Cocos Creator 相关的实现约束或版本要求？'
+  if (!requirement.engine_constraints) return requirement.missing_reasons.engine_constraints ?? '请补充：目标平台是 H5、Android、iOS、游戏客户端，还是需要同时覆盖多端？'
   return null
 }
 
@@ -209,7 +209,7 @@ export function ChatPanel({ onOpenSettings, onBack, onConfirm }: ChatPanelProps)
           <h1 className="text-headline-sm font-semibold text-on-surface">GameUX PromptForge</h1>
           <div className="mt-xs flex items-center gap-sm">
             <div className="pulse-dot h-2 w-2 rounded-full bg-tertiary" />
-            <span className="font-mono text-label-md uppercase text-tertiary">Cocos RAG 已连接</span>
+            <span className="font-mono text-label-md uppercase text-tertiary">项目知识已就绪</span>
           </div>
         </div>
         <div className="flex items-center gap-sm">

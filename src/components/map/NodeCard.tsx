@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { formatSpecLens, resolveNodeSpecLens } from '../../lib/prdNodeLens'
-import { buildDeliverySections, deliverySectionStatusLabel, isDeliveryNode, type DeliverySectionStatus } from '../../lib/prdNodeDelivery'
+import { buildDeliverySections, deliverySectionStatusLabel, isDeliveryNode, type DeliverySectionStatus, type DeliverySectionSummary } from '../../lib/prdNodeDelivery'
 import type { PrdNode, PrdNodeSectionKey, PrdNodeSpecLens, PrdTree } from '../../types/prdNode'
 import { DocumentMiniPreview } from './DocumentPreview'
 
@@ -72,9 +72,7 @@ function sectionTone(key: PrdNodeSectionKey, status: DeliverySectionStatus) {
   return mvcTone(toneForSection(key))
 }
 
-function DeliveryMiniPreview({ node, tree }: { node: PrdNode; tree: PrdTree }) {
-  const sections = buildDeliverySections(node, tree)
-
+function DeliveryMiniPreview({ sections }: { sections: DeliverySectionSummary[] }) {
   return (
     <div className="grid h-full grid-cols-3 gap-xs">
       {sections.map((section) => (
@@ -162,6 +160,8 @@ export function NodeCard({ node, tree, isSelected, onNodeClick, onNodeDoubleClic
 
   const canForge = canForgeNode(node, tree)
   const isDelivery = isDeliveryNode(node, tree)
+  const deliverySections = isDelivery ? buildDeliverySections(node, tree) : []
+  const hasDeliveryPreview = deliverySections.some((section) => section.status !== 'missing')
 
   return (
     <div
@@ -182,7 +182,9 @@ export function NodeCard({ node, tree, isSelected, onNodeClick, onNodeDoubleClic
         <StatusBadge node={node} tree={tree} />
       </div>
       <div className="min-h-0 flex-1 overflow-hidden rounded border border-outline-variant/60 bg-surface-container/70 p-sm">
-        {isDelivery ? <DeliveryMiniPreview node={node} tree={tree} /> : <DocumentMiniPreview node={node} maxLines={8} />}
+        {isDelivery && hasDeliveryPreview
+          ? <DeliveryMiniPreview sections={deliverySections} />
+          : <DocumentMiniPreview node={node} tree={tree} maxLines={8} />}
       </div>
       <div className="mt-sm flex items-center justify-between border-t border-outline-variant pt-sm">
         <span className="font-label-md text-label-md text-on-surface-variant">文档预览</span>

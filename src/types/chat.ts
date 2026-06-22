@@ -49,16 +49,29 @@ export interface ChatMessage {
   content: string | ContentBlock[]
 }
 
-export interface RagReference {
+export interface ProjectKnowledgeReference {
   title: string
   source: string
 }
 
-export interface RagSearchResult {
-  status: 'mock' | 'connected' | 'error'
+export interface ProjectKnowledgeSearchResult {
+  status: 'connected' | 'error'
   answer: string
-  references: RagReference[]
+  references: ProjectKnowledgeReference[]
+  indexedDocuments?: number
+  hits?: Array<{
+    id: string
+    type: string
+    title: string
+    source: string
+    text: string
+    score: number
+    nodeId?: string | null
+  }>
 }
+
+export type RagReference = ProjectKnowledgeReference
+export type RagSearchResult = ProjectKnowledgeSearchResult
 
 export interface ProxyHealth {
   ok: boolean
@@ -67,11 +80,10 @@ export interface ProxyHealth {
     model: string
     apiKeyPresent: boolean
   }
-  cocosRag: {
+  projectKnowledge: {
     mode: string
-    sseUrl: string
-    proxyScript: string
     status: string
+    description: string
   }
 }
 

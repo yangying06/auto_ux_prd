@@ -114,7 +114,7 @@ export function AppShell({ onBack, onConfirm }: { onBack?: () => void; onConfirm
         <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/70 backdrop-blur-sm">
           <div className="flex h-[85vh] w-[75vw] flex-col overflow-hidden rounded-xl border border-outline-variant/40 bg-surface shadow-2xl">
             <div className="flex items-center justify-between border-b border-outline-variant/20 bg-surface-container-high px-lg py-md">
-              <span className="font-mono text-label-md uppercase text-secondary">Cocos UX Spec · 预览</span>
+              <span className="font-mono text-label-md uppercase text-secondary">UX Spec · 预览</span>
               <div className="flex items-center gap-sm">
                 <button
                   onClick={handleDownloadSpec}

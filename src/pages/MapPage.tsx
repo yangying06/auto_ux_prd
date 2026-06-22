@@ -20,6 +20,7 @@ import { AddNodeModal, type AddNodePayload } from '../components/map/AddNodeModa
 import { buildDeliveryDisplayTree, collectDeliveryNodes, isDeliveryNode } from '../lib/prdNodeDelivery'
 import { EnvironmentConfigModal } from '../components/map/EnvironmentConfigModal'
 import { AssetWorkbenchModal } from '../components/map/AssetWorkbenchModal'
+import type { AssetWorkbenchState } from '../types/assetWorkbench'
 
 type Stage = 'upload' | 'preview' | 'decomposing' | 'error' | 'map'
 
@@ -123,6 +124,14 @@ function collectGeneratedNodePrototypes(tree: PrdTree, nodePrototypeStates: Retu
     .filter((item): item is { node: PrdNode; html: string } => Boolean(item))
 }
 
+function countExportableAssetRows(assetWorkbench: AssetWorkbenchState) {
+  const uiCount = assetWorkbench.uiRows.filter((row) => row.status === 'ready' && row.result).length
+  const effectCount = assetWorkbench.effectRows.filter((row) =>
+    row.loadStatus === 'loaded' || Boolean(row.loadedPath) || row.files.length > 0
+  ).length
+  return uiCount + effectCount
+}
+
 export function MapPage() {
   const [stage, setStage] = useState<Stage>(() =>
     Object.keys(useAppStore.getState().prdTree ?? {}).length > 0 ? 'map' : 'upload'
@@ -161,6 +170,7 @@ export function MapPage() {
   const currentArchivePath = useAppStore((s) => s.currentArchivePath)
   const archiveDirty = useAppStore((s) => s.archiveDirty)
   const nodePrototypeStates = useAppStore((s) => s.nodePrototypeStates)
+  const assetWorkbench = useAppStore((s) => s.assetWorkbench)
   const qaIssues = useAppStore((s) => s.qaIssues)
   const decompositionSteps = useAppStore((s) => s.decompositionSteps)
   const setDecompositionStatus = useAppStore((s) => s.setDecompositionStatus)
@@ -481,11 +491,21 @@ export function MapPage() {
       setIsExporting(true)
       setExportError(null)
       try {
-        const result = await exportSpecFolder(settings.proxyBaseUrl, prdTree)
+        const exportableAssetCount = countExportableAssetRows(assetWorkbench)
+        const includeAssets = exportableAssetCount > 0
+          ? window.confirm(`检测到 ${exportableAssetCount} 组项目素材。\n\n选择“确定”：导出制作文档并附带素材。\n选择“取消”：只导出制作文档。`)
+          : false
+        const result = await exportSpecFolder(settings.proxyBaseUrl, prdTree, {
+          includeAssets,
+          assetWorkbench,
+        })
         for (const doc of result.documents) {
           setNodeDocPath(doc.nodeId, doc.docPath)
         }
-        alert(`已导出页面级 spec 文件夹：${result.exportDir}`)
+        const assetSummary = includeAssets && result.assets
+          ? `\n素材清单：${result.assets.manifestPath}\n已复制文件：${result.assets.copiedFiles} 个，跳过：${result.assets.skippedItems} 项`
+          : ''
+        alert(`已导出页面级 spec 文件夹：${result.exportDir}${assetSummary}`)
       } catch (err) {
         setExportError(err instanceof Error ? err.message : '导出失败，请重试')
       } finally {
@@ -742,7 +762,7 @@ export function MapPage() {
                     <h2 className="font-title-md text-title-md text-on-surface">HTML 验证原型</h2>
                   </div>
                   <p className="mt-xs max-w-[960px] text-body-sm text-on-surface-variant">
-                    汇总各界面节点已生成的 HTML 原型，用于进入 Cocos 编码前确认流程、状态和反馈边界；Prefab 仍由 Figma 通过 figma2prefab 生成。
+                    汇总各界面节点已生成的 HTML 原型，用于进入目标平台实现前确认流程、状态和反馈边界；可复用视觉资源仍由 Figma 或资源库提供。
                   </p>
                 </div>
                 <div className="flex items-center gap-sm">

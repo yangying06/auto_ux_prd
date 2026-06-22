@@ -5,9 +5,13 @@ import type {
   PrototypeInterfaceBlueprint,
   PrototypeInterfaceBlueprintNode,
   PrototypeInterfaceRect,
+  PrototypeSpineAsset,
 } from '../src/types/prototypeAssets'
+import type { ReusableLogicAsset, ReusableLogicAssetType } from '../src/types/reusableLogic'
 
 const TAILWIND_CDN_URL = 'https://cdn.tailwindcss.com'
+const SPINE_PLAYER_JS_PATH = '/api/runtime/spine-player/iife/spine-player.min.js'
+const SPINE_PLAYER_CSS_PATH = '/api/runtime/spine-player/spine-player.css'
 
 function normalizeTextValue(value: unknown): string | null {
   if (typeof value !== 'string') return null
@@ -21,6 +25,25 @@ function normalizeNumberValue(value: unknown): number | null {
 
 function normalizeBooleanValue(value: unknown): boolean | null {
   return typeof value === 'boolean' ? value : null
+}
+
+function normalizeStringArrayValue(value: unknown, limit = 80): string[] {
+  return Array.isArray(value)
+    ? value.map((item) => normalizeTextValue(item)).filter((item): item is string => Boolean(item)).slice(0, limit)
+    : []
+}
+
+function normalizeReusableLogicType(value: unknown): ReusableLogicAssetType | null {
+  if (
+    value === 'interaction_state'
+    || value === 'animation_rule'
+    || value === 'feedback_pattern'
+    || value === 'component_pattern'
+    || value === 'copywriting_pattern'
+  ) {
+    return value
+  }
+  return null
 }
 
 function normalizeRectValue(value: unknown): PrototypeInterfaceRect | null {
@@ -90,6 +113,61 @@ function normalizeInterfaceBlueprint(value: unknown): PrototypeInterfaceBlueprin
   }
 }
 
+function normalizeSpineAsset(value: unknown): PrototypeSpineAsset | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Partial<PrototypeSpineAsset>
+  const atlasUrl = normalizeTextValue(raw.atlasUrl)
+  const textureUrls = normalizeStringArrayValue(raw.textureUrls)
+  if (!atlasUrl || textureUrls.length === 0) return null
+  return {
+    jsonUrl: normalizeTextValue(raw.jsonUrl),
+    binaryUrl: normalizeTextValue(raw.binaryUrl),
+    atlasUrl,
+    textureUrls,
+    animationNames: normalizeStringArrayValue(raw.animationNames, 120),
+    skinNames: normalizeStringArrayValue(raw.skinNames, 80),
+    defaultAnimation: normalizeTextValue(raw.defaultAnimation),
+    skeletonVersion: normalizeTextValue(raw.skeletonVersion),
+    premultipliedAlpha: normalizeBooleanValue(raw.premultipliedAlpha),
+    playerJsUrl: normalizeTextValue(raw.playerJsUrl),
+    playerCssUrl: normalizeTextValue(raw.playerCssUrl),
+  }
+}
+
+function normalizeReusableLogicAsset(value: unknown): ReusableLogicAsset | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Partial<ReusableLogicAsset>
+  if (raw.status !== 'approved') return null
+  const id = normalizeTextValue(raw.id)
+  const name = normalizeTextValue(raw.name)
+  const type = normalizeReusableLogicType(raw.type)
+  const logic = normalizeTextValue(raw.logic)
+  const source = raw.source && typeof raw.source === 'object' && !Array.isArray(raw.source) ? raw.source : null
+  const sourceNodeId = normalizeTextValue(source?.nodeId)
+  const sourceNodeLabel = normalizeTextValue(source?.nodeLabel)
+  if (!id || !name || !type || !logic || !sourceNodeId || !sourceNodeLabel) return null
+  const now = new Date().toISOString()
+  return {
+    id,
+    name,
+    type,
+    status: 'approved',
+    reuseMode: raw.reuseMode === 'copy' ? 'copy' : 'reference',
+    description: normalizeTextValue(raw.description) ?? logic,
+    logic,
+    usageGuidance: normalizeTextValue(raw.usageGuidance) ?? '复用前确认当前节点资源、层级和结束状态是否匹配。',
+    tags: normalizeStringArrayValue(raw.tags, 10),
+    source: {
+      nodeId: sourceNodeId,
+      nodeLabel: sourceNodeLabel,
+      field: normalizeTextValue(source?.field) ?? 'performanceSpec',
+      excerpt: normalizeTextValue(source?.excerpt),
+    },
+    createdAt: normalizeTextValue(raw.createdAt) ?? now,
+    updatedAt: normalizeTextValue(raw.updatedAt) ?? now,
+  }
+}
+
 export function normalizePrototypeAssetManifest(value: unknown): PrototypeAssetManifest | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const raw = value as Partial<PrototypeAssetManifest>
@@ -105,7 +183,7 @@ export function normalizePrototypeAssetManifest(value: unknown): PrototypeAssetM
           const kind = item.kind
           const source = item.source
           if (!id || !name || !url) return null
-          if (!['interface_html', 'interface_image', 'ui_image', 'effect_preview'].includes(String(kind))) return null
+          if (!['interface_html', 'interface_image', 'ui_image', 'effect_preview', 'effect_spine'].includes(String(kind))) return null
           if (!['ui_asset', 'effect_asset'].includes(String(source))) return null
           return {
             id,
@@ -117,6 +195,7 @@ export function normalizePrototypeAssetManifest(value: unknown): PrototypeAssetM
             usageNote: normalizeTextValue(item.usageNote),
             originalName: normalizeTextValue(item.originalName),
             assetGroupName: normalizeTextValue(item.assetGroupName),
+            spine: normalizeSpineAsset(item.spine),
           }
         })
         .filter((asset): asset is PrototypeAllowedAsset => Boolean(asset))
@@ -130,14 +209,68 @@ export function normalizePrototypeAssetManifest(value: unknown): PrototypeAssetM
         .filter((blueprint): blueprint is PrototypeInterfaceBlueprint => Boolean(blueprint))
         .slice(0, 12)
     : []
-  return { mode, assets, notes, interfaceBlueprints }
+  const reusableLogicAssets = Array.isArray(raw.reusableLogicAssets)
+    ? raw.reusableLogicAssets
+        .map(normalizeReusableLogicAsset)
+        .filter((asset): asset is ReusableLogicAsset => Boolean(asset))
+        .slice(0, 24)
+    : []
+  return { mode, assets, notes, interfaceBlueprints, reusableLogicAssets }
 }
 
 function formatPrototypeAssetKind(kind: PrototypeAllowedAsset['kind']) {
   if (kind === 'interface_html') return '界面HTML底板'
   if (kind === 'interface_image') return '界面子图'
   if (kind === 'ui_image') return '散图/图标/item'
+  if (kind === 'effect_spine') return 'Spine playable effect'
   return '特效预览'
+}
+
+function formatSpineAsset(spine: PrototypeSpineAsset | null | undefined) {
+  if (!spine) return null
+  return [
+    `   Spine player JS: ${spine.playerJsUrl ?? SPINE_PLAYER_JS_PATH}`,
+    `   Spine player CSS: ${spine.playerCssUrl ?? SPINE_PLAYER_CSS_PATH}`,
+    spine.jsonUrl ? `   jsonUrl: ${spine.jsonUrl}` : null,
+    spine.binaryUrl ? `   binaryUrl: ${spine.binaryUrl}` : null,
+    `   atlasUrl: ${spine.atlasUrl}`,
+    spine.textureUrls.length ? `   textureUrls: ${spine.textureUrls.join(', ')}` : null,
+    spine.animationNames.length ? `   animations: ${spine.animationNames.join(', ')}` : null,
+    spine.skinNames.length ? `   skins: ${spine.skinNames.join(', ')}` : null,
+    spine.defaultAnimation ? `   defaultAnimation: ${spine.defaultAnimation}` : null,
+    spine.skeletonVersion ? `   spineVersion: ${spine.skeletonVersion}` : null,
+    typeof spine.premultipliedAlpha === 'boolean' ? `   premultipliedAlpha: ${spine.premultipliedAlpha}` : null,
+  ].filter(Boolean).join('\n')
+}
+
+function formatReusableLogicType(type: ReusableLogicAssetType) {
+  if (type === 'interaction_state') return 'Interaction state'
+  if (type === 'animation_rule') return 'Animation rule'
+  if (type === 'feedback_pattern') return 'Feedback pattern'
+  if (type === 'component_pattern') return 'Component pattern'
+  return 'Copywriting pattern'
+}
+
+function buildReusableLogicSection(assets: ReusableLogicAsset[] | undefined) {
+  if (!assets?.length) return ''
+  const content = assets.slice(0, 24).map((asset, index) => [
+    `${index + 1}. [${formatReusableLogicType(asset.type)}] ${asset.name}`,
+    `   Source: ${asset.source.nodeLabel} (${asset.source.nodeId}) / ${asset.source.field}`,
+    `   Reuse mode: ${asset.reuseMode}`,
+    `   Description: ${asset.description}`,
+    `   Logic: ${asset.logic}`,
+    `   Guidance: ${asset.usageGuidance}`,
+    asset.tags.length ? `   Tags: ${asset.tags.join(', ')}` : null,
+  ].filter(Boolean).join('\n')).join('\n\n')
+  return `
+Standard reusable performance logic:
+${content}
+
+Rules:
+- These are approved behavior, state, animation, feedback, or copywriting patterns extracted from draft mode.
+- Reuse the logic by adapting it to the current node, interface blueprint, and allowed asset manifest.
+- Do not treat logic assets as media URLs. They do not grant permission to reference assets outside the manifest.
+`
 }
 
 function formatBlueprintRect(rect: PrototypeInterfaceRect) {
@@ -208,22 +341,25 @@ export function buildPrototypeAssetManifestSection(assetManifest?: PrototypeAsse
         asset.purpose ? `   用途: ${asset.purpose}` : null,
         asset.usageNote ? `   备注: ${asset.usageNote}` : null,
         `   URL: ${asset.url}`,
+        formatSpineAsset(asset.spine),
       ].filter(Boolean).join('\n')).join('\n')
     : '（当前素材库没有可用于原型的 ready 资源）'
   const notes = assetManifest.notes.length
     ? `\n素材库备注:\n${assetManifest.notes.map((note) => `- ${note}`).join('\n')}\n`
     : ''
   const blueprintSection = buildInterfaceBlueprintSection(assetManifest.interfaceBlueprints ?? [])
+  const reusableLogicSection = buildReusableLogicSection(assetManifest.reusableLogicAssets)
 
   return `
 ## 素材库使用与审核规则
 ${modeRule}
 1. 界面类素材是页面底板；如果提供了界面HTML/界面资源，必须保留它的布局结构、JSON 节点关系和界面样式，只做最小必要修改。
 2. 散图用于 item、图标、奖励、头像、按钮图等内容替换；只能按清单中的规范命名资源使用。
-3. 特效不能改原始命名，必须按“用途/备注”理解；只有清单中带 URL 的特效预览才能在 HTML 中表现。没有预览的 Spine/Prefab/粒子资源不要画成真实特效，只能用状态、阶段文案或普通反馈承载。
+3. 特效不能改原始命名，必须按“用途/备注”理解；只有清单中带 URL 的特效预览或 Spine playable effect 才能在 HTML 中表现。带 Spine player JS/CSS/jsonUrl/atlasUrl/textureUrls 的资源应使用 spine.SpinePlayer 真实播放。没有预览或 Spine 元数据的 Prefab/粒子资源不要画成真实特效，只能用状态、阶段文案或普通反馈承载。
 ${blueprintSection}
 
 允许使用的素材库资源:
+${reusableLogicSection}
 ${assetLines}
 ${notes}
 禁止事项:
@@ -238,6 +374,8 @@ export function extractPrototypeResourceReferences(html: string) {
   const refs: string[] = []
   const attrPattern = /\b(?:src|href|poster)\s*=\s*(["'])(.*?)\1/giu
   const cssUrlPattern = /url\(\s*(["']?)(.*?)\1\s*\)/giu
+  const spineConfigUrlPattern = /\b(?:jsonUrl|binaryUrl|atlasUrl|playerJsUrl|playerCssUrl)\s*:\s*(["'])(.*?)\1/giu
+  const spineTextureUrlsPattern = /\btextureUrls\s*:\s*\[([\s\S]*?)\]/giu
   for (const match of html.matchAll(attrPattern)) {
     const value = match[2]?.trim()
     if (value) refs.push(value)
@@ -245,6 +383,17 @@ export function extractPrototypeResourceReferences(html: string) {
   for (const match of html.matchAll(cssUrlPattern)) {
     const value = match[2]?.trim()
     if (value) refs.push(value)
+  }
+  for (const match of html.matchAll(spineConfigUrlPattern)) {
+    const value = match[2]?.trim()
+    if (value) refs.push(value)
+  }
+  for (const match of html.matchAll(spineTextureUrlsPattern)) {
+    const list = match[1] ?? ''
+    for (const item of list.matchAll(/(["'])(.*?)\1/gu)) {
+      const value = item[2]?.trim()
+      if (value) refs.push(value)
+    }
   }
   return Array.from(new Set(refs))
 }
@@ -264,10 +413,25 @@ function prototypeResourceReferenceKeys(value: string) {
 
 export function isAllowedPrototypeResource(value: string, assetManifest: PrototypeAssetManifest) {
   if (value === TAILWIND_CDN_URL) return true
+  const valueKey = prototypeResourcePathKey(value)
+  if (valueKey === SPINE_PLAYER_JS_PATH || valueKey === SPINE_PLAYER_CSS_PATH) return true
   const allowed = new Set(assetManifest.assets.map((asset) => asset.url))
   if (allowed.has(value)) return true
-  const valueKey = prototypeResourcePathKey(value)
-  return assetManifest.assets.some((asset) => prototypeResourcePathKey(asset.url) === valueKey)
+  const spineUrls = assetManifest.assets.flatMap((asset) => {
+    const spine = asset.spine
+    return spine
+      ? [
+          spine.jsonUrl,
+          spine.binaryUrl,
+          spine.atlasUrl,
+          ...spine.textureUrls,
+          spine.playerJsUrl,
+          spine.playerCssUrl,
+        ].filter((url): url is string => Boolean(url))
+      : []
+  })
+  const allAllowed = [...assetManifest.assets.map((asset) => asset.url), ...spineUrls]
+  return allAllowed.some((url) => prototypeResourcePathKey(url) === valueKey)
 }
 
 export function auditPrototypeAssets(html: string | null, assetManifest?: PrototypeAssetManifest | null): PrototypeAssetAuditIssue[] {

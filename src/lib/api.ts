@@ -6,15 +6,16 @@ import type {
   AiEnvironmentConfig,
   AiEnvironmentUpdate,
   ProxyHealth,
-  RagSearchResult,
+  ProjectKnowledgeSearchResult,
   ReferenceImageClassificationRequest,
   ReferenceImageClassificationResponse,
 } from '../types/chat'
 import type { UXRequirementState } from '../types/uxRequirement'
 import type { MapAdjustmentOperation, PrdImportPreview, PrdNode, PrdNodeBackendContractRef, PrdNodeEvidenceRef, PrdNodeOperationSuggestion, PrdPerformanceSpec } from '../types/prdNode'
 import type { QaChatResponse, QaIssue } from '../types/qa'
-import type { EffectAssetRow, UiAssetKind, UiAssetParseResult } from '../types/assetWorkbench'
+import type { AssetWorkbenchState, EffectAssetRow, UiAssetKind, UiAssetParseResult } from '../types/assetWorkbench'
 import type { PrototypeAssetAuditIssue, PrototypeAssetManifest } from '../types/prototypeAssets'
+import type { ProjectSourceDocument } from '../types/archive'
 
 function apiErrorMessage(data: unknown, status: number) {
   if (data && typeof data === 'object') {
@@ -64,6 +65,25 @@ async function requestJson<T>(baseUrl: string, path: string, init?: RequestInit)
   return data as T
 }
 
+function compactContentForKnowledge(content: ChatMessage['content']) {
+  if (typeof content === 'string') return content
+  return content
+    .map((block) => {
+      if (block.type === 'text') return block.text
+      if (block.type === 'document') return `[附件: ${block.title}]\n${block.context ?? ''}\n${block.source.data}`
+      return `[图片: ${block.source.media_type}]`
+    })
+    .filter(Boolean)
+    .join('\n')
+}
+
+function compactMessagesForKnowledge(messages: ChatMessage[]) {
+  return messages.slice(-16).map((message) => ({
+    role: message.role,
+    content: compactContentForKnowledge(message.content),
+  }))
+}
+
 export function getProxyHealth(baseUrl: string) {
   return requestJson<ProxyHealth>(baseUrl, '/api/health')
 }
@@ -86,10 +106,23 @@ export function sendChatMessage(baseUrl: string, messages: ChatMessage[], requir
   })
 }
 
-export function searchCocosRag(baseUrl: string, query: string) {
-  return requestJson<RagSearchResult>(baseUrl, '/api/rag/search', {
+export function searchProjectKnowledge(
+  baseUrl: string,
+  query: string,
+  tree?: Record<string, PrdNode> | null,
+  sourceDocument?: ProjectSourceDocument | null,
+  nodeId?: string | null,
+  messages?: ChatMessage[],
+) {
+  return requestJson<ProjectKnowledgeSearchResult>(baseUrl, '/api/project-knowledge/search', {
     method: 'POST',
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({
+      query,
+      tree: tree ?? {},
+      sourceDocument: sourceDocument ?? null,
+      nodeId: nodeId ?? null,
+      messages: compactMessagesForKnowledge(messages ?? []),
+    }),
   })
 }
 
@@ -183,6 +216,8 @@ export type NodeChatIntent = 'document_polish' | 'prototype_update' | 'reference
 
 export interface NodeChatOptions {
   performancePolishMode?: boolean
+  sourceDocument?: ProjectSourceDocument | null
+  contextMessages?: ChatMessage[]
 }
 
 export interface NodeChatResponse {
@@ -216,6 +251,8 @@ export function sendNodeChatMessage(
       nodeId,
       currentMessage,
       tree,
+      sourceDocument: options.sourceDocument ?? null,
+      messages: compactMessagesForKnowledge(options.contextMessages ?? []),
       performancePolishMode: options.performancePolishMode === true,
     }),
   })
@@ -392,15 +429,27 @@ export function suggestPrdNodeOperations(
 export interface SpecFolderExportResponse {
   exportDir: string
   documents: Array<{ nodeId: string; docPath: string }>
+  assets?: {
+    exportDir: string
+    manifestPath: string
+    copiedFiles: number
+    copiedBytes: number
+    skippedItems: number
+  } | null
 }
 
 export function exportSpecFolder(
   baseUrl: string,
-  tree: Record<string, PrdNode>
+  tree: Record<string, PrdNode>,
+  options: { includeAssets?: boolean; assetWorkbench?: AssetWorkbenchState | null } = {},
 ) {
   return requestJson<SpecFolderExportResponse>(baseUrl, '/api/export-spec-folder', {
     method: 'POST',
-    body: JSON.stringify({ tree }),
+    body: JSON.stringify({
+      tree,
+      includeAssets: options.includeAssets === true,
+      assetWorkbench: options.includeAssets ? options.assetWorkbench ?? null : undefined,
+    }),
   })
 }
 

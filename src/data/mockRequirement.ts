@@ -15,7 +15,7 @@ export const mockRequirement: UXRequirementState = {
       is_ready: false,
     },
   ],
-  engine_constraints: 'Cocos Creator 3.8.8 建议使用 Tween System 串行动画，并将多目标队列封装为 Promise 链，避免并发时序漂移。',
+  engine_constraints: '建议按目标平台能力使用程序动效或平台动画资源串行动画，并将多目标队列封装为可等待流程，避免并发时序漂移。',
   ui_components: [],
   suggested_answers: [],
   completion_rate: 60,

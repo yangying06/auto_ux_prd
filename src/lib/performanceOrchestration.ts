@@ -9,7 +9,7 @@ import type {
   PrdPerformanceSlotStatusValue,
   PrdPerformanceSpec,
 } from '../types/prdNode'
-import { COCOS_MOTION_INTEGRATION_MODES, COCOS_MOTION_RULES } from '../data/cocosMotionQuestionBank'
+import { PLATFORM_MOTION_INTEGRATION_MODES, PLATFORM_MOTION_RULES } from '../data/platformMotionQuestionBank'
 
 const PERFORMANCE_SLOT_DEFINITIONS: Array<{
   key: PrdPerformanceSlotKey
@@ -19,7 +19,7 @@ const PERFORMANCE_SLOT_DEFINITIONS: Array<{
   { key: 'trigger', label: '触发', question: '这个表现由哪个用户动作、接口字段、状态变化或系统事件触发？' },
   { key: 'branches', label: '分支', question: '不同结果、等级、道具、金额或异常状态是否使用不同表现？' },
   { key: 'sequence', label: '播放顺序', question: '完整播放顺序是什么？哪些阶段必须等待上一段完成？' },
-  { key: 'integrationModes', label: '接入方式', question: '每段分别用 Tween、AnimationClip、Spine、ParticleSystem、Prefab、序列帧还是音效联动接入？' },
+  { key: 'integrationModes', label: '接入方式', question: '每段分别用 CSS/原生动画、Tween、平台动画资源、Spine、粒子/特效资源、组件/弹窗特效、序列帧还是音效联动接入？' },
   { key: 'assets', label: '资源', question: '表现资源分别使用哪些 Spine、AnimationClip、粒子、音效、图标、弹窗或文案？资源缺失时怎么兜底？' },
   { key: 'layers', label: '层级', question: '表现播放在哪些层级上：原界面、内容层、HUD、UIEffect、PopUp、Dialog、Notify 还是 Guide？' },
   { key: 'controls', label: '控制', question: '表现期间能否跳过、打断、重复触发、排队或合并多个结果？' },
@@ -80,11 +80,11 @@ function appendUniqueString(items: string[] | undefined, value: string, limit = 
 
 function inferConfirmedIntegrationModes(value: string) {
   const modes: string[] = []
-  if (/tween|补间|位移|缩放|滚动|飞入/i.test(value)) modes.push('Cocos Tween 变换')
-  if (/animationclip|cc\.animation|animation|动画片段/i.test(value)) modes.push('AnimationClip/cc.Animation')
+  if (/tween|补间|位移|缩放|滚动|飞入/i.test(value)) modes.push('平台动效变换')
+  if (/animationclip|cc\.animation|animation|动画片段/i.test(value)) modes.push('平台动画资源')
   if (/spine|skeleton|骨骼/i.test(value)) modes.push('Spine/Skeleton')
-  if (/particle|粒子/i.test(value)) modes.push('ParticleSystem 粒子')
-  if (/prefab|弹窗|实例化/i.test(value)) modes.push('Prefab 特效/弹窗')
+  if (/particle|粒子/i.test(value)) modes.push('粒子/特效资源')
+  if (/prefab|弹窗|实例化/i.test(value)) modes.push('组件/弹窗特效')
   if (/序列帧|sequence/i.test(value)) modes.push('序列帧')
   if (/音效|audio|sound/i.test(value)) modes.push('音效联动')
   return unique(modes, 8)
@@ -297,7 +297,7 @@ function normalizeStringArray(value: unknown): string[] {
 function collectIntegrationModes(text: string, ruleModes: string[] = []) {
   return unique([
     ...ruleModes,
-    ...COCOS_MOTION_INTEGRATION_MODES.flatMap((mode) => (
+    ...PLATFORM_MOTION_INTEGRATION_MODES.flatMap((mode) => (
       mode.keywords.test(text) ? [mode.label] : []
     )),
   ], 10)
@@ -545,7 +545,7 @@ export function inferPerformanceSpecFromNode(node: PrdNode): PrdPerformanceSpec 
   const text = collectNodeText(node)
   if (!text.trim()) return null
 
-  const matches = COCOS_MOTION_RULES.filter((rule) => rule.pattern.test(text))
+  const matches = PLATFORM_MOTION_RULES.filter((rule) => rule.pattern.test(text))
   if (!matches.length) return null
 
   const confidence = clampConfidence(35 + matches.reduce((sum, rule) => sum + rule.weight, 0))
@@ -555,19 +555,19 @@ export function inferPerformanceSpecFromNode(node: PrdNode): PrdPerformanceSpec 
   const hasSequentialWords = /然后|随后|依次|播完|结束后|阶段|队列|sequence|loop|out/.test(text)
   const hasResultWords = /中奖|jackpot|bigwin|bonus|free|奖励|成功|完成|解锁|获得|失败|错误/.test(text)
   const modeQuestions = integrationModes.length
-    ? [`这段表现建议按 ${integrationModes.join('、')} 接入；哪些已有资源可以直接复用，哪些需要程序用占位或 Tween 补齐？`]
+    ? [`这段表现建议按 ${integrationModes.join('、')} 接入；哪些已有资源可以直接复用，哪些需要程序用占位动效补齐？`]
     : []
   const blockingQuestion = selectBlockingQuestion(
     [
       ...matches.flatMap((rule) => rule.questions),
       ...modeQuestions,
-      ...COCOS_MOTION_INTEGRATION_MODES.flatMap((mode) => (
+      ...PLATFORM_MOTION_INTEGRATION_MODES.flatMap((mode) => (
         mode.keywords.test(text) ? mode.designerQuestions : []
       )),
     ],
     unique([
       ...matches.flatMap((rule) => rule.slotPriority ?? []),
-      ...COCOS_MOTION_INTEGRATION_MODES.flatMap((mode) => (
+      ...PLATFORM_MOTION_INTEGRATION_MODES.flatMap((mode) => (
         mode.keywords.test(text) ? mode.slotPriority ?? [] : []
       )),
     ], PERFORMANCE_SLOT_KEYS.length) as PrdPerformanceSlotKey[],

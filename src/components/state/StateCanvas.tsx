@@ -55,11 +55,11 @@ function RequirementTree({ requirement, missingAsset }: { requirement: UXRequire
       children: requirement.sequence_rules ? ['交互时序可用于生成原型'] : ['需要明确执行顺序'],
     },
     {
-      title: '引擎约束',
+      title: '平台实现建议',
       value: requirement.engine_constraints,
-      fallback: requirement.missing_reasons.engine_constraints ?? '等待 Cocos Creator 实现约束',
+      fallback: requirement.missing_reasons.engine_constraints ?? '等待目标平台实现约束',
       done: Boolean(requirement.engine_constraints),
-      children: requirement.engine_constraints ? ['Cocos 实现建议已纳入'] : ['可由 RAG 检索补齐'],
+      children: requirement.engine_constraints ? ['平台实现建议已纳入'] : ['可由项目知识检索补齐'],
     },
   ]
 
@@ -221,11 +221,11 @@ export function StateCanvas({
 
               {requirement.engine_constraints ? (
                 <StateCard
-                  title="RAG 实现建议"
-                  label="Cocos 3.8.8"
+                  title="平台实现建议"
+                  label="项目知识"
                   body={requirement.engine_constraints}
                   tone="info"
-                  meta={latestRag?.references.map((reference) => reference.source).join(' · ') ?? '参考：Cocos_Docs_v3.8.8'}
+                  meta={latestRag?.references.map((reference) => reference.source).join(' · ') ?? '参考：当前项目知识'}
                   confidence={requirement.slot_confidence.engine_constraints}
                   missingReason={requirement.missing_reasons.engine_constraints}
                 />
@@ -243,8 +243,8 @@ export function StateCanvas({
 
               {latestRag ? (
                 <StateCard
-                  title="RAG 参考资料"
-                  label={latestRag.status === 'connected' ? '[检索] 已连接' : latestRag.status === 'error' ? '[检索] 失败' : '[检索] Mock'}
+                  title="项目知识参考"
+                  label={latestRag.status === 'connected' ? '[检索] 已连接' : '[检索] 失败'}
                   body={latestRag.answer}
                   tone={latestRag.status === 'connected' ? 'info' : latestRag.status === 'error' ? 'missing' : 'info'}
                   meta={latestRag.references.map((reference) => `${reference.title}: ${reference.source}`).join(' · ')}

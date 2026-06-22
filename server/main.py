@@ -24,7 +24,7 @@ client = anthropic.Anthropic(
 
 MODEL = "claude-sonnet-4-6"
 
-SYSTEM_PROMPT = """你是一个游戏 UX 需求打磨助手，专注于 Cocos Creator 项目。
+SYSTEM_PROMPT = """你是一个跨平台 UX 需求打磨助手，面向 H5、Android、iOS 或游戏客户端项目。
 
 你的任务是通过对话帮助用户明确 UX 需求，并在每次回复中更新需求状态。
 
@@ -110,7 +110,7 @@ class ChatRequest(BaseModel):
     requirementState: UXRequirementState
 
 
-class RagSearchRequest(BaseModel):
+class ProjectKnowledgeSearchRequest(BaseModel):
     query: str
 
 
@@ -123,11 +123,10 @@ def health():
             "model": MODEL,
             "apiKeyPresent": bool(os.environ.get("ANTHROPIC_API_KEY")),
         },
-        "cocosRag": {
-            "mode": "disabled",
-            "sseUrl": "",
-            "proxyScript": "",
-            "status": "ok",
+        "projectKnowledge": {
+            "mode": "local-in-memory-index",
+            "status": "ready",
+            "description": "Indexes the current project PRD source, nodes, evidence, contracts, and recent node-chat confirmations per request.",
         },
     }
 
@@ -183,11 +182,11 @@ def chat(req: ChatRequest):
     }
 
 
-@app.post("/api/rag/search")
-def rag_search(req: RagSearchRequest):
-    # Stub — real RAG integration can be added later
+@app.post("/api/project-knowledge/search")
+def project_knowledge_search(req: ProjectKnowledgeSearchRequest):
+    # Stub — local project knowledge retrieval is implemented in the TypeScript Express server.
     return {
-        "status": "mock",
-        "answer": f"RAG 搜索「{req.query}」暂未接入，返回占位结果。",
+        "status": "connected",
+        "answer": f"项目知识检索「{req.query}」请使用 TypeScript Express 服务，本备用服务仅返回占位结果。",
         "references": [],
     }

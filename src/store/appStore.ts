@@ -7,11 +7,12 @@ import { normalizePerformanceSpec } from '../lib/performanceOrchestration'
 import { defaultAudienceForSpecLens, normalizeLegacyAudience, normalizeNodeLensFields, specLensFromLegacyAudience } from '../lib/prdNodeLens'
 import type { AppSettings, ChatMessage, RagSearchResult } from '../types/chat'
 import type { UXRequirementState } from '../types/uxRequirement'
-import type { CreatePageNodeInput, DecompositionStatus, DecompositionStep, MapAdjustmentOperation, PrdNode, PrdNodeBackendContractRef, PrdNodeDocumentField, PrdNodeDocumentSnapshot, PrdNodeOperationSuggestion, PrdNodePolishRevision, PrdNodeReference, PrdPerformanceSpec, PrdTree, UpdateNodePatch } from '../types/prdNode'
+import type { CreatePageNodeInput, DecompositionStatus, DecompositionStep, MapAdjustmentOperation, PrdNode, PrdNodeBackendContractRef, PrdNodeDocumentField, PrdNodeDocumentSnapshot, PrdNodeEvidenceRef, PrdNodeOperationSuggestion, PrdNodePolishRevision, PrdNodeReference, PrdNodeSectionKey, PrdPerformanceSpec, PrdTree, UpdateNodePatch } from '../types/prdNode'
 import type { PrototypeVariant } from '../types/prototypeVariant'
 import type { ProjectSourceDocument, ProjectWorkspaceSnapshot } from '../types/archive'
 import type { QaAttachment, QaIssue, QaIssuePatch, QaIssueStatus, QaNodeRef } from '../types/qa'
 import { emptyAssetWorkbench, type AssetWorkbenchState, type EffectAssetRow, type UiAssetRow } from '../types/assetWorkbench'
+import type { ReusableLogicAsset } from '../types/reusableLogic'
 
 const emptyRequirement: UXRequirementState = {
   trigger_condition: null,
@@ -27,8 +28,9 @@ const emptyRequirement: UXRequirementState = {
 }
 
 const STORAGE_KEY = 'gameux-promptforge-state'
-const STORAGE_VERSION = 13
+const STORAGE_VERSION = 15
 const PROTOTYPE_HISTORY_LIMIT = 4
+const PRD_SECTION_KEYS = ['data', 'interaction', 'view'] as const satisfies readonly PrdNodeSectionKey[]
 
 export interface PrototypeVersion {
   id: string
@@ -75,7 +77,7 @@ const DOCUMENT_FIELDS: PrdNodeDocumentField[] = [
   'performanceSpec',
 ]
 
-function normalizeOptionalText(value: string | null | undefined) {
+function normalizeOptionalText(value: unknown) {
   if (typeof value !== 'string') return null
   const trimmed = value.trim()
   return trimmed.length ? trimmed : null
@@ -139,6 +141,100 @@ function normalizeBackendContracts(value: PrdNodeBackendContractRef[] | null | u
     }))
     .filter((contract) => ['api', 'config', 'server', 'data'].includes(contract.kind))
   return contracts.length ? contracts : undefined
+}
+
+function evidenceRefKey(ref: PrdNodeEvidenceRef) {
+  return `${ref.sourceKind}:${ref.sourceLabel}:${ref.quote ?? ''}`
+}
+
+function uniqueEvidenceRefs(refs: PrdNodeEvidenceRef[]) {
+  const seen = new Set<string>()
+  return refs.filter((ref) => {
+    const key = evidenceRefKey(ref)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function normalizeOpenQuestions(value: string[] | null | undefined) {
+  if (!Array.isArray(value)) return []
+  return Array.from(new Set(
+    value
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter(Boolean),
+  ))
+}
+
+function mergePolishSections(
+  current: PrdNode['sections'] | undefined,
+  patch: PrdNode['sections'] | undefined,
+): PrdNode['sections'] | undefined {
+  if (!patch || Object.keys(patch).length === 0) return current
+
+  const next: PrdNode['sections'] = { ...(current ?? {}) }
+  let touched = false
+
+  for (const key of PRD_SECTION_KEYS) {
+    const incoming = patch[key]
+    if (!incoming) continue
+
+    const existing = next[key]
+    const title = normalizeOptionalText(incoming.title)
+    const summary = normalizeOptionalText(incoming.summary)
+    const content = normalizeOptionalText(incoming.content)
+    const evidenceRefs = Array.isArray(incoming.evidenceRefs) ? incoming.evidenceRefs : []
+    const openQuestions = normalizeOpenQuestions(incoming.openQuestions)
+    const hasSubstance = Boolean(summary || content || evidenceRefs.length || openQuestions.length)
+
+    if (!title && !hasSubstance) continue
+    if (!existing && !hasSubstance) continue
+
+    next[key] = {
+      title: title ?? existing?.title ?? null,
+      summary: summary ?? existing?.summary ?? null,
+      content: content ?? existing?.content ?? null,
+      evidenceRefs: evidenceRefs.length
+        ? uniqueEvidenceRefs([...(existing?.evidenceRefs ?? []), ...evidenceRefs])
+        : existing?.evidenceRefs ?? [],
+      openQuestions: Array.isArray(incoming.openQuestions) && hasSubstance
+        ? openQuestions
+        : existing?.openQuestions ?? [],
+    }
+    touched = true
+  }
+
+  return touched ? next : current
+}
+
+function withoutUndefined<T extends Record<string, unknown>>(value: T): Partial<T> {
+  return Object.fromEntries(Object.entries(value).filter(([, field]) => field !== undefined)) as Partial<T>
+}
+
+function hasMeaningfulText(value: unknown) {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+function repairNodeFromRevision(node: Partial<PrdNode>, revision: PrdNodePolishRevision | undefined): Partial<PrdNode> {
+  if (!revision) return node
+  const repaired = { ...node }
+  const fallback = revision.after ?? revision.before
+  const before = revision.before
+
+  if (!hasMeaningfulText(repaired.summary)) repaired.summary = fallback.summary || before.summary || repaired.summary
+  if (!hasMeaningfulText(repaired.content)) repaired.content = fallback.content || before.content || repaired.content
+  if (repaired.techNotes === undefined) repaired.techNotes = fallback.techNotes ?? before.techNotes ?? null
+  if (repaired.sections === undefined || Object.keys(repaired.sections ?? {}).length === 0) {
+    repaired.sections = fallback.sections ?? before.sections ?? repaired.sections
+  }
+  if (repaired.handoffGoal === undefined) repaired.handoffGoal = fallback.handoffGoal ?? before.handoffGoal ?? null
+  if (repaired.qualityGate === undefined) repaired.qualityGate = fallback.qualityGate ?? before.qualityGate ?? null
+  if (repaired.backendContracts === undefined) repaired.backendContracts = fallback.backendContracts ?? before.backendContracts
+  if (repaired.evidenceRefs === undefined) repaired.evidenceRefs = fallback.evidenceRefs ?? before.evidenceRefs
+  if (repaired.performanceSpec === undefined) repaired.performanceSpec = fallback.performanceSpec ?? before.performanceSpec
+
+  return repaired
 }
 
 function makePageNodeId(tree: PrdTree | null, title: string) {
@@ -327,8 +423,19 @@ function rebuildPrdTreeLinks(tree: PrdTree): PrdTree {
 function normalizePrdTreeNode(node: PrdNode): PrdNode {
   return normalizeNodeLensFields({
     ...node,
+    id: node.id,
+    parentId: typeof node.parentId === 'string' ? node.parentId : null,
+    label: normalizeOptionalText(node.label) ?? node.id,
+    summary: normalizeOptionalText(node.summary) ?? '',
+    content: normalizeOptionalText(node.content) ?? normalizeOptionalText(node.summary) ?? '',
     type: node.type ?? 'feature',
     status: node.status ?? 'pending',
+    level: typeof node.level === 'number' ? node.level : 0,
+    order: typeof node.order === 'number' ? node.order : 0,
+    needsPolish: typeof node.needsPolish === 'boolean' ? node.needsPolish : node.type === 'page' || node.type === 'ui',
+    extractedFrom: node.extractedFrom ?? null,
+    techNotes: node.techNotes ?? null,
+    children: Array.isArray(node.children) ? node.children : [],
     references: normalizeReferences(node.references),
     sections: node.sections ?? {},
     backendContracts: normalizeBackendContracts(node.backendContracts),
@@ -336,12 +443,13 @@ function normalizePrdTreeNode(node: PrdNode): PrdNode {
   })
 }
 
-function normalizePersistedPrdTree(value: unknown): PrdTree | null {
+function normalizePersistedPrdTree(value: unknown, revisions?: unknown): PrdTree | null {
   if (!isRecord(value)) return null
   if (persistedTreeHasLocalTemplates(value)) return null
+  const revisionMap = isRecord(revisions) ? revisions as Record<string, PrdNodePolishRevision> : {}
   const normalized = Object.fromEntries(
     Object.entries(value).map(([id, rawNode]) => {
-      const node = rawNode as PrdNode
+      const node = repairNodeFromRevision({ ...(rawNode as PrdNode), id }, revisionMap[id]) as PrdNode
       return [id, normalizePrdTreeNode(node)]
     })
   ) as PrdTree
@@ -526,6 +634,7 @@ function emptyAssetWorkbenchState(): AssetWorkbenchState {
   return {
     uiRows: [],
     effectRows: [],
+    reusableLogicAssets: [],
     lastEffectScanRoot: null,
   }
 }
@@ -564,6 +673,86 @@ function normalizeEffectLoadStatus(value: unknown) {
   return value === 'loading' || value === 'loaded' || value === 'error' ? value : 'not_loaded'
 }
 
+function normalizeStringArrayValue(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    : []
+}
+
+function normalizeEffectSpineAsset(value: unknown): EffectAssetRow['spine'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as NonNullable<EffectAssetRow['spine']>
+  const atlasUrl = typeof raw.atlasUrl === 'string' && raw.atlasUrl.trim() ? raw.atlasUrl : null
+  const textureUrls = normalizeStringArrayValue(raw.textureUrls)
+  if (!atlasUrl || textureUrls.length === 0) return null
+  return {
+    jsonUrl: typeof raw.jsonUrl === 'string' && raw.jsonUrl.trim() ? raw.jsonUrl : null,
+    binaryUrl: typeof raw.binaryUrl === 'string' && raw.binaryUrl.trim() ? raw.binaryUrl : null,
+    atlasUrl,
+    textureUrls,
+    animationNames: normalizeStringArrayValue(raw.animationNames),
+    skinNames: normalizeStringArrayValue(raw.skinNames),
+    defaultAnimation: typeof raw.defaultAnimation === 'string' && raw.defaultAnimation.trim() ? raw.defaultAnimation : null,
+    skeletonVersion: typeof raw.skeletonVersion === 'string' && raw.skeletonVersion.trim() ? raw.skeletonVersion : null,
+    premultipliedAlpha: typeof raw.premultipliedAlpha === 'boolean' ? raw.premultipliedAlpha : null,
+    playerJsUrl: typeof raw.playerJsUrl === 'string' && raw.playerJsUrl.trim() ? raw.playerJsUrl : null,
+    playerCssUrl: typeof raw.playerCssUrl === 'string' && raw.playerCssUrl.trim() ? raw.playerCssUrl : null,
+  }
+}
+
+function normalizeReusableLogicStatus(value: unknown): ReusableLogicAsset['status'] {
+  return value === 'approved' || value === 'ignored' ? value : 'candidate'
+}
+
+function normalizeReusableLogicType(value: unknown): ReusableLogicAsset['type'] {
+  if (
+    value === 'interaction_state'
+    || value === 'animation_rule'
+    || value === 'feedback_pattern'
+    || value === 'component_pattern'
+    || value === 'copywriting_pattern'
+  ) {
+    return value
+  }
+  return 'interaction_state'
+}
+
+function normalizeReusableLogicAssets(value: unknown): ReusableLogicAsset[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item): ReusableLogicAsset[] => {
+    if (!isRecord(item)) return []
+    const id = normalizeOptionalText(item.id)
+    const name = normalizeOptionalText(item.name)
+    const logic = normalizeOptionalText(item.logic)
+    const source = isRecord(item.source) ? item.source : {}
+    const sourceNodeId = normalizeOptionalText(source.nodeId)
+    const sourceNodeLabel = normalizeOptionalText(source.nodeLabel)
+    if (!id || !name || !logic || !sourceNodeId || !sourceNodeLabel) return []
+    const now = new Date().toISOString()
+    return [{
+      id,
+      name,
+      type: normalizeReusableLogicType(item.type),
+      status: normalizeReusableLogicStatus(item.status),
+      reuseMode: item.reuseMode === 'copy' ? 'copy' : 'reference',
+      description: normalizeOptionalText(item.description) ?? logic,
+      logic,
+      usageGuidance: normalizeOptionalText(item.usageGuidance) ?? '复用前确认当前节点资源、层级和结束状态是否匹配。',
+      tags: Array.isArray(item.tags)
+        ? item.tags.map((tag) => normalizeOptionalText(tag)).filter((tag): tag is string => Boolean(tag)).slice(0, 10)
+        : [],
+      source: {
+        nodeId: sourceNodeId,
+        nodeLabel: sourceNodeLabel,
+        field: normalizeOptionalText(source.field) ?? 'performanceSpec',
+        excerpt: normalizeOptionalText(source.excerpt),
+      },
+      createdAt: normalizeOptionalText(item.createdAt) ?? now,
+      updatedAt: normalizeOptionalText(item.updatedAt) ?? now,
+    }]
+  })
+}
+
 function normalizeAssetWorkbench(value: AssetWorkbenchState | null | undefined): AssetWorkbenchState {
   if (!value || typeof value !== 'object') return emptyAssetWorkbenchState()
   return {
@@ -587,7 +776,7 @@ function normalizeAssetWorkbench(value: AssetWorkbenchState | null | undefined):
           loadedFileCount: typeof (row as { loadedFileCount?: unknown }).loadedFileCount === 'number' ? (row as { loadedFileCount: number }).loadedFileCount : 0,
           loadedBytes: typeof (row as { loadedBytes?: unknown }).loadedBytes === 'number' ? (row as { loadedBytes: number }).loadedBytes : 0,
           loadedAt: typeof (row as { loadedAt?: unknown }).loadedAt === 'string' ? (row as { loadedAt: string }).loadedAt : null,
-          previewType: ['image', 'sequence', 'video', 'audio'].includes(String((row as { previewType?: unknown }).previewType))
+          previewType: ['image', 'sequence', 'video', 'audio', 'spine'].includes(String((row as { previewType?: unknown }).previewType))
             ? (row as { previewType: EffectAssetRow['previewType'] }).previewType
             : null,
           previewUrl: typeof (row as { previewUrl?: unknown }).previewUrl === 'string' ? (row as { previewUrl: string }).previewUrl : null,
@@ -596,6 +785,7 @@ function normalizeAssetWorkbench(value: AssetWorkbenchState | null | undefined):
                 file && typeof file.name === 'string' && typeof file.ext === 'string' && typeof file.url === 'string'
               ))
             : [],
+          spine: normalizeEffectSpineAsset((row as { spine?: unknown }).spine),
           files: Array.isArray(row.files)
             ? row.files.map((file) => ({
                 ...file,
@@ -605,6 +795,7 @@ function normalizeAssetWorkbench(value: AssetWorkbenchState | null | undefined):
             : [],
         }))
       : [],
+    reusableLogicAssets: normalizeReusableLogicAssets((value as { reusableLogicAssets?: unknown }).reusableLogicAssets),
     lastEffectScanRoot: typeof value.lastEffectScanRoot === 'string' ? value.lastEffectScanRoot : null,
   }
 }
@@ -634,6 +825,7 @@ function mergeEffectAssetScanRows(existingRows: EffectAssetRow[], sourceRoot: st
       previewType: existing.previewType,
       previewUrl: existing.previewUrl,
       previewFiles: existing.previewFiles,
+      spine: existing.spine,
       files: row.files.map((file) => ({
         ...file,
         loadedPath: loadedPathBySourcePath.get(file.path) ?? null,
@@ -712,6 +904,11 @@ export interface AppStoreState {
   replaceEffectAssetRows: (sourceRoot: string, rows: EffectAssetRow[]) => void
   updateEffectAssetRow: (rowId: string, patch: Partial<EffectAssetRow>) => void
   removeEffectAssetRow: (rowId: string) => void
+  upsertReusableLogicAssets: (assets: ReusableLogicAsset[]) => void
+  updateReusableLogicAsset: (assetId: string, patch: Partial<ReusableLogicAsset>) => void
+  approveReusableLogicAsset: (assetId: string) => void
+  ignoreReusableLogicAsset: (assetId: string) => void
+  removeReusableLogicAsset: (assetId: string) => void
   clearAssetWorkbench: () => void
   applyNodePolish: (nodeId: string, patch: NodePolishPatch) => void
   acceptNodePolishRevision: (nodeId: string) => void
@@ -778,7 +975,7 @@ export const useAppStore = create<AppStoreState>()(
       setSourceDocument: (sourceDocument) => set({ sourceDocument, archiveDirty: true }),
       loadArchiveSnapshot: (snapshot, currentArchivePath, savedAt) =>
         set(() => {
-          const prdTree = normalizePersistedPrdTree(snapshot.prdTree)
+          const prdTree = normalizePersistedPrdTree(snapshot.prdTree, snapshot.nodePolishRevisions)
           const selectedNodeId = prdTree && snapshot.selectedNodeId && prdTree[snapshot.selectedNodeId]
             ? snapshot.selectedNodeId
             : null
@@ -875,10 +1072,16 @@ export const useAppStore = create<AppStoreState>()(
           const node = state.prdTree?.[nodeId]
           if (!node || !state.prdTree) return state
           const nextPatch = sanitizePatch(patch)
+          const { sections, ...restPatch } = nextPatch
+          const compactPatch = withoutUndefined(restPatch)
           return {
             prdTree: rebuildPrdTreeLinks({
               ...state.prdTree,
-              [nodeId]: { ...node, ...nextPatch },
+              [nodeId]: {
+                ...node,
+                ...compactPatch,
+                sections: mergePolishSections(node.sections, sections),
+              },
             }),
             archiveDirty: true,
           }
@@ -1336,6 +1539,74 @@ export const useAppStore = create<AppStoreState>()(
           },
           archiveDirty: true,
         })),
+      upsertReusableLogicAssets: (assets) =>
+        set((state) => {
+          const normalizedAssets = normalizeReusableLogicAssets(assets)
+          if (!normalizedAssets.length) return state
+          const existingById = new Map(state.assetWorkbench.reusableLogicAssets.map((asset) => [asset.id, asset]))
+          for (const asset of normalizedAssets) {
+            const existing = existingById.get(asset.id)
+            if (!existing) {
+              existingById.set(asset.id, asset)
+              continue
+            }
+            if (asset.status === 'candidate' && existing.status !== 'candidate') {
+              existingById.set(asset.id, existing)
+              continue
+            }
+            existingById.set(asset.id, {
+              ...existing,
+              ...asset,
+              createdAt: existing.createdAt,
+              updatedAt: new Date().toISOString(),
+            })
+          }
+          return {
+            assetWorkbench: {
+              ...state.assetWorkbench,
+              reusableLogicAssets: Array.from(existingById.values()),
+            },
+            archiveDirty: true,
+          }
+        }),
+      updateReusableLogicAsset: (assetId, patch) =>
+        set((state) => ({
+          assetWorkbench: {
+            ...state.assetWorkbench,
+            reusableLogicAssets: state.assetWorkbench.reusableLogicAssets.map((asset) =>
+              asset.id === assetId ? { ...asset, ...patch, updatedAt: new Date().toISOString() } : asset,
+            ),
+          },
+          archiveDirty: true,
+        })),
+      approveReusableLogicAsset: (assetId) =>
+        set((state) => ({
+          assetWorkbench: {
+            ...state.assetWorkbench,
+            reusableLogicAssets: state.assetWorkbench.reusableLogicAssets.map((asset) =>
+              asset.id === assetId ? { ...asset, status: 'approved', updatedAt: new Date().toISOString() } : asset,
+            ),
+          },
+          archiveDirty: true,
+        })),
+      ignoreReusableLogicAsset: (assetId) =>
+        set((state) => ({
+          assetWorkbench: {
+            ...state.assetWorkbench,
+            reusableLogicAssets: state.assetWorkbench.reusableLogicAssets.map((asset) =>
+              asset.id === assetId ? { ...asset, status: 'ignored', updatedAt: new Date().toISOString() } : asset,
+            ),
+          },
+          archiveDirty: true,
+        })),
+      removeReusableLogicAsset: (assetId) =>
+        set((state) => ({
+          assetWorkbench: {
+            ...state.assetWorkbench,
+            reusableLogicAssets: state.assetWorkbench.reusableLogicAssets.filter((asset) => asset.id !== assetId),
+          },
+          archiveDirty: true,
+        })),
       clearAssetWorkbench: () => set({ assetWorkbench: emptyAssetWorkbenchState(), archiveDirty: true }),
       applyNodePolish: (nodeId, patch) =>
         set((state) => {
@@ -1355,7 +1626,7 @@ export const useAppStore = create<AppStoreState>()(
             summary: summary ?? node.summary,
             content: content ?? node.content,
             techNotes: techNotes ?? node.techNotes,
-            sections: patch.sections ?? node.sections,
+            sections: mergePolishSections(node.sections, patch.sections),
             handoffGoal: handoffGoal ?? node.handoffGoal,
             qualityGate: qualityGate ?? node.qualityGate,
             backendContracts: patch.backendContracts === undefined ? node.backendContracts : normalizeBackendContracts(patch.backendContracts),
@@ -1627,7 +1898,7 @@ export const useAppStore = create<AppStoreState>()(
       name: STORAGE_KEY,
       version: STORAGE_VERSION,
       migrate: (persistedState: unknown, version: number): unknown => {
-        if (version === 3 || version === 4 || version === 5 || version === 6 || version === 7 || version === 8 || version === 9 || version === 10 || version === 11 || version === 12) {
+        if (version >= 3 && version <= 14) {
           const previous = persistedState as {
             requirement?: unknown
             messages?: unknown
@@ -1652,7 +1923,7 @@ export const useAppStore = create<AppStoreState>()(
             lastSavedAt?: unknown
             archiveDirty?: unknown
           }
-          const prdTree = normalizePersistedPrdTree(previous.prdTree)
+          const prdTree = normalizePersistedPrdTree(previous.prdTree, previous.nodePolishRevisions)
           return {
             requirement: previous.requirement ?? emptyRequirement,
             messages: previous.messages ?? initialMessages,

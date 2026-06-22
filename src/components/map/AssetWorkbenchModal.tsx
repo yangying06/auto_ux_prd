@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { loadEffectAssetRow, openAssetLibraryLocalPath, parseUiFigmaAsset, scanEffectAssetDirectory } from '../../lib/api'
+import { reusableLogicTypeLabel } from '../../lib/reusableLogicSedimentation'
 import { useAppStore } from '../../store/appStore'
 import type { AssetRowStatus, EffectAssetKind, EffectAssetLoadStatus, EffectAssetRow, UiAssetKind, UiAssetParseResult, UiAssetRow } from '../../types/assetWorkbench'
 import type { ProjectSourceDocument } from '../../types/archive'
@@ -462,7 +463,7 @@ function TypeSegmentedControl({
 }
 
 export function AssetWorkbenchModal({ isOpen, baseUrl, onClose }: AssetWorkbenchModalProps) {
-  const [activeTab, setActiveTab] = useState<'ui' | 'effect'>('ui')
+  const [activeTab, setActiveTab] = useState<'ui' | 'effect' | 'logic'>('ui')
   const [uiForm, setUiForm] = useState<UiAssetFormState>(() => emptyUiForm())
   const [uiError, setUiError] = useState<string | null>(null)
   const [uiNotice, setUiNotice] = useState<string | null>(null)
@@ -486,6 +487,7 @@ export function AssetWorkbenchModal({ isOpen, baseUrl, onClose }: AssetWorkbench
   const replaceEffectAssetRows = useAppStore((s) => s.replaceEffectAssetRows)
   const updateEffectAssetRow = useAppStore((s) => s.updateEffectAssetRow)
   const removeEffectAssetRow = useAppStore((s) => s.removeEffectAssetRow)
+  const removeReusableLogicAsset = useAppStore((s) => s.removeReusableLogicAsset)
 
   useEffect(() => {
     if (!isOpen) return
@@ -696,6 +698,8 @@ export function AssetWorkbenchModal({ isOpen, baseUrl, onClose }: AssetWorkbench
   const loadedEffectRowCount = assetWorkbench.effectRows.filter((row) => row.loadStatus === 'loaded').length
   const loadableEffectRowCount = assetWorkbench.effectRows.filter((row) => row.files.length > 0).length
   const unparsedUiRowCount = assetWorkbench.uiRows.filter(isUnparsedUiRow).length
+  const approvedReusableLogicCount = assetWorkbench.reusableLogicAssets.filter((asset) => asset.status === 'approved').length
+  const candidateReusableLogicCount = assetWorkbench.reusableLogicAssets.filter((asset) => asset.status === 'candidate').length
   const activeUiParseCount = parsingUiRowIds.length
   const effectLoadSummary = loadProgress.active
     ? `加载中 ${loadProgress.done}/${loadProgress.total}`
@@ -765,6 +769,24 @@ export function AssetWorkbenchModal({ isOpen, baseUrl, onClose }: AssetWorkbench
           >
             <span className="material-symbols-outlined" style={{ fontSize: '17px' }}>auto_awesome</span>
             特效资源
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('logic')}
+            className={[
+              'flex min-h-[36px] items-center gap-xs whitespace-nowrap rounded-lg border px-md text-label-md transition-colors',
+              activeTab === 'logic'
+                ? 'border-secondary bg-secondary-container text-on-secondary-container'
+                : 'border-outline-variant bg-surface-container-high text-on-surface-variant hover:text-on-surface',
+            ].join(' ')}
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: '17px' }}>schema</span>
+            表现逻辑
+            {assetWorkbench.reusableLogicAssets.length ? (
+              <span className="rounded bg-surface px-xs font-mono text-[11px] text-on-surface-variant">
+                {assetWorkbench.reusableLogicAssets.length}
+              </span>
+            ) : null}
           </button>
         </div>
 
@@ -945,7 +967,7 @@ export function AssetWorkbenchModal({ isOpen, baseUrl, onClose }: AssetWorkbench
               </table>
             </div>
           </div>
-        ) : (
+        ) : activeTab === 'effect' ? (
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             <div className="shrink-0 border-b border-outline-variant bg-surface-container-low px-md py-sm md:px-lg">
               <div className="grid gap-sm md:grid-cols-[minmax(340px,1fr)_auto_auto_auto_minmax(180px,auto)] md:items-end">
@@ -1098,6 +1120,90 @@ export function AssetWorkbenchModal({ isOpen, baseUrl, onClose }: AssetWorkbench
                             删除
                           </button>
                         </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ) : (
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div className="shrink-0 border-b border-outline-variant bg-surface-container-low px-md py-sm md:px-lg">
+              <div className="flex flex-wrap items-center gap-sm text-body-sm text-on-surface-variant">
+                <span className="inline-flex min-h-[30px] items-center gap-xs rounded-md border border-secondary/40 bg-secondary/10 px-sm text-secondary">
+                  <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>verified</span>
+                  已入库 {approvedReusableLogicCount}
+                </span>
+                <span className="inline-flex min-h-[30px] items-center gap-xs rounded-md border border-outline-variant bg-surface px-sm">
+                  <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>pending_actions</span>
+                  待确认 {candidateReusableLogicCount}
+                </span>
+              </div>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
+              <table className="w-full table-fixed border-collapse text-left">
+                <colgroup>
+                  <col className="w-[24%]" />
+                  <col className="w-[18%]" />
+                  <col />
+                  <col className="w-[112px]" />
+                </colgroup>
+                <thead className="sticky top-0 z-10 bg-surface-container-high text-label-md text-on-surface-variant">
+                  <tr>
+                    {['逻辑', '状态', '内容', '操作'].map((label) => (
+                      <th key={label} className="whitespace-nowrap border-b border-outline-variant px-sm py-sm">{label}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-outline-variant">
+                  {assetWorkbench.reusableLogicAssets.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="px-lg py-xl text-center text-body-sm text-on-surface-variant">
+                        还没有沉淀的表现逻辑。草稿模式确认候选后，会出现在这里供资源库标准模式复用。
+                      </td>
+                    </tr>
+                  ) : assetWorkbench.reusableLogicAssets.map((asset) => (
+                    <tr key={asset.id} className="align-top text-body-sm text-on-surface">
+                      <td className="px-sm py-sm">
+                        <div className="grid gap-xs">
+                          <span className="font-label-md text-label-md text-on-surface">{asset.name}</span>
+                          <span className="text-[11px] leading-4 text-on-surface-variant">
+                            来自 {asset.source.nodeLabel}
+                          </span>
+                          <div className="flex flex-wrap gap-xs">
+                            {asset.tags.slice(0, 4).map((tag) => (
+                              <span key={tag} className="rounded border border-outline-variant px-xs py-[1px] text-[10px] text-on-surface-variant">{tag}</span>
+                            ))}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-sm py-sm">
+                        <div className="grid gap-xs">
+                          <span className="inline-flex w-fit whitespace-nowrap rounded border border-secondary/40 bg-secondary/10 px-xs py-[2px] text-label-md text-secondary">
+                            {reusableLogicTypeLabel(asset.type)}
+                          </span>
+                          <span className="text-[11px] leading-4 text-on-surface-variant">
+                            {asset.status === 'approved' ? '已入库' : asset.status === 'ignored' ? '已忽略' : '待确认'}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-sm py-sm">
+                        <div className="grid gap-xs">
+                          <p className="line-clamp-2 text-body-sm text-on-surface">{asset.description}</p>
+                          <p className="line-clamp-3 whitespace-pre-wrap text-[11px] leading-4 text-on-surface-variant">{asset.logic}</p>
+                          <p className="line-clamp-2 text-[11px] leading-4 text-on-surface-variant">{asset.usageGuidance}</p>
+                        </div>
+                      </td>
+                      <td className="px-sm py-sm">
+                        <button
+                          type="button"
+                          onClick={() => removeReusableLogicAsset(asset.id)}
+                          className={`${actionButtonClassName} border-error/40 bg-error/10 text-error`}
+                        >
+                          <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>delete</span>
+                          删除
+                        </button>
                       </td>
                     </tr>
                   ))}

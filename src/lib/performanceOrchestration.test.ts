@@ -41,9 +41,9 @@ const coinSpec = inferPerformanceSpecFromNode(makeNode({
 
 assert(coinSpec, 'coin node should produce performance spec')
 assertIncludes(coinSpec.eventTypes, '金币/数值获得', 'coin node should detect reward value motion')
-assertIncludes(coinSpec.integrationModes ?? [], 'Cocos Tween 变换', 'coin node should suggest Tween integration')
-assertIncludes(coinSpec.integrationModes ?? [], 'ParticleSystem 粒子', 'coin node should suggest particle integration')
-assertIncludes(coinSpec.integrationModes ?? [], 'Prefab 特效/弹窗', 'coin node should suggest prefab integration through reward collect wording')
+assertIncludes(coinSpec.integrationModes ?? [], '平台动效变换', 'coin node should suggest programmatic motion integration')
+assertIncludes(coinSpec.integrationModes ?? [], '粒子/特效资源', 'coin node should suggest particle integration')
+assertIncludes(coinSpec.integrationModes ?? [], '组件/弹窗特效', 'coin node should suggest component integration through reward collect wording')
 assert(
   coinSpec.openQuestions.some((question) => question.includes('飞入') && question.includes('数值')),
   'coin node should ask implementation-blocking value/fly-in question',
@@ -85,8 +85,8 @@ const assetSpec = inferPerformanceSpecFromNode(makeNode({
 
 assert(assetSpec, 'asset node should produce performance spec')
 assertIncludes(assetSpec.integrationModes ?? [], 'Spine/Skeleton', 'asset node should detect Spine integration')
-assertIncludes(assetSpec.integrationModes ?? [], 'ParticleSystem 粒子', 'asset node should detect particle integration')
-assertIncludes(assetSpec.integrationModes ?? [], 'Prefab 特效/弹窗', 'asset node should detect prefab integration')
+assertIncludes(assetSpec.integrationModes ?? [], '粒子/特效资源', 'asset node should detect particle integration')
+assertIncludes(assetSpec.integrationModes ?? [], '组件/弹窗特效', 'asset node should detect component integration')
 
 const plainSpec = inferPerformanceSpecFromNode(makeNode({
   label: '设置入口',
@@ -123,7 +123,7 @@ const contradictoryReadinessSpec = normalizePerformanceSpec({
   source: 'ai',
   confidence: 90,
   eventTypes: ['弹窗/揭晓表现'],
-  integrationModes: ['Prefab 特效/弹窗'],
+  integrationModes: ['组件/弹窗特效'],
   trigger: '点击奖励按钮',
   branches: ['普通奖励和大奖分支'],
   sequence: [{ title: '弹窗入场', detail: '播放 prefab 入场' }],
@@ -166,7 +166,7 @@ const confirmedSpec = normalizePerformanceSpec({
   source: 'ai',
   confidence: 90,
   eventTypes: ['弹窗/揭晓表现'],
-  integrationModes: ['Prefab 特效/弹窗'],
+  integrationModes: ['组件/弹窗特效'],
   trigger: '点击奖励按钮',
   branches: ['普通奖励和大奖分支'],
   sequence: [{ title: '弹窗入场', detail: '播放 prefab 入场' }],

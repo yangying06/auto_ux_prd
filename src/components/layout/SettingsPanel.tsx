@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { getProxyHealth, searchCocosRag } from '../../lib/api'
+import { getProxyHealth, searchProjectKnowledge } from '../../lib/api'
 import { useAppStore } from '../../store/appStore'
-import type { ProxyHealth, RagSearchResult } from '../../types/chat'
+import type { ProjectKnowledgeSearchResult, ProxyHealth } from '../../types/chat'
 
 interface SettingsPanelProps {
   open: boolean
@@ -12,9 +12,11 @@ interface SettingsPanelProps {
 
 export function SettingsPanel({ open, onResetSession, onResetRequirement, onClose }: SettingsPanelProps) {
   const settings = useAppStore((state) => state.settings)
+  const prdTree = useAppStore((state) => state.prdTree)
+  const sourceDocument = useAppStore((state) => state.sourceDocument)
   const updateSettings = useAppStore((state) => state.updateSettings)
   const [health, setHealth] = useState<ProxyHealth | null>(null)
-  const [ragResult, setRagResult] = useState<RagSearchResult | null>(null)
+  const [knowledgeResult, setKnowledgeResult] = useState<ProjectKnowledgeSearchResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isTesting, setIsTesting] = useState(false)
 
@@ -32,13 +34,13 @@ export function SettingsPanel({ open, onResetSession, onResetRequirement, onClos
       })
   }, [open, settings.proxyBaseUrl])
 
-  async function handleTestRag() {
+  async function handleTestKnowledge() {
     setIsTesting(true)
     setError(null)
     try {
-      setRagResult(await searchCocosRag(settings.proxyBaseUrl, settings.defaultRagQuery))
+      setKnowledgeResult(await searchProjectKnowledge(settings.proxyBaseUrl, settings.defaultRagQuery, prdTree, sourceDocument))
     } catch (testError) {
-      setError(testError instanceof Error ? testError.message : 'RAG 测试失败')
+      setError(testError instanceof Error ? testError.message : '知识检索测试失败')
     } finally {
       setIsTesting(false)
     }
@@ -46,14 +48,14 @@ export function SettingsPanel({ open, onResetSession, onResetRequirement, onClos
 
   if (!open) return null
 
-  const cocosRagStatus = health?.cocosRag.status === 'configured'
-    ? '已配置'
-    : health?.cocosRag.status ?? '待检测'
-  const ragResultStatus = ragResult?.status === 'connected'
+  const projectKnowledgeStatus = health?.projectKnowledge.status === 'ready'
+    ? '已就绪'
+    : health?.projectKnowledge.status ?? '待检测'
+  const knowledgeResultStatus = knowledgeResult?.status === 'connected'
     ? '已连接'
-    : ragResult?.status === 'error'
+    : knowledgeResult?.status === 'error'
       ? '失败'
-      : '模拟'
+      : '未检索'
 
   return (
     <div className="absolute inset-0 z-[120] flex items-center justify-center bg-black/50 p-lg backdrop-blur-sm">
@@ -61,7 +63,7 @@ export function SettingsPanel({ open, onResetSession, onResetRequirement, onClos
         <div className="mb-lg flex items-start justify-between">
           <div>
             <div className="font-mono text-label-md uppercase text-secondary">系统配置</div>
-            <h2 className="mt-xs text-headline-md font-semibold text-on-surface">AI 与 Cocos RAG 设置</h2>
+            <h2 className="mt-xs text-headline-md font-semibold text-on-surface">AI 与项目知识索引设置</h2>
           </div>
           <button onClick={onClose} className="rounded-md border border-outline-variant/50 px-sm py-xs font-mono text-code-sm text-on-surface-variant hover:bg-surface-container-high">
             关闭
@@ -74,12 +76,14 @@ export function SettingsPanel({ open, onResetSession, onResetRequirement, onClos
           <ConfigBlock label="Claude 服务" value={health?.claude.provider ?? 'Anthropic Claude'} status={health?.claude.apiKeyPresent ? 'API Key 已配置' : '缺少 API Key'} tone={health?.claude.apiKeyPresent ? 'complete' : 'missing'} />
           <ConfigBlock label="模型" value={health?.claude.model ?? 'claude-sonnet-4-6'} status="自适应思考 + Prompt 缓存" tone="info" />
           <ConfigBlock label="本地代理" value={settings.proxyBaseUrl} status={health?.ok ? '已连接' : '未连接'} tone={health?.ok ? 'complete' : 'missing'} />
-          <ConfigBlock label="Cocos RAG SSE" value={health?.cocosRag.sseUrl ?? 'http://43.134.44.85:18000/sse'} status={cocosRagStatus} tone="info" />
+          <ConfigBlock label="项目知识索引" value={health?.projectKnowledge.mode ?? 'local-in-memory-index'} status={projectKnowledgeStatus} tone="info" />
         </div>
 
         <div className="mt-md rounded-xl border border-outline-variant/30 bg-surface/60 p-md">
-          <div className="font-mono text-label-md uppercase text-on-surface-variant">MCP 代理脚本</div>
-          <div className="mt-xs break-all font-mono text-code-sm text-on-surface">{health?.cocosRag.proxyScript ?? '%APPDATA%\\cocos-rag\\remote_proxy.py'}</div>
+          <div className="font-mono text-label-md uppercase text-on-surface-variant">索引范围</div>
+          <div className="mt-xs break-all font-mono text-code-sm text-on-surface">
+            {health?.projectKnowledge.description ?? '当前 PRD 原文、导图节点、证据引用、接口契约和最近节点对话确认。'}
+          </div>
         </div>
 
         <div className="mt-md grid gap-md md:grid-cols-2">
@@ -88,17 +92,17 @@ export function SettingsPanel({ open, onResetSession, onResetRequirement, onClos
         </div>
 
         <div className="mt-md">
-          <EditableField label="默认 RAG 查询" value={settings.defaultRagQuery} onChange={(value) => updateSettings({ ...settings, defaultRagQuery: value })} />
+          <EditableField label="默认知识检索查询" value={settings.defaultRagQuery} onChange={(value) => updateSettings({ ...settings, defaultRagQuery: value })} />
         </div>
 
         <div className="mt-lg flex flex-wrap items-center justify-between gap-md">
           <div className="flex flex-wrap gap-sm">
             <button
-              onClick={handleTestRag}
+              onClick={handleTestKnowledge}
               disabled={isTesting}
               className="rounded-lg bg-secondary-container px-md py-sm font-mono text-label-md uppercase text-on-secondary-container shadow-[0_0_12px_rgba(5,102,217,0.3)] disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {isTesting ? '正在测试 RAG' : '测试 Cocos RAG'}
+              {isTesting ? '正在检索知识' : '测试项目知识索引'}
             </button>
             <button onClick={onResetSession} className="rounded-lg border border-outline-variant/40 px-md py-sm font-mono text-label-md uppercase text-on-surface-variant hover:bg-surface-container-high">
               重置对话
@@ -110,12 +114,12 @@ export function SettingsPanel({ open, onResetSession, onResetRequirement, onClos
           <span className="font-mono text-code-sm text-on-surface-variant">密钥仅保存在 .env 和本地代理中。</span>
         </div>
 
-        {ragResult ? (
+        {knowledgeResult ? (
           <div className="mt-md rounded-xl border border-secondary/40 bg-secondary/10 p-md">
-            <div className="font-mono text-label-md uppercase text-secondary">RAG 结果 · {ragResultStatus}</div>
-            <p className="mt-sm text-body-md text-on-surface">{ragResult.answer}</p>
+            <div className="font-mono text-label-md uppercase text-secondary">知识检索结果 · {knowledgeResultStatus}</div>
+            <p className="mt-sm text-body-md text-on-surface">{knowledgeResult.answer}</p>
             <div className="mt-sm font-mono text-code-sm text-on-surface-variant">
-              {ragResult.references.map((reference) => `${reference.title}: ${reference.source}`).join(' · ')}
+              {knowledgeResult.references.map((reference) => `${reference.title}: ${reference.source}`).join(' · ')}
             </div>
           </div>
         ) : null}

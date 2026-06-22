@@ -1,4 +1,6 @@
-export type PrototypeAssetKind = 'interface_html' | 'interface_image' | 'ui_image' | 'effect_preview'
+import type { ReusableLogicAsset } from './reusableLogic'
+
+export type PrototypeAssetKind = 'interface_html' | 'interface_image' | 'ui_image' | 'effect_preview' | 'effect_spine'
 export type PrototypeAssetManifestMode = 'audit' | 'strict'
 export type PrototypeGenerationMode = 'draft_preview' | 'resource_standard'
 
@@ -37,6 +39,20 @@ export interface PrototypeInterfaceBlueprint {
   nodeCount?: number | null
 }
 
+export interface PrototypeSpineAsset {
+  jsonUrl?: string | null
+  binaryUrl?: string | null
+  atlasUrl: string
+  textureUrls: string[]
+  animationNames: string[]
+  skinNames: string[]
+  defaultAnimation?: string | null
+  skeletonVersion?: string | null
+  premultipliedAlpha?: boolean | null
+  playerJsUrl?: string | null
+  playerCssUrl?: string | null
+}
+
 export interface PrototypeAllowedAsset {
   id: string
   kind: PrototypeAssetKind
@@ -47,6 +63,7 @@ export interface PrototypeAllowedAsset {
   usageNote?: string | null
   originalName?: string | null
   assetGroupName?: string | null
+  spine?: PrototypeSpineAsset | null
 }
 
 export interface PrototypeAssetManifest {
@@ -54,6 +71,7 @@ export interface PrototypeAssetManifest {
   assets: PrototypeAllowedAsset[]
   notes: string[]
   interfaceBlueprints?: PrototypeInterfaceBlueprint[]
+  reusableLogicAssets?: ReusableLogicAsset[]
 }
 
 export type PrototypeAssetAuditSeverity = 'warning' | 'error'
