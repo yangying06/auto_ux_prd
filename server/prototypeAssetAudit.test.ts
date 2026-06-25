@@ -60,6 +60,16 @@ const manifest: PrototypeAssetManifest = {
         playerCssUrl: 'http://127.0.0.1:8787/api/runtime/spine-player/spine-player.css',
       },
     },
+    {
+      id: 'audio:click',
+      kind: 'audio_clip',
+      name: 'button_click / 音频',
+      url: 'http://127.0.0.1:8787/api/assets/audio/file/ui/button_click.mp3',
+      source: 'audio_asset',
+      purpose: '按钮点击音效',
+      originalName: 'button_click.mp3',
+      assetGroupName: 'button_click',
+    },
   ],
   interfaceBlueprints: [
     {
@@ -162,6 +172,7 @@ assert.match(section, /界面子图/u)
 assert.match(section, /散图\/图标\/item/u)
 assert.match(section, /特效预览/u)
 assert.match(section, /Spine playable effect/u)
+assert.match(section, /Audio clip/u)
 assert.match(section, /jsonUrl: http:\/\/127\.0\.0\.1:8787\/api\/assets\/effects\/file\/anim_mega_win\/anim_mega_win\.json/u)
 assert.match(section, /animations: anim_mega_win/u)
 assert.match(section, /ui_spec\.json 是“用界面生成”的最高版式依据/u)
@@ -180,6 +191,7 @@ const refs = extractPrototypeResourceReferences(`
   <img src="/api/figma/assets/bundle-a/assets/bg.png">
   <video poster="http://cdn.example.com/poster.png"></video>
   <div style="background-image:url('./local.png')"></div>
+  <script>const clickSfx = new Audio('/api/assets/audio/file/ui/button_click.mp3')</script>
   <script>new spine.SpinePlayer('mega', { jsonUrl: '/api/assets/effects/file/anim_mega_win/anim_mega_win.json', atlasUrl: '/api/assets/effects/file/anim_mega_win/anim_mega_win.atlas.txt', textureUrls: ['/api/assets/effects/file/anim_mega_win/anim_mega_win.png'] })</script>
 `)
 assert.deepEqual(refs, [
@@ -189,6 +201,7 @@ assert.deepEqual(refs, [
   '/api/figma/assets/bundle-a/assets/bg.png',
   'http://cdn.example.com/poster.png',
   './local.png',
+  '/api/assets/audio/file/ui/button_click.mp3',
   '/api/assets/effects/file/anim_mega_win/anim_mega_win.json',
   '/api/assets/effects/file/anim_mega_win/anim_mega_win.atlas.txt',
   '/api/assets/effects/file/anim_mega_win/anim_mega_win.png',
@@ -199,6 +212,7 @@ assert.equal(isAllowedPrototypeResource('/api/figma/assets/bundle-a/assets/bg.pn
 assert.equal(isAllowedPrototypeResource('/api/figma/assets/bundle-b/items/coin.png?rev=1', manifest), true, 'same path/search as allowed URL is allowed')
 assert.equal(isAllowedPrototypeResource('/api/runtime/spine-player/iife/spine-player.min.js', manifest), true, 'local Spine Player runtime is allowed')
 assert.equal(isAllowedPrototypeResource('/api/assets/effects/file/anim_mega_win/anim_mega_win.atlas.txt', manifest), true, 'spine atlas URL is allowed')
+assert.equal(isAllowedPrototypeResource('/api/assets/audio/file/ui/button_click.mp3', manifest), true, 'audio clip URL is allowed')
 assert.equal(isAllowedPrototypeResource('https://example.com/other.png', manifest), false)
 
 const issues = auditPrototypeAssets(`

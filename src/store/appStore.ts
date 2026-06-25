@@ -9,9 +9,11 @@ import type { AppSettings, ChatMessage, RagSearchResult } from '../types/chat'
 import type { UXRequirementState } from '../types/uxRequirement'
 import type { CreatePageNodeInput, DecompositionStatus, DecompositionStep, MapAdjustmentOperation, PrdNode, PrdNodeBackendContractRef, PrdNodeDocumentField, PrdNodeDocumentSnapshot, PrdNodeEvidenceRef, PrdNodeOperationSuggestion, PrdNodePolishRevision, PrdNodeReference, PrdNodeSectionKey, PrdPerformanceSpec, PrdTree, UpdateNodePatch } from '../types/prdNode'
 import type { PrototypeVariant } from '../types/prototypeVariant'
+import type { PrototypeSpec, PrototypeSpecMode } from '../types/prototypeSpec'
 import type { ProjectSourceDocument, ProjectWorkspaceSnapshot } from '../types/archive'
+import { defaultProjectWorkflow, type ProjectIterationContext, type ProjectWorkflowMode, type ProjectWorkflowState } from '../types/projectWorkflow'
 import type { QaAttachment, QaIssue, QaIssuePatch, QaIssueStatus, QaNodeRef } from '../types/qa'
-import { emptyAssetWorkbench, type AssetWorkbenchState, type EffectAssetRow, type UiAssetRow } from '../types/assetWorkbench'
+import { emptyAssetWorkbench, type AssetWorkbenchState, type AudioAssetRow, type EffectAssetRow, type UiAssetRow } from '../types/assetWorkbench'
 import type { ReusableLogicAsset } from '../types/reusableLogic'
 
 const emptyRequirement: UXRequirementState = {
@@ -28,7 +30,7 @@ const emptyRequirement: UXRequirementState = {
 }
 
 const STORAGE_KEY = 'gameux-promptforge-state'
-const STORAGE_VERSION = 15
+const STORAGE_VERSION = 17
 const PROTOTYPE_HISTORY_LIMIT = 4
 const PRD_SECTION_KEYS = ['data', 'interaction', 'view'] as const satisfies readonly PrdNodeSectionKey[]
 
@@ -39,6 +41,7 @@ export interface PrototypeVersion {
   createdAt: string
   mode: 'create' | 'update' | 'restore'
   note: string | null
+  prototypeSpec?: PrototypeSpec | null
 }
 
 export interface NodePrototypeState {
@@ -46,11 +49,14 @@ export interface NodePrototypeState {
   prototypeHistory: PrototypeVersion[]
   prototypeVariants: PrototypeVariant[]
   selectedVariantIndex: number
+  draftPrototypeSpec: PrototypeSpec | null
+  standardPrototypeSpec: PrototypeSpec | null
 }
 
 interface PrototypeVersionMeta {
   mode?: PrototypeVersion['mode']
   note?: string | null
+  prototypeSpec?: PrototypeSpec | null
 }
 
 interface NodePolishPatch {
@@ -382,6 +388,35 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
 
+function emptyProjectWorkflowState(): ProjectWorkflowState {
+  return { mode: defaultProjectWorkflow.mode, iteration: null }
+}
+
+function normalizeWorkflowStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+}
+
+function normalizeProjectWorkflow(value: unknown): ProjectWorkflowState {
+  if (!isRecord(value)) return emptyProjectWorkflowState()
+  const mode: ProjectWorkflowMode = value.mode === 'existing_project_iteration'
+    ? 'existing_project_iteration'
+    : 'new_project'
+  if (mode === 'new_project') return emptyProjectWorkflowState()
+
+  const rawIteration = isRecord(value.iteration) ? value.iteration : null
+  if (!rawIteration) return { mode, iteration: null }
+
+  const iteration: ProjectIterationContext = {
+    codebasePath: normalizeOptionalText(rawIteration.codebasePath) ?? '',
+    focus: normalizeOptionalText(rawIteration.focus) ?? '',
+    baselineScan: isRecord(rawIteration.baselineScan) ? rawIteration.baselineScan as unknown as ProjectIterationContext['baselineScan'] : null,
+    platformStrategyNotes: normalizeWorkflowStringArray(rawIteration.platformStrategyNotes),
+    acceptanceFocus: normalizeWorkflowStringArray(rawIteration.acceptanceFocus),
+  }
+  return { mode, iteration }
+}
+
 function persistedTreeHasLocalTemplates(value: unknown) {
   if (!isRecord(value)) return false
 
@@ -488,6 +523,7 @@ function makePrototypeVersion(
     createdAt: new Date().toISOString(),
     mode: meta?.mode ?? (history.length === 0 ? 'create' : 'update'),
     note: meta?.note?.trim() || null,
+    prototypeSpec: meta?.prototypeSpec ?? null,
   }
 }
 
@@ -497,11 +533,13 @@ function emptyNodePrototypeState(): NodePrototypeState {
     prototypeHistory: [],
     prototypeVariants: [],
     selectedVariantIndex: -1,
+    draftPrototypeSpec: null,
+    standardPrototypeSpec: null,
   }
 }
 
 function getNodePrototypeState(state: AppStoreState, nodeId: string): NodePrototypeState {
-  return state.nodePrototypeStates[nodeId] ?? emptyNodePrototypeState()
+  return normalizeNodePrototypeState(state.nodePrototypeStates[nodeId])
 }
 
 function setNodePrototypeState(state: AppStoreState, nodeId: string, nodeState: NodePrototypeState) {
@@ -634,9 +672,49 @@ function emptyAssetWorkbenchState(): AssetWorkbenchState {
   return {
     uiRows: [],
     effectRows: [],
+    audioRows: [],
     reusableLogicAssets: [],
     lastEffectScanRoot: null,
+    lastAudioScanRoot: null,
   }
+}
+
+function withPrototypeSpec(nodeState: NodePrototypeState, spec: PrototypeSpec | null | undefined): NodePrototypeState {
+  if (!spec) return nodeState
+  return spec.mode === 'standard'
+    ? { ...nodeState, standardPrototypeSpec: spec }
+    : { ...nodeState, draftPrototypeSpec: spec }
+}
+
+function normalizePrototypeVersion(value: PrototypeVersion): PrototypeVersion {
+  return {
+    ...value,
+    prototypeSpec: value.prototypeSpec ?? null,
+  }
+}
+
+function normalizeNodePrototypeState(value: NodePrototypeState | undefined | null): NodePrototypeState {
+  if (!value) return emptyNodePrototypeState()
+  return {
+    prototypeHtml: typeof value.prototypeHtml === 'string' ? value.prototypeHtml : null,
+    prototypeHistory: Array.isArray(value.prototypeHistory) ? value.prototypeHistory.map(normalizePrototypeVersion).slice(0, PROTOTYPE_HISTORY_LIMIT) : [],
+    prototypeVariants: Array.isArray(value.prototypeVariants)
+      ? value.prototypeVariants.map((variant) => ({ ...variant, prototypeSpec: variant.prototypeSpec ?? null }))
+      : [],
+    selectedVariantIndex: typeof value.selectedVariantIndex === 'number' ? value.selectedVariantIndex : -1,
+    draftPrototypeSpec: value.draftPrototypeSpec ?? null,
+    standardPrototypeSpec: value.standardPrototypeSpec ?? null,
+  }
+}
+
+function normalizeNodePrototypeStates(value: unknown): Record<string, NodePrototypeState> {
+  if (!value || typeof value !== 'object') return {}
+  return Object.fromEntries(
+    Object.entries(value as Record<string, NodePrototypeState>).map(([nodeId, nodeState]) => [
+      nodeId,
+      normalizeNodePrototypeState(nodeState),
+    ]),
+  )
 }
 
 function normalizeUiAssetKind(rowOrKind: unknown) {
@@ -670,6 +748,10 @@ function normalizeUiAssetParseMode(value: unknown, kind: ReturnType<typeof norma
 }
 
 function normalizeEffectLoadStatus(value: unknown) {
+  return value === 'loading' || value === 'loaded' || value === 'error' ? value : 'not_loaded'
+}
+
+function normalizeAudioLoadStatus(value: unknown) {
   return value === 'loading' || value === 'loaded' || value === 'error' ? value : 'not_loaded'
 }
 
@@ -753,8 +835,76 @@ function normalizeReusableLogicAssets(value: unknown): ReusableLogicAsset[] {
   })
 }
 
+function normalizeAudioAssetKind(value: unknown): AudioAssetRow['kind'] {
+  const text = String(value ?? '').trim().toLowerCase()
+  if (text === 'sfx' || text === 'effect' || text === 'sound_effect') return 'sfx'
+  if (text === 'music' || text === 'bgm') return 'music'
+  if (text === 'voice' || text === 'vo') return 'voice'
+  if (text === 'ambient' || text === 'ambience') return 'ambient'
+  return 'unknown'
+}
+
+function normalizeAudioAssetRow(row: Partial<AudioAssetRow> & Record<string, unknown>): AudioAssetRow {
+  const now = new Date().toISOString()
+  const files = Array.isArray(row.files)
+    ? row.files.map((file) => ({
+        ...(file as AudioAssetRow['files'][number]),
+        loadedPath: typeof (file as { loadedPath?: unknown }).loadedPath === 'string' ? (file as { loadedPath: string }).loadedPath : null,
+        previewUrl: typeof (file as { previewUrl?: unknown }).previewUrl === 'string' ? (file as { previewUrl: string }).previewUrl : null,
+      }))
+    : []
+  return {
+    id: normalizeOptionalText(row.id) ?? `audio-${now}`,
+    name: normalizeOptionalText(row.name) ?? 'Audio asset',
+    kind: normalizeAudioAssetKind(row.kind),
+    sourceRoot: normalizeOptionalText(row.sourceRoot) ?? '',
+    relativePath: normalizeOptionalText(row.relativePath) ?? '',
+    localPath: normalizeOptionalText(row.localPath) ?? normalizeOptionalText(row.sourceRoot) ?? '',
+    purpose: normalizeOptionalText(row.purpose) ?? '',
+    usageNote: normalizeOptionalText(row.usageNote) ?? '',
+    triggerHint: normalizeOptionalText(row.triggerHint) ?? normalizeOptionalText((row as { pageHint?: unknown }).pageHint) ?? '',
+    playbackHint: normalizeOptionalText(row.playbackHint) ?? normalizeOptionalText((row as { implementationHint?: unknown }).implementationHint) ?? '',
+    linkedNodeIds: Array.isArray(row.linkedNodeIds) ? row.linkedNodeIds.filter((id): id is string => typeof id === 'string') : [],
+    status: row.status === 'parsing' || row.status === 'error' || row.status === 'idle' ? row.status : 'ready',
+    loadStatus: normalizeAudioLoadStatus(row.loadStatus),
+    loadError: typeof row.loadError === 'string' ? row.loadError : null,
+    loadedRoot: typeof row.loadedRoot === 'string' ? row.loadedRoot : null,
+    loadedPath: typeof row.loadedPath === 'string' ? row.loadedPath : null,
+    loadedFileCount: typeof row.loadedFileCount === 'number' ? row.loadedFileCount : 0,
+    loadedBytes: typeof row.loadedBytes === 'number' ? row.loadedBytes : 0,
+    loadedAt: typeof row.loadedAt === 'string' ? row.loadedAt : null,
+    previewUrl: typeof row.previewUrl === 'string' ? row.previewUrl : null,
+    durationMs: typeof row.durationMs === 'number' ? row.durationMs : null,
+    fileCount: typeof row.fileCount === 'number' ? row.fileCount : files.length,
+    files,
+    createdAt: normalizeOptionalText(row.createdAt) ?? now,
+    updatedAt: normalizeOptionalText(row.updatedAt) ?? now,
+  }
+}
+
+function audioRowFromLegacyEffectRow(row: EffectAssetRow): AudioAssetRow {
+  return normalizeAudioAssetRow({
+    ...row,
+    id: row.id.replace(/^effect-/u, 'audio-'),
+    kind: 'sfx',
+    triggerHint: row.pageHint,
+    playbackHint: row.implementationHint,
+  })
+}
+
 function normalizeAssetWorkbench(value: AssetWorkbenchState | null | undefined): AssetWorkbenchState {
   if (!value || typeof value !== 'object') return emptyAssetWorkbenchState()
+  const legacyAudioRows = Array.isArray(value.effectRows)
+    ? value.effectRows
+        .filter((row) => (row as { kind?: unknown }).kind === 'audio')
+        .map((row) => audioRowFromLegacyEffectRow(row as EffectAssetRow))
+    : []
+  const audioRows = [
+    ...(Array.isArray((value as { audioRows?: unknown }).audioRows)
+      ? (value as unknown as { audioRows: Array<Partial<AudioAssetRow> & Record<string, unknown>> }).audioRows.map(normalizeAudioAssetRow)
+      : []),
+    ...legacyAudioRows,
+  ]
   return {
     uiRows: Array.isArray(value.uiRows)
       ? value.uiRows.map((row) => {
@@ -767,7 +917,7 @@ function normalizeAssetWorkbench(value: AssetWorkbenchState | null | undefined):
         })
       : [],
     effectRows: Array.isArray(value.effectRows)
-      ? value.effectRows.map((row) => ({
+      ? value.effectRows.filter((row) => (row as { kind?: unknown }).kind !== 'audio').map((row) => ({
           ...row,
           loadStatus: normalizeEffectLoadStatus((row as { loadStatus?: unknown }).loadStatus),
           loadError: typeof (row as { loadError?: unknown }).loadError === 'string' ? (row as { loadError: string }).loadError : null,
@@ -795,8 +945,10 @@ function normalizeAssetWorkbench(value: AssetWorkbenchState | null | undefined):
             : [],
         }))
       : [],
+    audioRows,
     reusableLogicAssets: normalizeReusableLogicAssets((value as { reusableLogicAssets?: unknown }).reusableLogicAssets),
     lastEffectScanRoot: typeof value.lastEffectScanRoot === 'string' ? value.lastEffectScanRoot : null,
+    lastAudioScanRoot: typeof (value as { lastAudioScanRoot?: unknown }).lastAudioScanRoot === 'string' ? (value as { lastAudioScanRoot: string }).lastAudioScanRoot : null,
   }
 }
 
@@ -841,6 +993,45 @@ function mergeEffectAssetScanRows(existingRows: EffectAssetRow[], sourceRoot: st
   ]
 }
 
+function mergeAudioAssetScanRows(existingRows: AudioAssetRow[], sourceRoot: string, scannedRows: AudioAssetRow[]) {
+  const existingById = new Map(existingRows.filter((row) => row.sourceRoot === sourceRoot).map((row) => [row.id, row]))
+  const mergedRows = scannedRows.map((row) => {
+    const existing = existingById.get(row.id)
+    if (!existing) return row
+    const loadedPathBySourcePath = new Map(existing.files.map((file) => [file.path, file.loadedPath ?? null]))
+    return {
+      ...row,
+      name: existing.name,
+      kind: existing.kind,
+      purpose: existing.purpose,
+      usageNote: existing.usageNote || row.usageNote,
+      triggerHint: existing.triggerHint || row.triggerHint,
+      playbackHint: existing.playbackHint || row.playbackHint,
+      linkedNodeIds: existing.linkedNodeIds,
+      loadStatus: existing.loadStatus,
+      loadError: existing.loadError,
+      loadedRoot: existing.loadedRoot,
+      loadedPath: existing.loadedPath,
+      loadedFileCount: existing.loadedFileCount,
+      loadedBytes: existing.loadedBytes,
+      loadedAt: existing.loadedAt,
+      previewUrl: existing.previewUrl,
+      durationMs: existing.durationMs,
+      files: row.files.map((file) => ({
+        ...file,
+        loadedPath: loadedPathBySourcePath.get(file.path) ?? null,
+        previewUrl: existing.files.find((existingFile) => existingFile.path === file.path)?.previewUrl ?? null,
+      })),
+      createdAt: existing.createdAt,
+      updatedAt: row.updatedAt,
+    }
+  })
+  return [
+    ...mergedRows,
+    ...existingRows.filter((row) => row.sourceRoot !== sourceRoot),
+  ]
+}
+
 export interface AppStoreState {
   requirement: UXRequirementState
   messages: ChatMessage[]
@@ -863,10 +1054,13 @@ export interface AppStoreState {
   pendingMapAdjustmentOperations: MapAdjustmentOperation[]
   assetWorkbench: AssetWorkbenchState
   sourceDocument: ProjectSourceDocument | null
+  projectWorkflow: ProjectWorkflowState
   currentArchivePath: string | null
   lastSavedAt: string | null
   archiveDirty: boolean
   setSourceDocument: (sourceDocument: ProjectSourceDocument | null) => void
+  setProjectWorkflowMode: (mode: ProjectWorkflowMode) => void
+  setProjectIterationContext: (context: ProjectIterationContext | null) => void
   loadArchiveSnapshot: (snapshot: ProjectWorkspaceSnapshot, archivePath: string | null, savedAt?: string | null) => void
   markArchiveSaved: (archivePath: string | null, savedAt?: string) => void
   markArchiveDirty: () => void
@@ -904,6 +1098,9 @@ export interface AppStoreState {
   replaceEffectAssetRows: (sourceRoot: string, rows: EffectAssetRow[]) => void
   updateEffectAssetRow: (rowId: string, patch: Partial<EffectAssetRow>) => void
   removeEffectAssetRow: (rowId: string) => void
+  replaceAudioAssetRows: (sourceRoot: string, rows: AudioAssetRow[]) => void
+  updateAudioAssetRow: (rowId: string, patch: Partial<AudioAssetRow>) => void
+  removeAudioAssetRow: (rowId: string) => void
   upsertReusableLogicAssets: (assets: ReusableLogicAsset[]) => void
   updateReusableLogicAsset: (assetId: string, patch: Partial<ReusableLogicAsset>) => void
   approveReusableLogicAsset: (assetId: string) => void
@@ -929,6 +1126,7 @@ export interface AppStoreState {
   recordNodePrototypeHistory: (nodeId: string, html: string, meta?: PrototypeVersionMeta) => void
   restoreNodePrototypeVersion: (nodeId: string, id: string) => void
   clearNodePrototypeHistory: (nodeId: string) => void
+  setNodePrototypeSpec: (nodeId: string, mode: PrototypeSpecMode, spec: PrototypeSpec | null) => void
   setNodePrototypeVariants: (nodeId: string, variants: PrototypeVariant[]) => void
   updateNodePrototypeVariant: (nodeId: string, index: number, patch: Partial<PrototypeVariant>) => void
   selectNodePrototypeVariant: (nodeId: string, index: number) => void
@@ -969,10 +1167,34 @@ export const useAppStore = create<AppStoreState>()(
       pendingMapAdjustmentOperations: [],
       assetWorkbench: emptyAssetWorkbench,
       sourceDocument: null,
+      projectWorkflow: emptyProjectWorkflowState(),
       currentArchivePath: null,
       lastSavedAt: null,
       archiveDirty: false,
       setSourceDocument: (sourceDocument) => set({ sourceDocument, archiveDirty: true }),
+      setProjectWorkflowMode: (mode) =>
+        set((state) => ({
+          projectWorkflow: mode === 'new_project'
+            ? emptyProjectWorkflowState()
+            : {
+                mode,
+                iteration: state.projectWorkflow.iteration ?? {
+                  codebasePath: '',
+                  focus: '',
+                  baselineScan: null,
+                  platformStrategyNotes: [],
+                  acceptanceFocus: [],
+                },
+              },
+          archiveDirty: true,
+        })),
+      setProjectIterationContext: (context) =>
+        set({
+          projectWorkflow: context
+            ? { mode: 'existing_project_iteration', iteration: context }
+            : emptyProjectWorkflowState(),
+          archiveDirty: true,
+        }),
       loadArchiveSnapshot: (snapshot, currentArchivePath, savedAt) =>
         set(() => {
           const prdTree = normalizePersistedPrdTree(snapshot.prdTree, snapshot.nodePolishRevisions)
@@ -987,7 +1209,7 @@ export const useAppStore = create<AppStoreState>()(
             prototypeHistory: Array.isArray(snapshot.prototypeHistory) ? snapshot.prototypeHistory.slice(0, PROTOTYPE_HISTORY_LIMIT) : [],
             prototypeVariants: Array.isArray(snapshot.prototypeVariants) ? snapshot.prototypeVariants : [],
             selectedVariantIndex: typeof snapshot.selectedVariantIndex === 'number' ? snapshot.selectedVariantIndex : -1,
-            nodePrototypeStates: snapshot.nodePrototypeStates ?? {},
+            nodePrototypeStates: normalizeNodePrototypeStates(snapshot.nodePrototypeStates),
             settings: snapshot.settings ?? defaultSettings,
             prdTree,
             selectedNodeId,
@@ -1001,6 +1223,7 @@ export const useAppStore = create<AppStoreState>()(
             pendingMapAdjustmentOperations: snapshot.pendingMapAdjustmentOperations ?? [],
             assetWorkbench: normalizeAssetWorkbench(snapshot.assetWorkbench),
             sourceDocument: snapshot.sourceDocument ?? null,
+            projectWorkflow: normalizeProjectWorkflow(snapshot.projectWorkflow),
             currentArchivePath,
             lastSavedAt: savedAt ?? new Date().toISOString(),
             archiveDirty: false,
@@ -1030,6 +1253,7 @@ export const useAppStore = create<AppStoreState>()(
           pendingMapAdjustmentOperations: [],
           assetWorkbench: emptyAssetWorkbenchState(),
           sourceDocument: null,
+          projectWorkflow: emptyProjectWorkflowState(),
           currentArchivePath: null,
           lastSavedAt: null,
           archiveDirty: false,
@@ -1539,6 +1763,33 @@ export const useAppStore = create<AppStoreState>()(
           },
           archiveDirty: true,
         })),
+      replaceAudioAssetRows: (sourceRoot, rows) =>
+        set((state) => ({
+          assetWorkbench: {
+            ...state.assetWorkbench,
+            audioRows: mergeAudioAssetScanRows(state.assetWorkbench.audioRows, sourceRoot, rows),
+            lastAudioScanRoot: sourceRoot,
+          },
+          archiveDirty: true,
+        })),
+      updateAudioAssetRow: (rowId, patch) =>
+        set((state) => ({
+          assetWorkbench: {
+            ...state.assetWorkbench,
+            audioRows: state.assetWorkbench.audioRows.map((row) =>
+              row.id === rowId ? { ...row, ...patch, updatedAt: new Date().toISOString() } : row,
+            ),
+          },
+          archiveDirty: true,
+        })),
+      removeAudioAssetRow: (rowId) =>
+        set((state) => ({
+          assetWorkbench: {
+            ...state.assetWorkbench,
+            audioRows: state.assetWorkbench.audioRows.filter((row) => row.id !== rowId),
+          },
+          archiveDirty: true,
+        })),
       upsertReusableLogicAssets: (assets) =>
         set((state) => {
           const normalizedAssets = normalizeReusableLogicAssets(assets)
@@ -1774,9 +2025,13 @@ export const useAppStore = create<AppStoreState>()(
           if (!prototypeHtml) {
             return {
               ...setNodePrototypeState(state, nodeId, {
-              ...current,
-              prototypeHtml: null,
-              prototypeHistory: [],
+                ...current,
+                prototypeHtml: null,
+                prototypeHistory: [],
+                prototypeVariants: [],
+                selectedVariantIndex: -1,
+                draftPrototypeSpec: null,
+                standardPrototypeSpec: null,
               }),
               archiveDirty: true,
             }
@@ -1784,9 +2039,9 @@ export const useAppStore = create<AppStoreState>()(
           const version = makePrototypeVersion(prototypeHtml, current.prototypeHistory, meta)
           return {
             ...setNodePrototypeState(state, nodeId, {
-            ...current,
-            prototypeHtml,
-            prototypeHistory: [version, ...current.prototypeHistory].slice(0, PROTOTYPE_HISTORY_LIMIT),
+              ...withPrototypeSpec(current, meta?.prototypeSpec),
+              prototypeHtml,
+              prototypeHistory: [version, ...current.prototypeHistory].slice(0, PROTOTYPE_HISTORY_LIMIT),
             }),
             archiveDirty: true,
           }
@@ -1797,8 +2052,8 @@ export const useAppStore = create<AppStoreState>()(
           const version = makePrototypeVersion(html, current.prototypeHistory, meta)
           return {
             ...setNodePrototypeState(state, nodeId, {
-            ...current,
-            prototypeHistory: [version, ...current.prototypeHistory].slice(0, PROTOTYPE_HISTORY_LIMIT),
+              ...withPrototypeSpec(current, meta?.prototypeSpec),
+              prototypeHistory: [version, ...current.prototypeHistory].slice(0, PROTOTYPE_HISTORY_LIMIT),
             }),
             archiveDirty: true,
           }
@@ -1808,7 +2063,7 @@ export const useAppStore = create<AppStoreState>()(
           const current = getNodePrototypeState(state, nodeId)
           const version = current.prototypeHistory.find((item) => item.id === id)
           if (!version) return state
-          return { ...setNodePrototypeState(state, nodeId, { ...current, prototypeHtml: version.html }), archiveDirty: true }
+          return { ...setNodePrototypeState(state, nodeId, withPrototypeSpec({ ...current, prototypeHtml: version.html }, version.prototypeSpec)), archiveDirty: true }
         }),
       clearNodePrototypeHistory: (nodeId) =>
         set((state) => {
@@ -1820,6 +2075,20 @@ export const useAppStore = create<AppStoreState>()(
               prototypeHistory: [],
               prototypeVariants: [],
               selectedVariantIndex: -1,
+              draftPrototypeSpec: null,
+              standardPrototypeSpec: null,
+            }),
+            archiveDirty: true,
+          }
+        }),
+      setNodePrototypeSpec: (nodeId, mode, spec) =>
+        set((state) => {
+          const current = getNodePrototypeState(state, nodeId)
+          return {
+            ...setNodePrototypeState(state, nodeId, {
+              ...current,
+              draftPrototypeSpec: mode === 'draft' ? spec : current.draftPrototypeSpec,
+              standardPrototypeSpec: mode === 'standard' ? spec : current.standardPrototypeSpec,
             }),
             archiveDirty: true,
           }
@@ -1827,17 +2096,24 @@ export const useAppStore = create<AppStoreState>()(
       setNodePrototypeVariants: (nodeId, variants) =>
         set((state) => {
           const current = getNodePrototypeState(state, nodeId)
-          return { ...setNodePrototypeState(state, nodeId, { ...current, prototypeVariants: variants, selectedVariantIndex: -1 }), archiveDirty: true }
+          return {
+            ...setNodePrototypeState(state, nodeId, {
+              ...current,
+              prototypeVariants: variants.map((variant) => ({ ...variant, prototypeSpec: variant.prototypeSpec ?? null })),
+              selectedVariantIndex: -1,
+            }),
+            archiveDirty: true,
+          }
         }),
       updateNodePrototypeVariant: (nodeId, index, patch) =>
         set((state) => {
           const current = getNodePrototypeState(state, nodeId)
           return {
             ...setNodePrototypeState(state, nodeId, {
-            ...current,
-            prototypeVariants: current.prototypeVariants.map((variant) =>
-              variant.index === index ? { ...variant, ...patch } : variant,
-            ),
+              ...withPrototypeSpec(current, patch.prototypeSpec),
+              prototypeVariants: current.prototypeVariants.map((variant) =>
+                variant.index === index ? { ...variant, ...patch, prototypeSpec: patch.prototypeSpec ?? variant.prototypeSpec ?? null } : variant,
+              ),
             }),
             archiveDirty: true,
           }
@@ -1849,9 +2125,9 @@ export const useAppStore = create<AppStoreState>()(
           if (!variant) return state
           return {
             ...setNodePrototypeState(state, nodeId, {
-            ...current,
-            selectedVariantIndex: index,
-            prototypeHtml: variant.html ?? current.prototypeHtml,
+              ...withPrototypeSpec(current, variant.prototypeSpec),
+              selectedVariantIndex: index,
+              prototypeHtml: variant.html ?? current.prototypeHtml,
             }),
             archiveDirty: true,
           }
@@ -1898,7 +2174,7 @@ export const useAppStore = create<AppStoreState>()(
       name: STORAGE_KEY,
       version: STORAGE_VERSION,
       migrate: (persistedState: unknown, version: number): unknown => {
-        if (version >= 3 && version <= 14) {
+        if (version >= 3 && version <= 16) {
           const previous = persistedState as {
             requirement?: unknown
             messages?: unknown
@@ -1919,6 +2195,7 @@ export const useAppStore = create<AppStoreState>()(
             pendingMapAdjustmentOperations?: unknown
             assetWorkbench?: unknown
             sourceDocument?: unknown
+            projectWorkflow?: unknown
             currentArchivePath?: unknown
             lastSavedAt?: unknown
             archiveDirty?: unknown
@@ -1937,13 +2214,14 @@ export const useAppStore = create<AppStoreState>()(
             selectedVariantIndex: typeof previous.selectedVariantIndex === 'number' ? previous.selectedVariantIndex : -1,
             nodeChats: prdTree && previous.nodeChats && typeof previous.nodeChats === 'object' ? previous.nodeChats : {},
             nodePolishRevisions: prdTree && previous.nodePolishRevisions && typeof previous.nodePolishRevisions === 'object' ? previous.nodePolishRevisions : {},
-            nodePrototypeStates: prdTree && previous.nodePrototypeStates && typeof previous.nodePrototypeStates === 'object' ? previous.nodePrototypeStates : {},
+            nodePrototypeStates: prdTree && previous.nodePrototypeStates && typeof previous.nodePrototypeStates === 'object' ? normalizeNodePrototypeStates(previous.nodePrototypeStates) : {},
             nodeOperationSuggestions: prdTree && previous.nodeOperationSuggestions && typeof previous.nodeOperationSuggestions === 'object' ? previous.nodeOperationSuggestions : {},
             qaIssues: prdTree && previous.qaIssues && typeof previous.qaIssues === 'object' ? previous.qaIssues : {},
             mapAdjustmentMessages: Array.isArray(previous.mapAdjustmentMessages) ? previous.mapAdjustmentMessages : initialMapAdjustmentMessages,
             pendingMapAdjustmentOperations: Array.isArray(previous.pendingMapAdjustmentOperations) ? previous.pendingMapAdjustmentOperations : [],
             assetWorkbench: normalizeAssetWorkbench(previous.assetWorkbench as AssetWorkbenchState | undefined),
             sourceDocument: previous.sourceDocument && typeof previous.sourceDocument === 'object' ? previous.sourceDocument : null,
+            projectWorkflow: normalizeProjectWorkflow(previous.projectWorkflow),
             currentArchivePath: typeof previous.currentArchivePath === 'string' ? previous.currentArchivePath : null,
             lastSavedAt: typeof previous.lastSavedAt === 'string' ? previous.lastSavedAt : null,
             archiveDirty: typeof previous.archiveDirty === 'boolean' ? previous.archiveDirty : false,
@@ -1970,6 +2248,7 @@ export const useAppStore = create<AppStoreState>()(
           pendingMapAdjustmentOperations: [],
           assetWorkbench: emptyAssetWorkbenchState(),
           sourceDocument: null,
+          projectWorkflow: emptyProjectWorkflowState(),
           currentArchivePath: null,
           lastSavedAt: null,
           archiveDirty: false,
@@ -1995,6 +2274,7 @@ export const useAppStore = create<AppStoreState>()(
         pendingMapAdjustmentOperations: state.pendingMapAdjustmentOperations,
         assetWorkbench: state.assetWorkbench,
         sourceDocument: state.sourceDocument,
+        projectWorkflow: state.projectWorkflow,
         currentArchivePath: state.currentArchivePath,
         lastSavedAt: state.lastSavedAt,
         archiveDirty: state.archiveDirty,

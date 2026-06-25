@@ -1,5 +1,6 @@
 import { useAppStore } from './appStore'
 import type { PrdTree } from '../types/prdNode'
+import type { PrototypeSpec } from '../types/prototypeSpec'
 
 const originalWarn = console.warn
 console.warn = (...args: unknown[]) => {
@@ -120,6 +121,37 @@ assertEqual(node?.sections?.interaction?.summary, 'new flow summary', 'partial u
 assertEqual(node?.sections?.interaction?.content, 'old flow content', 'partial update sections must preserve missing target content')
 assertDeepEqual(node?.sections?.interaction?.openQuestions, [], 'substantive section patch may clear resolved questions')
 assertEqual(node?.sections?.data?.summary, 'old data summary', 'partial update sections must keep untouched data')
+
+const prototypeSpec: PrototypeSpec = {
+  schemaVersion: 'prototype-spec.v1',
+  id: 'draft:page-a:test',
+  mode: 'draft',
+  title: 'Page A 草稿原型 Spec',
+  sourceNodeId: 'page-a',
+  sourceNodeLabel: 'Page A',
+  sourceSummary: 'old summary',
+  sourceInputs: [],
+  htmlRole: 'preview',
+  intent: 'test',
+  layout: { viewport: '375x812', structure: [], visualReferences: [] },
+  components: [],
+  states: [],
+  interactions: [],
+  performanceLogic: [],
+  assetPolicy: { mode: 'open', allowedAssetRefs: [], forbidden: [], notes: [] },
+  dataBindings: [],
+  platformConstraints: [],
+  acceptanceCriteria: [],
+  openQuestions: [],
+  updatedAt: '2026-06-22T00:00:00.000Z',
+}
+
+useAppStore.getState().setNodePrototypeSpec('page-a', 'draft', prototypeSpec)
+assertEqual(
+  useAppStore.getState().nodePrototypeStates['page-a']?.draftPrototypeSpec?.id,
+  prototypeSpec.id,
+  'node prototype state should store draft prototype spec',
+)
 
 console.warn = originalWarn
 console.log('appStore.test.ts: all assertions passed')

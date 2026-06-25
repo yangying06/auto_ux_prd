@@ -10,6 +10,7 @@ import { applyPerformanceAnswerFast, formatPerformanceSpecForPrompt, formatPerfo
 import { defaultAudienceForSpecLens, formatSectionTitle, formatSpecLens, hasNodeSections, normalizeLegacyAudience, normalizeNodeLensFields, normalizeSectionKeyForLens, normalizeSpecLensValue, resolveNodeAudience, resolveNodeSpecLens, specLensFromLegacyAudience } from '../src/lib/prdNodeLens'
 import { buildDeliverySections, collectBackendContracts, collectDeliveryEvidence, collectDeliveryNodes } from '../src/lib/prdNodeDelivery'
 import { buildUiOnlyPrototypeInstruction, isUiOnlyPrototypeFeedback } from '../src/lib/nodeChatIntent'
+import { formatPrototypeSpecForPrompt } from '../src/lib/prototypeSpec'
 import { applyPrototypeEdit, normalizeGeneratedPrototypeHtml, normalizePrototypeHtml } from '../src/lib/prototypeUtils'
 import type { UXRequirementState } from '../src/types/uxRequirement'
 import type { ProjectSourceDocument } from '../src/types/archive'
@@ -24,7 +25,9 @@ import { auditPrototypeAssets, buildPrototypeAssetManifestSection, normalizeProt
 import { buildVariantConfigs, clampVariantCount, DEFAULT_CREATE_VARIANTS, DEFAULT_UPDATE_VARIANTS } from './prototypePrompts'
 import { normalizeAiProviderError } from './aiProviderError'
 import { formatProjectKnowledgeEvidence, searchProjectKnowledge } from './projectKnowledgeIndex'
+import { scanProjectBaseline } from './projectBaselineScan'
 import type { FigmaNumericTextSlot } from './figmaNumericText'
+import type { ProjectWorkflowState } from '../src/types/projectWorkflow'
 
 dotenv.config()
 dotenv.config({ path: 'server/.env' })
@@ -52,6 +55,7 @@ const ASSET_WORKBENCH_CACHE_ROOT = path.resolve(process.cwd(), '.cache')
 const FIGMA_ASSET_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'figma-assets')
 const FIGMA_INTERMEDIATE_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'figma-intermediates')
 const EFFECT_ASSET_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'effect-assets')
+const AUDIO_ASSET_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'audio-assets')
 const SPINE_PLAYER_RUNTIME_ROOT = path.resolve(process.cwd(), 'node_modules', '@esotericsoftware', 'spine-player', 'dist')
 const SPINE_PLAYER_JS_URL = '/api/runtime/spine-player/iife/spine-player.min.js'
 const SPINE_PLAYER_CSS_URL = '/api/runtime/spine-player/spine-player.css'
@@ -109,8 +113,10 @@ interface DecompositionSession {
   status: 'running' | 'done' | 'error'
   nodes: PrdNode[]
   currentStep: string
+  projectWorkflow?: ProjectWorkflowState | null
   error?: string
   branchErrors?: string[]
+  usedLocalPageFallback?: boolean
   cleanupTimer?: NodeJS.Timeout
 }
 
@@ -259,6 +265,7 @@ type UiAssetKind = 'interface' | 'image_set'
 type UiAssetParseMode = 'intermediate' | 'image_set'
 type EffectAssetKind = 'spine' | 'particle' | 'sequence' | 'prefab' | 'audio' | 'texture' | 'scripted' | 'unknown'
 type EffectAssetPreviewType = 'image' | 'sequence' | 'video' | 'audio' | 'spine'
+type AudioAssetKind = 'sfx' | 'music' | 'voice' | 'ambient' | 'unknown'
 
 interface UiAssetFigmaParseRequest extends FigmaFrameRequest {
   kind?: UiAssetKind
@@ -397,6 +404,54 @@ interface EffectAssetScanRequest {
 }
 
 interface EffectAssetScanOptions {
+  smartNotes?: boolean
+  contextHints?: string[]
+}
+
+interface AudioAssetFile {
+  name: string
+  path: string
+  ext: string
+  size: number
+  loadedPath?: string | null
+  previewUrl?: string | null
+}
+
+interface AudioAssetRow {
+  id: string
+  name: string
+  kind: AudioAssetKind
+  sourceRoot: string
+  relativePath: string
+  localPath: string
+  purpose: string
+  usageNote: string
+  triggerHint: string
+  playbackHint: string
+  linkedNodeIds: string[]
+  status: 'ready'
+  loadStatus: 'not_loaded' | 'loading' | 'loaded' | 'error'
+  loadError: string | null
+  loadedRoot: string | null
+  loadedPath: string | null
+  loadedFileCount: number
+  loadedBytes: number
+  loadedAt: string | null
+  previewUrl: string | null
+  durationMs?: number | null
+  fileCount: number
+  files: AudioAssetFile[]
+  createdAt: string
+  updatedAt: string
+}
+
+interface AudioAssetScanRequest {
+  rootPath?: unknown
+  smartNotes?: unknown
+  contextHints?: unknown
+}
+
+interface AudioAssetScanOptions {
   smartNotes?: boolean
   contextHints?: string[]
 }
@@ -1844,6 +1899,64 @@ function mergeTextValues(...values: Array<string | null | undefined>) {
   return values.find((value) => value?.trim())?.trim() ?? null
 }
 
+function decompositionErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function isDecompositionTimeoutMessage(message: string) {
+  return message.includes('秒仍未返回')
+}
+
+function appendDecompositionWarning(session: DecompositionSession, warning: string) {
+  session.branchErrors = [...(session.branchErrors ?? []), warning]
+  session.error = `部分自动拆解未完成，但已保留可用导图：${session.branchErrors.join('；')}`
+}
+
+function buildFallbackPageNodesFromCandidates(candidates: PrdImportCandidateNode[], fallbackReason: string) {
+  return attachPagesToSourceRoot(candidates.slice(0, 8).map((candidate, order): PrdNode => {
+    const label = compactMarkdownTitle(candidate.title).slice(0, 40) || `页面线索 ${order + 1}`
+    const sourceLabel = candidate.sourceLabel || `候选线索 ${order + 1}`
+    const excerpt = candidate.excerpt.trim() || '本地索引未截取到可展示摘录，请回到原文位置确认。'
+    const reason = candidate.reason || '导入预览命中页面/交互线索'
+    const evidenceRef: PrdNodeEvidenceRef = {
+      sourceKind: 'prd',
+      sourceLabel,
+      quote: excerpt.slice(0, 180),
+    }
+
+    return {
+      id: `PAGE-FALLBACK-${String(order + 1).padStart(2, '0')}-${idSegmentFromTitle(label, String(order + 1))}`,
+      parentId: null,
+      label,
+      summary: `${fallbackReason}。系统先保留该页面候选，原因：${reason}。`,
+      content: `## 原文位置\n${sourceLabel}\n\n## 关键原文摘录\n${excerpt.slice(0, 800)}\n\n## 整理说明\nAI 未能在超时时间内完成这一轮 PRD 通读，系统先根据导入预览中的页面线索保留该节点，避免整份 PRD 解析中断。该节点仍需后续打磨确认页面边界、交互流程和验收点。\n\n## 需澄清点\n- 请确认该线索是否应作为独立界面节点。\n- 请在节点打磨时补全具体交互、状态、资源和验收规则。`,
+      type: 'page',
+      status: 'pending_refine',
+      level: 1,
+      order,
+      needsPolish: true,
+      extractedFrom: sourceLabel,
+      techNotes: `本地候选兜底：${reason}；候选置信度 ${candidate.confidence}%。`,
+      children: [],
+      docPath: null,
+      audience: 'client',
+      specLens: 'full',
+      sections: {},
+      handoffGoal: '在 AI 通读超时后先保留可定位的页面线索，供设计师继续节点级打磨。',
+      qualityGate: '必须经过人工或后续 AI 节点打磨确认后，才能作为最终交互 spec 交付。',
+      backendContracts: [],
+      references: [],
+      sourceKind: 'prd',
+      evidenceRefs: [evidenceRef],
+    }
+  }))
+}
+
+function buildLocalFallbackPageNodes(mdText: string, fallbackReason: string) {
+  const preview = buildPrdImportPreview(mdText)
+  return buildFallbackPageNodesFromCandidates(preview.candidateNodes, fallbackReason)
+}
+
 function mergeLargePrdCandidates(candidates: PrdNode[]) {
   const merged = new Map<string, PrdNode>()
 
@@ -1893,34 +2006,56 @@ function mergeLargePrdCandidates(candidates: PrdNode[]) {
 async function decomposeLargeL1(mdText: string, session: DecompositionSession, claude: Anthropic) {
   const slices = buildPrdSourceSlices(mdText)
   const candidates: PrdNode[] = []
+  const projectWorkflowContext = formatProjectWorkflowForDecomposition(session.projectWorkflow)
+  let consecutiveFailures = 0
 
   for (const [index, slice] of slices.entries()) {
-    const response = await withDecompositionProgress(session, '正在通读原文并建立结构', () =>
-      claude.messages.create({
-        model,
-        max_tokens: 2200,
-        system: decompositionL1SystemPrompt,
-        tools: [decomposePrdTopLevelTool],
-        tool_choice: { type: 'tool', name: 'decompose_prd' },
-        messages: [
-          {
-            role: 'user',
-            content: `请从下面这段 PRD 原文中识别页面/界面/弹窗级候选节点。本段只是原文的一部分，只输出本段有明确依据的候选；不要补全没出现的信息，不要输出按钮、字段、奖励条目等内部细节节点。每个节点正文必须很短，只写覆盖范围、关键依据、职责边界和需澄清点。所有展示给用户的文字必须是中文；ID、路径、字段名、枚举值可以保留英文。\n\n原文位置：${slice.label}\n原文阅读进度：${index + 1}/${slices.length}\n\nPRD 原文：\n${slice.text}`,
-          },
-        ],
-      })
-    )
+    try {
+      const response = await withDecompositionProgress(session, '正在通读原文并建立结构', () =>
+        claude.messages.create({
+          model,
+          max_tokens: 2200,
+          system: decompositionL1SystemPrompt,
+          tools: [decomposePrdTopLevelTool],
+          tool_choice: { type: 'tool', name: 'decompose_prd' },
+          messages: [
+            {
+              role: 'user',
+              content: `${projectWorkflowContext}\n\n请从下面这段 PRD 原文中识别页面/界面/弹窗级候选节点。本段只是原文的一部分，只输出本段有明确依据的候选；不要补全没出现的信息，不要输出按钮、字段、奖励条目等内部细节节点。每个节点正文必须很短，只写覆盖范围、关键依据、职责边界和需澄清点。所有展示给用户的文字必须是中文；ID、路径、字段名、枚举值可以保留英文。\n\n原文位置：${slice.label}\n原文阅读进度：${index + 1}/${slices.length}\n\nPRD 原文：\n${slice.text}`,
+            },
+          ],
+        })
+      )
 
-    const toolUse = response.content.find(
-      (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === 'decompose_prd'
-    )
-    if (!toolUse) continue
+      const toolUse = response.content.find(
+        (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === 'decompose_prd'
+      )
+      if (!toolUse) continue
 
-    const raw = (toolUse.input as { nodes?: unknown }).nodes ?? toolUse.input
-    candidates.push(...normalizeDecompositionNodes(raw).map((node) => ({
-      ...node,
-      extractedFrom: node.extractedFrom ?? slice.label,
-    })))
+      const raw = (toolUse.input as { nodes?: unknown }).nodes ?? toolUse.input
+      candidates.push(...normalizeDecompositionNodes(raw).map((node) => ({
+        ...node,
+        extractedFrom: node.extractedFrom ?? slice.label,
+      })))
+      consecutiveFailures = 0
+    } catch (err) {
+      const message = decompositionErrorMessage(err)
+      consecutiveFailures += 1
+      appendDecompositionWarning(session, `原文切片 ${index + 1}/${slices.length}（${slice.label}）AI 通读失败：${message}`)
+      if (isDecompositionTimeoutMessage(message) || consecutiveFailures >= 2) {
+        appendDecompositionWarning(session, '已停止继续通读剩余切片，改用已获得线索或本地页面候选兜底。')
+        break
+      }
+    }
+  }
+
+  if (candidates.length === 0) {
+    const fallbackNodes = buildLocalFallbackPageNodes(mdText, 'AI 分片通读未返回页面节点')
+    if (fallbackNodes.length > 0) {
+      session.usedLocalPageFallback = true
+      appendDecompositionWarning(session, `大 PRD 分片通读未返回可用页面节点，已根据导入预览保留 ${fallbackNodes.length} 个候选节点。`)
+      return fallbackNodes
+    }
   }
 
   return withDecompositionProgress(session, '正在归并页面线索', async () => mergeLargePrdCandidates(candidates))
@@ -1989,8 +2124,7 @@ function mergeSessionNodes(session: DecompositionSession, nodes: PrdNode[]) {
 
 function appendBranchErrorNote(session: DecompositionSession, pageNode: PrdNode, errorMessage: string) {
   const warning = `「${pageNode.label}」MVC 子节点展开失败：${errorMessage}`
-  session.branchErrors = [...(session.branchErrors ?? []), warning]
-  session.error = `部分 MVC 子节点展开失败，但已保留可用导图：${session.branchErrors.join('；')}`
+  appendDecompositionWarning(session, warning)
 
   const pageWarning = `\n\n## 自动拆解提示\n${warning}\n已保留页面级节点，可稍后在导图中手动补充或重新打磨该分支。`
   mergeSessionNodes(session, [{
@@ -2109,11 +2243,50 @@ docPath 使用 pages/<page-slug>/model.md、pages/<page-slug>/ctrl.md 或 pages/
 所有 label、summary、content、techNotes、handoffGoal、qualityGate 和 content 内部 Markdown 标题必须使用中文；model、ctrl、view、ID、docPath、字段名、枚举值可以保留英文。`
 }
 
+function formatProjectWorkflowForDecomposition(projectWorkflow?: ProjectWorkflowState | null) {
+  if (!projectWorkflow || projectWorkflow.mode !== 'existing_project_iteration') {
+    return [
+      '当前工作模式：新项目打磨。',
+      '拆解目标：从 PRD 中生成界面节点导图，再逐个界面节点打磨交互 spec。',
+    ].join('\n')
+  }
+
+  const iteration = projectWorkflow.iteration
+  const scan = iteration?.baselineScan
+  const platforms = scan?.platforms.map((platform) =>
+    `- ${platform.platform} (${platform.confidence}%): ${platform.strategy} Signals: ${platform.signals.join(', ')}`
+  ).join('\n') || '- unknown: wait for user confirmation before deep platform assumptions.'
+  const evidence = scan?.evidence.slice(0, 12).map((item) => [
+    `- [${item.platform}/${item.kind}] ${item.relativePath}${item.lineStart ? `:${item.lineStart}` : ''}`,
+    `  reason: ${item.reason}`,
+    item.snippet ? `  snippet: ${item.snippet.slice(0, 500).replace(/\s+/g, ' ')}` : null,
+  ].filter(Boolean).join('\n')).join('\n') || '- No targeted code evidence yet.'
+  const warnings = scan?.warnings.length ? scan.warnings.map((warning) => `- ${warning}`).join('\n') : '- None'
+
+  return [
+    '当前工作模式：已有项目迭代。',
+    '硬性原则：思维导图主干仍然只能是界面/页面/弹窗/面板节点；代码、资源、路径、组件、Prefab、Scene、Activity、ViewController 只能作为该界面节点下的证据和影响说明，不能成为主导图节点。',
+    '拆解目标：根据本次迭代 PRD 只定位受影响的界面节点，不要全项目总结，不要为未受影响界面生成节点。',
+    '代码解读策略：先用 PRD/focus 召回相关文件，再深读局部证据；禁止假装已经通读整个项目。',
+    '每个受影响界面节点 content 必须包含：当前现状证据、本次变更目标、交互影响、资源/文案/数据影响、代码证据、待确认问题、迭代验收点。',
+    iteration?.focus ? `本次迭代焦点：${iteration.focus}` : null,
+    iteration?.codebasePath ? `代码库路径：${iteration.codebasePath}` : null,
+    scan ? `定向扫描摘要：${scan.summary}` : null,
+    '平台识别与适配策略：',
+    platforms,
+    'PRD 相关代码证据（只能挂到界面节点下）：',
+    evidence,
+    '扫描限制/风险：',
+    warnings,
+  ].filter(Boolean).join('\n')
+}
+
 async function decomposeL1(mdText: string, session: DecompositionSession): Promise<PrdNode[]> {
   if (!anthropic) throw new Error('Anthropic 客户端未初始化，请检查 ANTHROPIC_API_KEY')
   const claude = anthropic
   if (mdText.length >= LARGE_PRD_DECOMPOSE_THRESHOLD) return decomposeLargeL1(mdText, session, claude)
   const sourceOutline = buildSourceOutlineForPrompt(mdText)
+  const projectWorkflowContext = formatProjectWorkflowForDecomposition(session.projectWorkflow)
 
   async function requestTopLevel(label: string, retry: boolean) {
     const retryInstruction = retry
@@ -2130,7 +2303,7 @@ async function decomposeL1(mdText: string, session: DecompositionSession): Promi
         messages: [
           {
             role: 'user',
-            content: `${retryInstruction} 本次只输出页面/界面/弹窗级节点，type 必须为 page，status 必须为 pending_refine，needsPolish 必须为 true。不要输出按钮、字段、奖励条目等内部细节节点；这些内容应写入所属页面的 content。拆分目标是后续以单个页面为单位逐个打磨。所有展示给用户的文字必须是中文，包括节点标题、摘要、正文、接力目标、质量门槛；只有 ID、路径、字段名、枚举值可以保留英文。跨页面关系写入 references，不要重复复制全文。\n\n原文标题参考（只作为定位线索，不是输出模板）：\n${sourceOutline}\n\n完整 PRD 原文：\n${mdText}`,
+            content: `${projectWorkflowContext}\n\n${retryInstruction} 本次只输出页面/界面/弹窗级节点，type 必须为 page，status 必须为 pending_refine，needsPolish 必须为 true。不要输出按钮、字段、奖励条目等内部细节节点；这些内容应写入所属页面的 content。拆分目标是后续以单个页面为单位逐个打磨。所有展示给用户的文字必须是中文，包括节点标题、摘要、正文、接力目标、质量门槛；只有 ID、路径、字段名、枚举值可以保留英文。跨页面关系写入 references，不要重复复制全文。\n\n原文标题参考（只作为定位线索，不是输出模板）：\n${sourceOutline}\n\n完整 PRD 原文：\n${mdText}`,
           },
         ],
       })
@@ -2148,15 +2321,42 @@ async function decomposeL1(mdText: string, session: DecompositionSession): Promi
     }
   }
 
-  const first = await requestTopLevel('正在通读原文并建立结构', false)
+  function fallbackFromTopLevelFailure(message: string) {
+    const fallbackNodes = buildLocalFallbackPageNodes(mdText, `AI 通读原文失败：${message}`)
+    if (fallbackNodes.length > 0) {
+      session.usedLocalPageFallback = true
+      appendDecompositionWarning(session, `AI 通读原文失败，已根据导入预览保留 ${fallbackNodes.length} 个候选节点：${message}`)
+    }
+    return fallbackNodes
+  }
+
+  let first: Awaited<ReturnType<typeof requestTopLevel>>
+  try {
+    first = await requestTopLevel('正在通读原文并建立结构', false)
+  } catch (err) {
+    const fallbackNodes = fallbackFromTopLevelFailure(decompositionErrorMessage(err))
+    if (fallbackNodes.length > 0) return fallbackNodes
+    throw err
+  }
   if (first.nodes.length > 0) return attachPagesToSourceRoot(first.nodes)
   if (first.stopReason === 'max_tokens') {
     throw new Error('AI 生成导图节点时输出过长并被截断。请重试，或缩小 PRD 范围后再导入。')
   }
 
-  const retry = await requestTopLevel('正在生成导图节点', true)
+  let retry: Awaited<ReturnType<typeof requestTopLevel>>
+  try {
+    retry = await requestTopLevel('正在生成导图节点', true)
+  } catch (err) {
+    const fallbackNodes = fallbackFromTopLevelFailure(decompositionErrorMessage(err))
+    if (fallbackNodes.length > 0) return fallbackNodes
+    throw err
+  }
   if (!retry.nodes.length && retry.stopReason === 'max_tokens') {
     throw new Error('AI 生成导图节点时输出过长并被截断。请重试，或缩小 PRD 范围后再导入。')
+  }
+  if (!retry.nodes.length) {
+    const fallbackNodes = fallbackFromTopLevelFailure('两轮 AI 通读均未返回页面级节点')
+    if (fallbackNodes.length > 0) return fallbackNodes
   }
   return attachPagesToSourceRoot(retry.nodes)
 }
@@ -2166,6 +2366,7 @@ async function decomposeBranch(mdText: string, parentNode: PrdNode, session: Dec
   const claude = anthropic
   const branchContext = extractRelevantMarkdownForNode(mdText, parentNode)
   const sourceOutline = buildSourceOutlineForPrompt(branchContext)
+  const projectWorkflowContext = formatProjectWorkflowForDecomposition(session.projectWorkflow)
 
   async function requestBranch(label: string, retry: boolean) {
     const retryInstruction = retry
@@ -2182,7 +2383,7 @@ async function decomposeBranch(mdText: string, parentNode: PrdNode, session: Dec
         messages: [
           {
             role: 'user',
-            content: `${retryInstruction} 只输出有原文依据的 model、ctrl、view 子节点；缺失的 MVC 类别不要输出空节点或占位节点。分类必须基于原文事实维度：数据/配置/规则/领域状态归 model，操作流程/接口/校验/状态流转归 ctrl，布局/文案/动画/视觉反馈归 view；禁止按关键词机械归类。每个返回节点 parentId 必须为 "${parentNode.id}"，level 必须为 2，sourceKind 必须为 prd，evidenceRefs 必须引用真实原文，content 必须包含“原文位置 / 关键原文摘录 / 整理说明 / 需澄清点”。所有展示给用户的文字必须是中文；model、ctrl、view、ID、路径、字段名、枚举值可以保留英文。不要输出模板化标题说明，content 必须是你对原文相关内容的引用+整理。\n\n原文标题参考（只作为定位线索，不是输出模板）：\n${sourceOutline}\n\n相关 PRD 原文片段：\n${branchContext}`,
+            content: `${projectWorkflowContext}\n\n${retryInstruction} 只输出有原文依据的 model、ctrl、view 子节点；缺失的 MVC 类别不要输出空节点或占位节点。分类必须基于原文事实维度：数据/配置/规则/领域状态归 model，操作流程/接口/校验/状态流转归 ctrl，布局/文案/动画/视觉反馈归 view；禁止按关键词机械归类。每个返回节点 parentId 必须为 "${parentNode.id}"，level 必须为 2，sourceKind 必须为 prd，evidenceRefs 必须引用真实原文，content 必须包含“原文位置 / 关键原文摘录 / 整理说明 / 需澄清点”。所有展示给用户的文字必须是中文；model、ctrl、view、ID、路径、字段名、枚举值可以保留英文。不要输出模板化标题说明，content 必须是你对原文相关内容的引用+整理。\n\n原文标题参考（只作为定位线索，不是输出模板）：\n${sourceOutline}\n\n相关 PRD 原文片段：\n${branchContext}`,
           },
         ],
       })
@@ -2275,10 +2476,11 @@ async function runMockDecompositionJob(sessionId: string): Promise<void> {
   scheduleSessionCleanup(sessionId)
 }
 
-async function runDecompositionJob(sessionId: string, mdText: string): Promise<void> {
+async function runDecompositionJob(sessionId: string, mdText: string, projectWorkflow?: ProjectWorkflowState | null): Promise<void> {
   const session = decompositionSessions.get(sessionId)
   if (!session) return
   const activeSession = session
+  activeSession.projectWorkflow = projectWorkflow ?? null
 
   activeSession.currentStep = '正在建立原文索引'
   activeSession.nodes = []
@@ -2292,19 +2494,20 @@ async function runDecompositionJob(sessionId: string, mdText: string): Promise<v
   }
   mergeSessionNodes(activeSession, pageNodes)
 
-  await runWithConcurrency(pageNodes, DECOMPOSITION_BRANCH_CONCURRENCY, async (pageNode) => {
-    try {
-      const mvcNodes = await decomposeBranch(mdText, pageNode, activeSession)
-      if (mvcNodes.length > 0) mergeSessionNodes(activeSession, mvcNodes)
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      appendBranchErrorNote(activeSession, pageNode, message)
-    }
-  })
+  if (!activeSession.usedLocalPageFallback) {
+    await runWithConcurrency(pageNodes, DECOMPOSITION_BRANCH_CONCURRENCY, async (pageNode) => {
+      try {
+        const mvcNodes = await decomposeBranch(mdText, pageNode, activeSession)
+        if (mvcNodes.length > 0) mergeSessionNodes(activeSession, mvcNodes)
+      } catch (err) {
+        appendBranchErrorNote(activeSession, pageNode, decompositionErrorMessage(err))
+      }
+    })
+  }
 
   activeSession.status = 'done'
   activeSession.currentStep = activeSession.branchErrors?.length
-    ? `分析完成（${activeSession.branchErrors.length} 个分支需手动补充）`
+    ? `分析完成（${activeSession.branchErrors.length} 处需手动补充）`
     : '分析完成'
   scheduleSessionCleanup(sessionId)
 }
@@ -2434,8 +2637,28 @@ app.get('/api/health', (_req, res) => {
   })
 })
 
+app.post('/api/project-baseline/scan', (req, res) => {
+  const { rootPath, iterationPrd, focus } = req.body as { rootPath?: string; iterationPrd?: string; focus?: string }
+  if (!rootPath?.trim()) {
+    return void res.status(400).json({ error: '缺少代码库路径' })
+  }
+  if (!iterationPrd?.trim() && !focus?.trim()) {
+    return void res.status(400).json({ error: '缺少本次迭代 PRD 或迭代焦点' })
+  }
+
+  try {
+    res.json(scanProjectBaseline({
+      rootPath,
+      iterationPrd: iterationPrd ?? '',
+      focus: focus ?? '',
+    }))
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : '代码库定向扫描失败' })
+  }
+})
+
 app.post('/api/decompose/preview', (req, res) => {
-  const { mdText } = req.body as { mdText?: string }
+  const { mdText } = req.body as { mdText?: string; projectWorkflow?: ProjectWorkflowState | null }
   if (!mdText?.trim()) {
     return void res.status(400).json({ error: '缺少 PRD 文档内容' })
   }
@@ -2444,7 +2667,7 @@ app.post('/api/decompose/preview', (req, res) => {
 })
 
 app.post('/api/decompose/start', (req, res) => {
-  const { mdText } = req.body as { mdText?: string }
+  const { mdText, projectWorkflow = null } = req.body as { mdText?: string; projectWorkflow?: ProjectWorkflowState | null }
   if (!mdText?.trim()) {
     return void res.status(400).json({ error: '缺少 PRD 文档内容' })
   }
@@ -2457,12 +2680,13 @@ app.post('/api/decompose/start', (req, res) => {
     status: 'running',
     nodes: [],
     currentStep: '正在建立原文索引',
+    projectWorkflow,
   })
 
   // Fire-and-forget: do NOT await. Frontend polls for status.
   const jobFn = process.env.MOCK_DECOMPOSE === 'true'
     ? runMockDecompositionJob(sessionId)
-    : runDecompositionJob(sessionId, mdText)
+    : runDecompositionJob(sessionId, mdText, projectWorkflow)
   jobFn.catch((err: unknown) => {
     const session = decompositionSessions.get(sessionId)
     if (session) {
@@ -2947,6 +3171,27 @@ app.post('/api/assets/effects/load', (req, res) => {
   }
 })
 
+app.post('/api/assets/audio/scan', (req, res) => {
+  try {
+    const payload = req.body as AudioAssetScanRequest
+    res.json(scanAudioAssetRoot(payload.rootPath, {
+      smartNotes: payload.smartNotes === true,
+      contextHints: normalizeStringArray(payload.contextHints),
+    }))
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : '扫描音频素材目录失败。' })
+  }
+})
+
+app.post('/api/assets/audio/load', (req, res) => {
+  try {
+    const assetBaseUrl = `${req.protocol}://${req.get('host') ?? `127.0.0.1:${port}`}`
+    res.json(loadAudioAssetRow((req.body as { row?: unknown }).row, assetBaseUrl))
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : '加载音频素材失败。' })
+  }
+})
+
 app.get(/^\/api\/runtime\/spine-player\/(.+)$/u, (req, res) => {
   const params = req.params as unknown as { 0?: string }
   const rawRelativePath = params[0]
@@ -2979,6 +3224,7 @@ app.post('/api/assets/open-local-path', async (_req, res) => {
     mkdirSync(FIGMA_ASSET_CACHE_ROOT, { recursive: true })
     mkdirSync(FIGMA_INTERMEDIATE_CACHE_ROOT, { recursive: true })
     mkdirSync(EFFECT_ASSET_CACHE_ROOT, { recursive: true })
+    mkdirSync(AUDIO_ASSET_CACHE_ROOT, { recursive: true })
     await openLocalPath(ASSET_WORKBENCH_CACHE_ROOT)
     res.json({ ok: true, path: ASSET_WORKBENCH_CACHE_ROOT })
   } catch (error) {
@@ -3004,6 +3250,32 @@ app.get(/^\/api\/assets\/effects\/file\/(.+)$/u, (req, res) => {
   const filePath = resolveEffectCacheFilePath(EFFECT_ASSET_CACHE_ROOT, relativePath)
   if (!filePath || !existsSync(filePath) || !statSync(filePath).isFile()) {
     res.status(404).json({ error: '未找到特效预览文件。' })
+    return
+  }
+
+  res.setHeader('Content-Type', mimeTypeForPath(filePath))
+  res.setHeader('Cache-Control', 'private, max-age=86400')
+  res.end(readFileSync(filePath))
+})
+
+app.get(/^\/api\/assets\/audio\/file\/(.+)$/u, (req, res) => {
+  const params = req.params as unknown as { 0?: string }
+  const rawRelativePath = params[0]
+  if (!rawRelativePath) {
+    res.status(400).json({ error: '缺少音频素材路径。' })
+    return
+  }
+
+  const relativePath = normalizeZipPath(decodeURIComponent(rawRelativePath))
+  const ext = audioFileExtForName(relativePath)
+  if (!EFFECT_AUDIO_EXTENSIONS.has(ext)) {
+    res.status(400).json({ error: '该文件类型不允许作为音频素材访问。' })
+    return
+  }
+
+  const filePath = resolveEffectCacheFilePath(AUDIO_ASSET_CACHE_ROOT, relativePath)
+  if (!filePath || !existsSync(filePath) || !statSync(filePath).isFile()) {
+    res.status(404).json({ error: '未找到音频素材文件。' })
     return
   }
 
@@ -3401,8 +3673,19 @@ function buildPrototypeSpec(requirementState: UXRequirementState) {
   const assetDependencies = requirementState.asset_dependencies.length > 0
     ? JSON.stringify(requirementState.asset_dependencies, null, 2)
     : '（暂无可用资源）'
+  const prototypeSpecSection = requirementState.prototype_spec
+    ? `${formatPrototypeSpecForPrompt(requirementState.prototype_spec)}
 
-  return `## 需求状态
+## 生成关系
+- Prototype Spec 是本轮生成的源事实和交付语义。
+- HTML 只能作为预览/验证渲染：用于检查状态、布局、交互和素材引用是否符合 Spec。
+- 当旧需求状态与 Prototype Spec 不一致时，以 Prototype Spec 为准；旧需求状态只作为补充背景。`
+    : `## Prototype Spec（未生成）
+本轮没有显式 Prototype Spec，请从需求状态临时推导预览，但不要把 HTML 当作交付源文件。`
+
+  return `${prototypeSpecSection}
+
+## 旧需求状态（补充背景）
 触发条件：${requirementState.trigger_condition ?? '未知'}
 执行规则：${requirementState.sequence_rules ?? '未知'}
 引擎约束：${requirementState.engine_constraints ?? '无'}
@@ -4121,6 +4404,8 @@ function mimeTypeForPath(filePath: string) {
   if (ext === 'mp3') return 'audio/mpeg'
   if (ext === 'wav') return 'audio/wav'
   if (ext === 'ogg') return 'audio/ogg'
+  if (ext === 'm4a') return 'audio/mp4'
+  if (ext === 'aac') return 'audio/aac'
   return 'image/png'
 }
 
@@ -4515,12 +4800,11 @@ function buildUiAssetParseResultFromPrefab(frame: FigmaPrefabFrameResponse, pars
 }
 
 const EFFECT_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif'])
-const EFFECT_AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg'])
+const EFFECT_AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.aac'])
 const EFFECT_VIDEO_EXTENSIONS = new Set(['.mp4', '.webm'])
 const EFFECT_SPINE_EXTENSIONS = new Set(['.json', '.skel', '.atlas', '.atlas.txt'])
 const EFFECT_PREVIEW_EXTENSIONS = new Set([
   ...EFFECT_IMAGE_EXTENSIONS,
-  ...EFFECT_AUDIO_EXTENSIONS,
   ...EFFECT_VIDEO_EXTENSIONS,
 ])
 
@@ -5023,7 +5307,8 @@ function scanEffectAssetRoot(rawRootPath: unknown, options: EffectAssetScanOptio
   const rootStat = statSync(sourceRoot)
   if (!rootStat.isDirectory()) throw new Error(`路径不是目录：${sourceRoot}`)
 
-  const { files, truncated } = collectEffectFiles(sourceRoot)
+  const { files: scannedFiles, truncated } = collectEffectFiles(sourceRoot)
+  const files = scannedFiles.filter((file) => !EFFECT_AUDIO_EXTENSIONS.has(file.ext))
   const groups = new Map<string, ScannedEffectFile[]>()
   for (const file of files) {
     const key = effectGroupKey(file)
@@ -5068,6 +5353,230 @@ function scanEffectAssetRoot(rawRootPath: unknown, options: EffectAssetScanOptio
         previewUrl: null,
         previewFiles: [],
         spine: null,
+        fileCount: groupFiles.length,
+        files: groupFiles.map((file) => ({
+          name: file.name,
+          path: file.absolutePath,
+          ext: file.ext,
+          size: file.size,
+          loadedPath: null,
+          previewUrl: null,
+        })),
+        createdAt: now,
+        updatedAt: now,
+      }
+    })
+    .sort((a, b) => a.relativePath.localeCompare(b.relativePath))
+
+  return {
+    sourceRoot,
+    scannedFileCount: files.length,
+    truncated,
+    rows,
+  }
+}
+
+function audioFileExtForName(name: string) {
+  return path.extname(name.toLowerCase())
+}
+
+function audioGroupKey(file: ScannedEffectFile) {
+  return file.relativePath.replace(/\.[^.]+$/u, '')
+}
+
+function inferAudioKind(name: string): AudioAssetKind {
+  const text = name.toLowerCase()
+  if (/bgm|music|theme|loop|song|ost|背景|音乐/u.test(text)) return 'music'
+  if (/voice|vo|dialog|speech|旁白|语音|配音/u.test(text)) return 'voice'
+  if (/ambient|ambience|env|wind|rain|room|环境|氛围/u.test(text)) return 'ambient'
+  if (/click|tap|button|coin|win|reward|hit|pop|sfx|音效/u.test(text)) return 'sfx'
+  return 'unknown'
+}
+
+function inferAudioPurpose(name: string, kind: AudioAssetKind) {
+  if (kind === 'music') return '背景音乐资源，需确认进入/退出时机、循环和淡入淡出规则'
+  if (kind === 'voice') return '语音资源，需确认播放文本、语言版本和打断规则'
+  if (kind === 'ambient') return '环境音资源，需确认场景范围、循环和音量层级'
+  if (kind === 'sfx') return '交互音效资源，需确认触发事件、叠加和冷却规则'
+  return `音频资源 ${name}，需补充用途、触发事件和播放规则`
+}
+
+function inferAudioSmartNote(name: string, kind: AudioAssetKind, contextHints: string[]) {
+  const lowerName = name.toLowerCase()
+  const match = contextHints
+    .map((hint) => normalizeTextValue(hint) ?? '')
+    .filter(Boolean)
+    .find((hint) => hint.toLowerCase().includes(lowerName))
+  return [
+    `用途推断：${inferAudioPurpose(name, kind)}`,
+    kind === 'music'
+      ? '播放建议：作为 BGM 使用时必须提供开关/静音入口，默认循环需确认。'
+      : '播放建议：由用户交互或明确状态变化触发，避免自动播放；确认音量、叠加和打断规则。',
+    match ? `文档依据：${match.slice(0, 180)}` : '文档依据：当前文档未明确命中，需人工复核。',
+  ].join('\n')
+}
+
+function buildAudioAssetFileUrl(baseUrl: string, relativePath: string) {
+  return `${baseUrl.replace(/\/+$/, '')}/api/assets/audio/file/${normalizeZipPath(relativePath).split('/').map(encodeURIComponent).join('/')}`
+}
+
+function loadedAudioRelativePath(loadedPath: string | null | undefined) {
+  if (!loadedPath) return null
+  const relative = path.relative(AUDIO_ASSET_CACHE_ROOT, loadedPath)
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return null
+  return normalizeZipPath(relative)
+}
+
+function relativeAudioFilePath(row: AudioAssetRow, file: AudioAssetFile) {
+  const sourceRoot = normalizeTextValue(row.sourceRoot)
+  if (sourceRoot) {
+    const relative = path.relative(sourceRoot, file.path)
+    if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) return relative
+  }
+  return path.join(row.relativePath || sanitizeEffectCacheSegment(row.name), file.name)
+}
+
+function normalizeAudioAssetRowForLoad(value: unknown): AudioAssetRow {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('缺少要加载的音频素材行。')
+  const row = value as Partial<AudioAssetRow>
+  const files = Array.isArray(row.files) ? row.files : []
+  if (!row.id || typeof row.id !== 'string') throw new Error('音频素材行缺少 id。')
+  if (!row.sourceRoot || typeof row.sourceRoot !== 'string') throw new Error('音频素材行缺少 sourceRoot。')
+  if (!files.length) throw new Error('音频素材行没有可加载文件。')
+  return {
+    id: row.id,
+    name: typeof row.name === 'string' ? row.name : row.id,
+    kind: row.kind ?? 'unknown',
+    sourceRoot: row.sourceRoot,
+    relativePath: typeof row.relativePath === 'string' ? row.relativePath : '',
+    localPath: typeof row.localPath === 'string' ? row.localPath : row.sourceRoot,
+    purpose: typeof row.purpose === 'string' ? row.purpose : '',
+    usageNote: typeof row.usageNote === 'string' ? row.usageNote : '',
+    triggerHint: typeof row.triggerHint === 'string' ? row.triggerHint : '',
+    playbackHint: typeof row.playbackHint === 'string' ? row.playbackHint : '',
+    linkedNodeIds: Array.isArray(row.linkedNodeIds) ? row.linkedNodeIds : [],
+    status: 'ready',
+    loadStatus: 'loading',
+    loadError: null,
+    loadedRoot: null,
+    loadedPath: null,
+    loadedFileCount: 0,
+    loadedBytes: 0,
+    loadedAt: null,
+    previewUrl: null,
+    durationMs: typeof row.durationMs === 'number' ? row.durationMs : null,
+    fileCount: typeof row.fileCount === 'number' ? row.fileCount : files.length,
+    files: files.map((file) => ({
+      name: file.name,
+      path: file.path,
+      ext: file.ext,
+      size: file.size,
+      loadedPath: file.loadedPath ?? null,
+      previewUrl: file.previewUrl ?? null,
+    })),
+    createdAt: typeof row.createdAt === 'string' ? row.createdAt : new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+function loadAudioAssetRow(rawRow: unknown, assetBaseUrl: string) {
+  const row = normalizeAudioAssetRowForLoad(rawRow)
+  mkdirSync(AUDIO_ASSET_CACHE_ROOT, { recursive: true })
+
+  let loadedBytes = 0
+  const files = row.files.map((file) => {
+    if (!existsSync(file.path)) throw new Error(`音频文件不存在或无权限访问：${file.path}`)
+    const stat = statSync(file.path)
+    if (!stat.isFile()) throw new Error(`音频路径不是文件：${file.path}`)
+    const ext = audioFileExtForName(file.name)
+    if (!EFFECT_AUDIO_EXTENSIONS.has(ext)) throw new Error(`该文件不是支持的音频格式：${file.name}`)
+    const relativePath = relativeAudioFilePath(row, file)
+    const loadedPath = resolveEffectCacheFilePath(AUDIO_ASSET_CACHE_ROOT, relativePath)
+    if (!loadedPath) throw new Error(`音频目标路径无效：${relativePath}`)
+    mkdirSync(path.dirname(loadedPath), { recursive: true })
+    copyFileSync(file.path, loadedPath)
+    loadedBytes += stat.size
+    const loadedRelative = loadedAudioRelativePath(loadedPath)
+    const previewUrl = loadedRelative ? buildAudioAssetFileUrl(assetBaseUrl, loadedRelative) : null
+    return {
+      ...file,
+      size: stat.size,
+      loadedPath,
+      previewUrl,
+    }
+  })
+
+  const loadedAt = new Date().toISOString()
+  const loadedPath = row.relativePath
+    ? resolveEffectCacheFilePath(AUDIO_ASSET_CACHE_ROOT, row.relativePath) ?? AUDIO_ASSET_CACHE_ROOT
+    : AUDIO_ASSET_CACHE_ROOT
+  const previewUrl = files.find((file) => file.previewUrl)?.previewUrl ?? null
+
+  return {
+    row: {
+      ...row,
+      loadStatus: 'loaded' as const,
+      loadError: null,
+      loadedRoot: AUDIO_ASSET_CACHE_ROOT,
+      loadedPath,
+      loadedFileCount: files.length,
+      loadedBytes,
+      loadedAt,
+      previewUrl,
+      files,
+      updatedAt: loadedAt,
+    },
+  }
+}
+
+function scanAudioAssetRoot(rawRootPath: unknown, options: AudioAssetScanOptions = {}) {
+  const rootPath = normalizeTextValue(rawRootPath)
+  if (!rootPath) throw new Error('请填写音频素材目录路径。')
+  const sourceRoot = path.resolve(rootPath)
+  if (!existsSync(sourceRoot)) throw new Error(`目录不存在或当前账号无权限访问：${sourceRoot}`)
+  const rootStat = statSync(sourceRoot)
+  if (!rootStat.isDirectory()) throw new Error(`路径不是目录：${sourceRoot}`)
+
+  const { files: scannedFiles, truncated } = collectEffectFiles(sourceRoot)
+  const files = scannedFiles.filter((file) => EFFECT_AUDIO_EXTENSIONS.has(file.ext))
+  const groups = new Map<string, ScannedEffectFile[]>()
+  for (const file of files) {
+    const key = audioGroupKey(file)
+    groups.set(key, [...(groups.get(key) ?? []), file])
+  }
+
+  const now = new Date().toISOString()
+  const smartNotes = options.smartNotes === true
+  const contextHints = (options.contextHints ?? []).slice(0, 120)
+  const rows: AudioAssetRow[] = Array.from(groups.entries())
+    .map(([key, groupFiles]) => {
+      const name = displayNameFromEffectKey(key)
+      const kind = inferAudioKind(name)
+      const localPath = groupFiles[0]?.dirRelativePath
+        ? path.resolve(sourceRoot, ...groupFiles[0].dirRelativePath.split('/').filter(Boolean))
+        : sourceRoot
+      return {
+        id: `audio-${hashId(`${sourceRoot}/${key}`)}`,
+        name,
+        kind,
+        sourceRoot,
+        relativePath: key || (groupFiles[0]?.relativePath ?? ''),
+        localPath,
+        purpose: '',
+        usageNote: smartNotes ? inferAudioSmartNote(name, kind, contextHints) : '',
+        triggerHint: '',
+        playbackHint: '',
+        linkedNodeIds: [],
+        status: 'ready' as const,
+        loadStatus: 'not_loaded' as const,
+        loadError: null,
+        loadedRoot: null,
+        loadedPath: null,
+        loadedFileCount: 0,
+        loadedBytes: 0,
+        loadedAt: null,
+        previewUrl: null,
+        durationMs: null,
         fileCount: groupFiles.length,
         files: groupFiles.map((file) => ({
           name: file.name,
@@ -6299,7 +6808,7 @@ function relativePathUnderRoot(rootPath: string | null, sourcePath: string, fall
   return fallbackName
 }
 
-function assetWorkbenchRows(assetWorkbench: unknown, key: 'uiRows' | 'effectRows') {
+function assetWorkbenchRows(assetWorkbench: unknown, key: 'uiRows' | 'effectRows' | 'audioRows') {
   const record = objectRecord(assetWorkbench)
   const rows = record ? record[key] : null
   return Array.isArray(rows) ? rows : []
@@ -6353,7 +6862,7 @@ function writeUiAssetExports(assetWorkbench: unknown, summary: MutableAssetExpor
 function writeEffectAssetExports(assetWorkbench: unknown, summary: MutableAssetExportSummary) {
   const rows = assetWorkbenchRows(assetWorkbench, 'effectRows')
   if (!rows.length) return
-  summary.manifestLines.push('', '## 特效 / 音频 / Prefab 素材')
+  summary.manifestLines.push('', '## 特效 / Prefab 素材')
 
   rows.forEach((rawRow, index) => {
     const row = objectRecord(rawRow)
@@ -6393,6 +6902,50 @@ function writeEffectAssetExports(assetWorkbench: unknown, summary: MutableAssetE
   })
 }
 
+function writeAudioAssetExports(assetWorkbench: unknown, summary: MutableAssetExportSummary) {
+  const rows = assetWorkbenchRows(assetWorkbench, 'audioRows')
+  if (!rows.length) return
+  summary.manifestLines.push('', '## 音频素材')
+
+  rows.forEach((rawRow, index) => {
+    const row = objectRecord(rawRow)
+    if (!row) return
+    const name = normalizeTextValue(row.name) ?? `音频素材 ${index + 1}`
+    const id = normalizeTextValue(row.id) ?? `audio-${index + 1}`
+    const kind = normalizeTextValue(row.kind) ?? 'unknown'
+    const baseDir = `audio/${safeAssetExportSegment(`${id}-${name}`, `audio-${index + 1}`)}`
+    const sourceRoot = normalizeTextValue(row.sourceRoot)
+    const before = summary.copiedFiles
+
+    summary.manifestLines.push('', `### ${name}`)
+    summary.manifestLines.push(`- 类型：${kind}`)
+    if (normalizeTextValue(row.purpose)) summary.manifestLines.push(`- 用途：${normalizeTextValue(row.purpose)}`)
+    if (normalizeTextValue(row.triggerHint)) summary.manifestLines.push(`- 触发：${normalizeTextValue(row.triggerHint)}`)
+    if (normalizeTextValue(row.playbackHint)) summary.manifestLines.push(`- 播放规则：${normalizeTextValue(row.playbackHint)}`)
+    if (normalizeTextValue(row.usageNote)) summary.manifestLines.push(`- 备注：${normalizeTextValue(row.usageNote)}`)
+    summary.manifestLines.push(`- 导出目录：assets/${baseDir}/`)
+
+    const loadedPath = normalizeTextValue(row.loadedPath)
+    const loadedRelative = loadedAudioRelativePath(loadedPath)
+    if (loadedPath && loadedRelative) {
+      copyAssetSource(loadedPath, `${baseDir}/loaded`, summary, `${name} loadedPath`)
+    }
+
+    if (summary.copiedFiles === before) {
+      const files = Array.isArray(row.files) ? row.files : []
+      files.forEach((rawFile, fileIndex) => {
+        const file = objectRecord(rawFile)
+        const sourcePath = normalizeTextValue(file?.loadedPath) ?? normalizeTextValue(file?.path)
+        if (!sourcePath) return
+        const fileName = normalizeTextValue(file?.name) ?? path.basename(sourcePath) ?? `audio-${fileIndex + 1}`
+        const relative = relativePathUnderRoot(sourceRoot, sourcePath, fileName)
+        copyAssetSource(sourcePath, `${baseDir}/source/${relative}`, summary, `${name}/${fileName}`)
+      })
+    }
+    summary.manifestLines.push(`- 文件数量：${summary.copiedFiles - before}`)
+  })
+}
+
 function writeProjectAssetExports(assetWorkbench: unknown): AssetExportSummary {
   const assetDir = resolveGeneratedAssetExportPath('.')
   mkdirSync(assetDir.resolved, { recursive: true })
@@ -6412,6 +6965,7 @@ function writeProjectAssetExports(assetWorkbench: unknown): AssetExportSummary {
 
   writeUiAssetExports(assetWorkbench, summary)
   writeEffectAssetExports(assetWorkbench, summary)
+  writeAudioAssetExports(assetWorkbench, summary)
 
   summary.manifestLines.push(
     '',

@@ -1,9 +1,11 @@
 import type { DocumentSourceIssue, PrdImportCandidateNode, PrdImportPreview } from '../../types/prdNode'
+import type { ProjectWorkflowState } from '../../types/projectWorkflow'
 
 interface ImportPreviewProps {
   preview: PrdImportPreview | null
   isLoading: boolean
   error?: string | null
+  projectWorkflow?: ProjectWorkflowState | null
   onConfirm: () => void
   onReset: () => void
 }
@@ -24,7 +26,7 @@ function confidenceTone(candidate: PrdImportCandidateNode) {
   return 'text-on-surface-variant'
 }
 
-export function ImportPreview({ preview, isLoading, error, onConfirm, onReset }: ImportPreviewProps) {
+export function ImportPreview({ preview, isLoading, error, projectWorkflow, onConfirm, onReset }: ImportPreviewProps) {
   if (isLoading) {
     return (
       <div className="flex min-h-[360px] w-full flex-col items-center justify-center gap-md rounded-xl border border-outline-variant bg-surface-container-low p-xl">
@@ -59,6 +61,8 @@ export function ImportPreview({ preview, isLoading, error, onConfirm, onReset }:
   const { sourceIndex, candidateNodes } = preview
   const visibleSections = sourceIndex.sections.slice(0, 10)
   const visibleSignals = sourceIndex.keywordSignals.slice(0, 8)
+  const iteration = projectWorkflow?.mode === 'existing_project_iteration' ? projectWorkflow.iteration : null
+  const baselineScan = iteration?.baselineScan ?? null
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col gap-lg">
@@ -71,6 +75,21 @@ export function ImportPreview({ preview, isLoading, error, onConfirm, onReset }:
           <p className="mt-xs text-body-md text-on-surface-variant">
             {sourceIndex.sourceLabel} · {formatNumber(sourceIndex.totalLines)} 行 · 约 {formatNumber(sourceIndex.estimatedTokens)} tokens
           </p>
+          {iteration ? (
+            <div className="mt-sm flex max-w-[760px] flex-wrap gap-xs text-code-sm text-on-surface-variant">
+              <span className="rounded border border-secondary/40 bg-secondary/10 px-sm py-xs text-secondary">已有项目迭代</span>
+              <span className="rounded border border-outline-variant bg-surface-container px-sm py-xs">{iteration.focus || '未填写迭代焦点'}</span>
+              {baselineScan ? (
+                <span className="rounded border border-outline-variant bg-surface-container px-sm py-xs">
+                  {baselineScan.platforms.map((item) => `${item.platform} ${item.confidence}%`).join(' / ')} · 证据 {baselineScan.evidence.length}
+                </span>
+              ) : null}
+            </div>
+          ) : (
+            <div className="mt-sm inline-flex rounded border border-outline-variant bg-surface-container px-sm py-xs text-code-sm text-on-surface-variant">
+              新项目打磨
+            </div>
+          )}
         </div>
         <div className="flex shrink-0 items-center gap-sm">
           <button

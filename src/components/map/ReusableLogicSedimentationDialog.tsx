@@ -227,7 +227,7 @@ export function ReusableLogicSedimentationDialog({
                 onClick={approveSelected}
                 className="min-h-[38px] rounded-md border border-secondary bg-secondary-container px-md text-label-md font-medium text-on-secondary-container hover:opacity-90"
               >
-                确认入库
+                确认并补充上下文
               </button>
               <button
                 type="button"
@@ -235,7 +235,7 @@ export function ReusableLogicSedimentationDialog({
                 className="flex min-h-[38px] items-center gap-xs rounded-md border border-tertiary bg-tertiary-container px-md text-label-md font-medium text-on-tertiary-container hover:opacity-90"
               >
                 <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>play_arrow</span>
-                入库并用它生成
+                补充上下文并生成预览
               </button>
             </div>
           </footer>

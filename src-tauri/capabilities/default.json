@@ -9,8 +9,20 @@
     "core:default",
     "dialog:default",
     "fs:default",
-    "fs:allow-read-file",
-    "fs:allow-write-file",
+    {
+      "identifier": "fs:allow-read-file",
+      "allow": [
+        { "path": "**/*.gpf" },
+        { "path": "**/*.GPF" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-write-file",
+      "allow": [
+        { "path": "**/*.gpf" },
+        { "path": "**/*.GPF" }
+      ]
+    },
     "fs:allow-write-text-file",
     {
       "identifier": "fs:scope",

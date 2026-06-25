@@ -1,4 +1,5 @@
 import type { PrdNode, PrdPerformanceSpec } from '../types/prdNode'
+import type { PrototypeSpec } from '../types/prototypeSpec'
 import type { ReusableLogicAsset, ReusableLogicAssetType } from '../types/reusableLogic'
 
 const TYPE_LABELS: Record<ReusableLogicAssetType, string> = {
@@ -90,9 +91,26 @@ export function reusableLogicTypeLabel(type: ReusableLogicAssetType) {
   return TYPE_LABELS[type]
 }
 
-export function deriveReusableLogicCandidates(node: PrdNode, performanceSpec: PrdPerformanceSpec | null): ReusableLogicAsset[] {
-  if (!performanceSpec?.detected || performanceSpec.disabled) return []
+export function deriveReusableLogicCandidates(node: PrdNode, performanceSpec: PrdPerformanceSpec | null, prototypeSpec?: PrototypeSpec | null): ReusableLogicAsset[] {
+  if ((!performanceSpec?.detected || performanceSpec.disabled) && !prototypeSpec?.performanceLogic.length) return []
   const candidates: Array<ReusableLogicAsset | null> = []
+  if (!performanceSpec?.detected || performanceSpec.disabled) {
+    const specLogic = unique(prototypeSpec?.performanceLogic ?? [], 12)
+    if (specLogic.length > 0) {
+      candidates.push(makeCandidate(
+        node,
+        'animation_rule',
+        `prototype-spec-${prototypeSpec?.mode ?? 'draft'}`,
+        `${node.label} Spec 表现逻辑`,
+        '从 Prototype Spec 中提取的可复用表现逻辑；HTML 仅用于预览校验。',
+        specLogic.join('\n'),
+        ['Prototype Spec', prototypeSpec?.mode === 'standard' ? '资源库标准' : '草稿'],
+      ))
+    }
+    return candidates
+      .filter((item): item is ReusableLogicAsset => Boolean(item))
+      .sort((a, b) => TYPE_ORDER.indexOf(a.type) - TYPE_ORDER.indexOf(b.type))
+  }
   const trigger = normalizeText(performanceSpec.trigger)
   const branches = unique(performanceSpec.branches, 6)
   const sequence = sequenceSummary(performanceSpec)
@@ -148,6 +166,19 @@ export function deriveReusableLogicCandidates(node: PrdNode, performanceSpec: Pr
         prototypeNotes.length ? `原型提示：${prototypeNotes.join('；')}` : null,
       ].filter(Boolean).join('\n'),
       ['反馈', '控制', '验收'],
+    ))
+  }
+
+  const specLogic = unique(prototypeSpec?.performanceLogic ?? [], 12)
+  if (specLogic.length > 0) {
+    candidates.push(makeCandidate(
+      node,
+      'animation_rule',
+      `prototype-spec-${prototypeSpec?.mode ?? 'draft'}`,
+      `${node.label} Spec 表现逻辑`,
+      '从 Prototype Spec 中提取的可复用表现逻辑；HTML 仅用于预览校验。',
+      specLogic.join('\n'),
+      ['Prototype Spec', prototypeSpec?.mode === 'standard' ? '资源库标准' : '草稿'],
     ))
   }
 

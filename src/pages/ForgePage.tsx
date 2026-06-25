@@ -11,6 +11,7 @@ import { buildDeliverySections, collectBackendContracts, isDeliveryNode } from '
 import { streamPrototype } from '../lib/prototypeStream'
 import { buildUiOnlyPrototypeInstruction, chatContentImages, chatContentText, extractFigmaUrlsFromText, isUiOnlyPrototypeFeedback } from '../lib/nodeChatIntent'
 import { buildFigmaPrototypeIterationInstruction, mergeInstructionIntoPrototypeEvidence } from '../lib/prototypeIteration'
+import { buildDraftPrototypeSpecFromNode, mergeReusableLogicIntoPrototypeSpec, standardizePrototypeSpec } from '../lib/prototypeSpec'
 import { deriveReusableLogicCandidates, formatReusableLogicAssetForPrompt } from '../lib/reusableLogicSedimentation'
 import { useAppStore } from '../store/appStore'
 import type { FigmaFrameImportResponse, NodeChatOptions } from '../lib/api'
@@ -419,6 +420,30 @@ function buildPrototypeAssetManifest(
     }
   }
 
+  for (const row of assetWorkbench.audioRows) {
+    const audioContext = [row.purpose, row.triggerHint, row.playbackHint, row.usageNote].filter(Boolean).join(' / ')
+    if (row.status !== 'ready' || row.loadStatus !== 'loaded' || !row.previewUrl) {
+      if (audioContext) notes.push(`音频「${row.name}」尚未加载或缺少可播放 URL，不允许在 HTML 中引用；用途备注：${audioContext}`)
+      continue
+    }
+    assets.push({
+      id: `${row.id}:audio`,
+      kind: 'audio_clip',
+      name: `${row.name} / 音频`,
+      url: row.previewUrl,
+      source: 'audio_asset',
+      purpose: audioContext || row.purpose || row.triggerHint || null,
+      usageNote: [
+        row.usageNote || null,
+        row.triggerHint ? `Trigger: ${row.triggerHint}` : null,
+        row.playbackHint ? `Playback: ${row.playbackHint}` : null,
+        'Use as audio only. Trigger playback from user interaction or explicit UI state changes; do not autoplay uncontrolled sound.',
+      ].filter(Boolean).join('\n'),
+      originalName: row.files[0]?.name || row.name,
+      assetGroupName: row.name,
+    })
+  }
+
   if (assets.length === 0) {
     notes.push('当前素材库没有可用于 HTML 原型的 ready URL；生成结果只能使用占位和真实界面状态，不能伪造资源。')
   }
@@ -717,6 +742,8 @@ export function ForgePage() {
   const prototypeHistory = nodePrototypeState?.prototypeHistory ?? []
   const prototypeVariants = nodePrototypeState?.prototypeVariants ?? []
   const selectedVariantIndex = nodePrototypeState?.selectedVariantIndex ?? -1
+  const draftPrototypeSpec = nodePrototypeState?.draftPrototypeSpec ?? null
+  const standardPrototypeSpec = nodePrototypeState?.standardPrototypeSpec ?? null
   const recordNodePrototypeHistory = useAppStore((s) => s.recordNodePrototypeHistory)
   const restoreNodePrototypeVersion = useAppStore((s) => s.restoreNodePrototypeVersion)
   const clearNodePrototypeHistory = useAppStore((s) => s.clearNodePrototypeHistory)
@@ -724,6 +751,7 @@ export function ForgePage() {
   const updateNodePrototypeVariant = useAppStore((s) => s.updateNodePrototypeVariant)
   const selectNodePrototypeVariant = useAppStore((s) => s.selectNodePrototypeVariant)
   const setNodePrototypeHtml = useAppStore((s) => s.setNodePrototypeHtml)
+  const setNodePrototypeSpec = useAppStore((s) => s.setNodePrototypeSpec)
   const upsertReusableLogicAssets = useAppStore((s) => s.upsertReusableLogicAssets)
   const updateReusableLogicAsset = useAppStore((s) => s.updateReusableLogicAsset)
   const approveReusableLogicAsset = useAppStore((s) => s.approveReusableLogicAsset)
@@ -742,20 +770,26 @@ export function ForgePage() {
   const messages = nodeChats[nodeId ?? ''] ?? []
   const performanceSpec = node ? resolveNodePerformanceSpec(node) : null
   const performanceSpecFingerprint = JSON.stringify(performanceSpec ?? null)
+  const selectedPrototypeVariant = prototypeVariants.find((variant) => variant.index === selectedVariantIndex)
   const hasDraftPrototypeArtifact = Boolean(
-    prototypeHtml?.trim()
-    || prototypeHistory.some((version) => version.html.trim())
-    || prototypeVariants.some((variant) => variant.status === 'complete' && variant.html?.trim()),
+    draftPrototypeSpec
+    && draftPrototypeSpec.mode === 'draft'
+    && (
+      (selectedPrototypeVariant?.prototypeSpec?.mode === 'draft' && prototypeHtml?.trim())
+      || prototypeHistory.some((version) => version.prototypeSpec?.mode === 'draft' && version.html.trim())
+      || prototypeVariants.some((variant) => variant.prototypeSpec?.mode === 'draft' && variant.status === 'complete' && variant.html?.trim())
+    ),
   )
+  const canSedimentReusableLogic = generationMode === 'resource_standard' && hasDraftPrototypeArtifact
   const reusableLogicCandidates = useMemo(
-    () => node && hasDraftPrototypeArtifact ? deriveReusableLogicCandidates(node, performanceSpec) : [],
-    [hasDraftPrototypeArtifact, node, performanceSpecFingerprint],
+    () => node && canSedimentReusableLogic ? deriveReusableLogicCandidates(node, performanceSpec, standardPrototypeSpec ?? draftPrototypeSpec) : [],
+    [canSedimentReusableLogic, draftPrototypeSpec, node, performanceSpecFingerprint, standardPrototypeSpec],
   )
   const currentNodeReusableLogicAssets = useMemo(() => (
-    hasDraftPrototypeArtifact
+    canSedimentReusableLogic
       ? assetWorkbench.reusableLogicAssets.filter((asset) => asset.source.nodeId === nodeId && asset.status !== 'ignored')
       : []
-  ), [assetWorkbench.reusableLogicAssets, hasDraftPrototypeArtifact, nodeId])
+  ), [assetWorkbench.reusableLogicAssets, canSedimentReusableLogic, nodeId])
   const currentNodeCandidateLogicAssets = currentNodeReusableLogicAssets.filter((asset) => asset.status === 'candidate')
   const hasPerformanceRisk = Boolean(
     nodeComplete
@@ -988,7 +1022,7 @@ export function ForgePage() {
     const currentNode = nodeId ? (useAppStore.getState().prdTree?.[nodeId] ?? node) : node
     const referenceImages = collectPrototypeImages(evidenceMessages)
     const currentStore = useAppStore.getState()
-    const requirementState = buildNodePrototypeRequirement(currentNode, evidenceMessages, currentStore.prdTree, {
+    const baseRequirementState = buildNodePrototypeRequirement(currentNode, evidenceMessages, currentStore.prdTree, {
       allowFigmaAssetReferences: generationMode !== 'resource_standard',
     })
     const assetManifest = buildPrototypeAssetManifest(
@@ -996,13 +1030,30 @@ export function ForgePage() {
       generationMode === 'resource_standard' ? 'strict' : 'audit',
       options?.preferredInterfaceAssetId,
     )
+    const draftSpec = buildDraftPrototypeSpecFromNode(currentNode, evidenceMessages, baseRequirementState, assetManifest)
+    const effectivePrototypeSpec = generationMode === 'resource_standard'
+      ? standardizePrototypeSpec(draftSpec, assetManifest)
+      : draftSpec
+    const requirementState: UXRequirementState = {
+      ...baseRequirementState,
+      prototype_spec: effectivePrototypeSpec,
+    }
     const currentPrototypeState = currentStore.nodePrototypeStates[nodeId ?? '']
     const prototypeSnapshotBeforeGeneration = {
       prototypeHtml: currentPrototypeState?.prototypeHtml ?? null,
       prototypeVariants: currentPrototypeState?.prototypeVariants ?? [],
       selectedVariantIndex: currentPrototypeState?.selectedVariantIndex ?? -1,
+      draftPrototypeSpec: currentPrototypeState?.draftPrototypeSpec ?? null,
+      standardPrototypeSpec: currentPrototypeState?.standardPrototypeSpec ?? null,
+    }
+    setNodePrototypeSpec(nodeId, 'draft', draftSpec)
+    if (effectivePrototypeSpec.mode === 'standard') {
+      setNodePrototypeSpec(nodeId, 'standard', effectivePrototypeSpec)
     }
     const selectedVariant = currentPrototypeState?.prototypeVariants.find((variant) => variant.index === currentPrototypeState?.selectedVariantIndex)
+    const currentPrototypeSpec = selectedVariant?.prototypeSpec
+      ?? (generationMode === 'resource_standard' ? currentPrototypeState?.standardPrototypeSpec : currentPrototypeState?.draftPrototypeSpec)
+      ?? null
     const selectedPrototypeHtml = selectedVariant?.html ?? currentPrototypeState?.prototypeHtml ?? null
     const shouldUseInterfaceBase = generationMode === 'resource_standard' && (options?.forceInterfaceBase === true || !selectedPrototypeHtml)
     const interfacePrototypeBase = shouldUseInterfaceBase
@@ -1031,6 +1082,8 @@ export function ForgePage() {
       if (prototypeSnapshotBeforeGeneration.selectedVariantIndex >= 0) {
         selectNodePrototypeVariant(nodeId, prototypeSnapshotBeforeGeneration.selectedVariantIndex)
       }
+      setNodePrototypeSpec(nodeId, 'draft', prototypeSnapshotBeforeGeneration.draftPrototypeSpec)
+      setNodePrototypeSpec(nodeId, 'standard', prototypeSnapshotBeforeGeneration.standardPrototypeSpec)
     }
 
     setIsGeneratingPrototype(true)
@@ -1038,10 +1091,10 @@ export function ForgePage() {
     try {
       if (isUpdate && prototypeBaseHtml) {
         if (shouldRecordCurrentBeforeAssetBase && selectedPrototypeHtml) {
-          recordNodePrototypeHistory(nodeId, selectedPrototypeHtml, { mode: 'update', note: `切换到资源库界面：${interfacePrototypeBase?.name ?? '界面底板'}` })
+          recordNodePrototypeHistory(nodeId, selectedPrototypeHtml, { mode: 'update', note: `切换到资源库界面：${interfacePrototypeBase?.name ?? '界面底板'}`, prototypeSpec: currentPrototypeSpec })
         }
         if (!isAssetBaseUpdate) {
-          recordNodePrototypeHistory(nodeId, prototypeBaseHtml, { mode: 'update', note: `修改前：${trimmedInstruction}` })
+          recordNodePrototypeHistory(nodeId, prototypeBaseHtml, { mode: 'update', note: `修改前：${trimmedInstruction}`, prototypeSpec: currentPrototypeSpec })
         }
         setNodePrototypeVariants(nodeId, Array.from({ length: updateVariantCount }, (_, offset) => ({
           index: prototypeBaseIndex + offset,
@@ -1050,6 +1103,7 @@ export function ForgePage() {
           focus: offset === 0 ? selectedVariant?.focus : undefined,
           history: offset === 0 ? prototypeBaseHistory : undefined,
           assetAudit: offset === 0 ? selectedVariant?.assetAudit : undefined,
+          prototypeSpec: offset === 0 ? (currentPrototypeSpec ?? effectivePrototypeSpec) : effectivePrototypeSpec,
         })))
         let didReceivePrototypeHtml = false
         await streamPrototype(
@@ -1073,6 +1127,7 @@ export function ForgePage() {
                 status: 'streaming',
                 focus: event.focus,
                 history: event.history,
+                prototypeSpec: effectivePrototypeSpec,
               })
               if (event.variantIndex === prototypeBaseIndex && event.html) selectNodePrototypeVariant(nodeId, event.variantIndex)
             } else if (event.type === 'variantComplete') {
@@ -1083,6 +1138,7 @@ export function ForgePage() {
                 focus: event.focus,
                 history: event.history,
                 assetAudit: event.assetAudit,
+                prototypeSpec: effectivePrototypeSpec,
               })
               if (event.variantIndex === prototypeBaseIndex && event.html) selectNodePrototypeVariant(nodeId, event.variantIndex)
             } else if (event.type === 'variantError') {
@@ -1102,7 +1158,12 @@ export function ForgePage() {
         return prototypeCompleted
       }
 
-      setNodePrototypeVariants(nodeId, Array.from({ length: createVariantCount }, (_, index) => ({ index, html: null, status: 'streaming' as const })))
+      setNodePrototypeVariants(nodeId, Array.from({ length: createVariantCount }, (_, index) => ({
+        index,
+        html: null,
+        status: 'streaming' as const,
+        prototypeSpec: effectivePrototypeSpec,
+      })))
       let didReceivePrototypeHtml = false
       await streamPrototype(
         settings.proxyBaseUrl,
@@ -1116,6 +1177,7 @@ export function ForgePage() {
               status: 'streaming',
               focus: event.focus,
               history: event.history,
+              prototypeSpec: effectivePrototypeSpec,
             })
           } else if (event.type === 'variantComplete') {
             if (event.html) didReceivePrototypeHtml = true
@@ -1125,6 +1187,7 @@ export function ForgePage() {
               focus: event.focus,
               history: event.history,
               assetAudit: event.assetAudit,
+              prototypeSpec: effectivePrototypeSpec,
             })
             if (event.html && useAppStore.getState().nodePrototypeStates[nodeId]?.selectedVariantIndex === -1) {
               selectNodePrototypeVariant(nodeId, event.variantIndex)
@@ -1178,6 +1241,7 @@ export function ForgePage() {
           history: variant.history,
           error: variant.error,
           assetAudit: variant.assetAudit,
+          prototypeSpec: effectivePrototypeSpec,
         })))
         const chosen = result.variants.find((variant) => variant.status === 'complete' && variant.html) ?? result.variants[0]
         if (chosen?.html) {
@@ -1195,6 +1259,7 @@ export function ForgePage() {
           history: variant.history,
           error: variant.error,
           assetAudit: variant.assetAudit,
+          prototypeSpec: effectivePrototypeSpec,
         })))
         const chosen = result.variants.find((variant) => variant.status === 'complete' && variant.html)
         if (chosen?.html) {
@@ -1217,9 +1282,52 @@ export function ForgePage() {
     return prototypeCompleted
   }
 
+  function effectiveReusableLogicAsset(assetId: string, patch?: Partial<ReusableLogicAsset>) {
+    const latestAsset = useAppStore.getState().assetWorkbench.reusableLogicAssets.find((asset) => asset.id === assetId)
+    if (!latestAsset) return null
+    return { ...latestAsset, ...patch, status: 'approved' as const }
+  }
+
+  function reusableLogicContextMessage(asset: ReusableLogicAsset) {
+    return [
+      `已确认可沉淀表现逻辑：${asset.name}`,
+      `类型：${asset.type}`,
+      `说明：${asset.description}`,
+      `逻辑：${asset.logic}`,
+      `复用注意：${asset.usageGuidance}`,
+      '这条逻辑已作为当前节点的资源库标准上下文，后续生成与 spec 更新需要把它映射到当前界面底板、素材白名单和真实状态分支。',
+    ].join('\n')
+  }
+
+  function syncReusableLogicToCurrentSpec(asset: ReusableLogicAsset) {
+    if (!nodeId) return
+    const currentStore = useAppStore.getState()
+    const currentNodeState = currentStore.nodePrototypeStates[nodeId]
+    const currentDraftSpec = currentNodeState?.draftPrototypeSpec ?? draftPrototypeSpec
+    const currentStandardSpec = currentNodeState?.standardPrototypeSpec ?? standardPrototypeSpec
+    if (currentDraftSpec) {
+      setNodePrototypeSpec(nodeId, 'draft', mergeReusableLogicIntoPrototypeSpec(currentDraftSpec, asset))
+    }
+    const baseStandardSpec = currentStandardSpec
+      ?? (currentDraftSpec
+        ? standardizePrototypeSpec(
+          currentDraftSpec,
+          buildPrototypeAssetManifest(currentStore.assetWorkbench, 'strict'),
+          [asset],
+        )
+        : null)
+    if (baseStandardSpec) {
+      setNodePrototypeSpec(nodeId, 'standard', mergeReusableLogicIntoPrototypeSpec(baseStandardSpec, asset))
+    }
+  }
+
   function approveReusableLogicWithPatch(assetId: string, patch?: Partial<ReusableLogicAsset>) {
     if (patch) updateReusableLogicAsset(assetId, patch)
     approveReusableLogicAsset(assetId)
+    const effectiveAsset = effectiveReusableLogicAsset(assetId, patch)
+    if (!effectiveAsset || !nodeId) return
+    appendNodeMessage(nodeId, { role: 'assistant', content: reusableLogicContextMessage(effectiveAsset) })
+    syncReusableLogicToCurrentSpec(effectiveAsset)
   }
 
   function completeCurrentNode() {
@@ -1248,11 +1356,6 @@ export function ForgePage() {
 
   function handleGenerationModeChange(mode: PrototypeGenerationMode) {
     if (mode === generationMode) return
-    if (mode === 'resource_standard' && currentNodeCandidateLogicAssets.length > 0) {
-      setPendingSedimentationAction('resource_mode')
-      setSedimentationOpen(true)
-      return
-    }
     setGenerationMode(mode)
   }
 
@@ -1261,9 +1364,8 @@ export function ForgePage() {
     setSedimentationOpen(false)
     setPendingSedimentationAction(null)
     setGenerationMode('resource_standard')
-    const latestAsset = useAppStore.getState().assetWorkbench.reusableLogicAssets.find((asset) => asset.id === assetId)
-    if (!latestAsset) return
-    const effectiveAsset = { ...latestAsset, ...patch, status: 'approved' as const }
+    const effectiveAsset = effectiveReusableLogicAsset(assetId, patch)
+    if (!effectiveAsset) return
     await handleGeneratePrototype(formatReusableLogicAssetForPrompt(effectiveAsset), {
       singlePrototypeOnly: true,
       recordInstruction: true,
@@ -1276,11 +1378,6 @@ export function ForgePage() {
     if (node.status === 'done') {
       updateNodeStatus(nodeId, 'pending_refine')
       setNodeComplete(false)
-      return
-    }
-    if (currentNodeCandidateLogicAssets.length > 0) {
-      setPendingSedimentationAction('confirm_node')
-      setSedimentationOpen(true)
       return
     }
     completeCurrentNode()
@@ -1361,6 +1458,8 @@ export function ForgePage() {
           prototypeHistory={prototypeHistory}
           prototypeVariants={prototypeVariants}
           selectedVariantIndex={selectedVariantIndex}
+          draftPrototypeSpec={draftPrototypeSpec}
+          standardPrototypeSpec={standardPrototypeSpec}
           isGeneratingPrototype={isGeneratingPrototype}
           isCancellingPrototype={isCancellingPrototype}
           nodeOperationSuggestions={nodeOperationSuggestions[nodeId] ?? []}

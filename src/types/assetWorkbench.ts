@@ -6,6 +6,8 @@ export type UiAssetParseMode = 'intermediate' | 'image_set'
 export type AssetRowStatus = 'idle' | 'parsing' | 'ready' | 'error'
 export type EffectAssetLoadStatus = 'not_loaded' | 'loading' | 'loaded' | 'error'
 export type EffectAssetPreviewType = 'image' | 'sequence' | 'video' | 'audio' | 'spine'
+export type AudioAssetKind = 'sfx' | 'music' | 'voice' | 'ambient' | 'unknown'
+export type AudioAssetLoadStatus = 'not_loaded' | 'loading' | 'loaded' | 'error'
 
 export interface ParsedFigmaAssetFile {
   name: string
@@ -108,16 +110,57 @@ export interface EffectAssetRow {
   updatedAt: string
 }
 
+export interface AudioAssetFile {
+  name: string
+  path: string
+  ext: string
+  size: number
+  loadedPath?: string | null
+  previewUrl?: string | null
+}
+
+export interface AudioAssetRow {
+  id: string
+  name: string
+  kind: AudioAssetKind
+  sourceRoot: string
+  relativePath: string
+  localPath: string
+  purpose: string
+  usageNote: string
+  triggerHint: string
+  playbackHint: string
+  linkedNodeIds: string[]
+  status: AssetRowStatus
+  loadStatus: AudioAssetLoadStatus
+  loadError: string | null
+  loadedRoot: string | null
+  loadedPath: string | null
+  loadedFileCount: number
+  loadedBytes: number
+  loadedAt: string | null
+  previewUrl: string | null
+  durationMs?: number | null
+  fileCount: number
+  files: AudioAssetFile[]
+  createdAt: string
+  updatedAt: string
+}
+
 export interface AssetWorkbenchState {
   uiRows: UiAssetRow[]
   effectRows: EffectAssetRow[]
+  audioRows: AudioAssetRow[]
   reusableLogicAssets: ReusableLogicAsset[]
   lastEffectScanRoot: string | null
+  lastAudioScanRoot: string | null
 }
 
 export const emptyAssetWorkbench: AssetWorkbenchState = {
   uiRows: [],
   effectRows: [],
+  audioRows: [],
   reusableLogicAssets: [],
   lastEffectScanRoot: null,
+  lastAudioScanRoot: null,
 }

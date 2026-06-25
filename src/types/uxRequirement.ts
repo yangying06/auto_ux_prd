@@ -1,4 +1,5 @@
 import type { PrdPerformanceSpec } from './prdNode'
+import type { PrototypeSpec } from './prototypeSpec'
 
 export interface AssetDependency {
   type: string
@@ -55,4 +56,5 @@ export interface UXRequirementState {
   missing_reasons: MissingReasons
   next_question: string | null
   performance_spec?: PrdPerformanceSpec | null
+  prototype_spec?: PrototypeSpec | null
 }

@@ -4,6 +4,8 @@ import type { PrototypeVariant } from './prototypeVariant'
 import type { QaIssue } from './qa'
 import type { UXRequirementState } from './uxRequirement'
 import type { AssetWorkbenchState } from './assetWorkbench'
+import type { PrototypeSpec } from './prototypeSpec'
+import type { ProjectWorkflowState } from './projectWorkflow'
 
 export const PROJECT_ARCHIVE_SCHEMA_VERSION = 1
 export const PROJECT_ARCHIVE_EXTENSION = 'gpf'
@@ -22,6 +24,7 @@ export interface ArchivedPrototypeVersion {
   createdAt: string
   mode: 'create' | 'update' | 'restore'
   note: string | null
+  prototypeSpec?: PrototypeSpec | null
 }
 
 export interface ArchivedNodePrototypeState {
@@ -29,6 +32,8 @@ export interface ArchivedNodePrototypeState {
   prototypeHistory: ArchivedPrototypeVersion[]
   prototypeVariants: PrototypeVariant[]
   selectedVariantIndex: number
+  draftPrototypeSpec?: PrototypeSpec | null
+  standardPrototypeSpec?: PrototypeSpec | null
 }
 
 export interface ProjectWorkspaceSnapshot {
@@ -39,6 +44,8 @@ export interface ProjectWorkspaceSnapshot {
   prototypeHistory: ArchivedPrototypeVersion[]
   prototypeVariants: PrototypeVariant[]
   selectedVariantIndex: number
+  draftPrototypeSpec?: PrototypeSpec | null
+  standardPrototypeSpec?: PrototypeSpec | null
   nodePrototypeStates: Record<string, ArchivedNodePrototypeState>
   settings: AppSettings
   prdTree: PrdTree | null
@@ -51,6 +58,7 @@ export interface ProjectWorkspaceSnapshot {
   pendingMapAdjustmentOperations?: MapAdjustmentOperation[]
   assetWorkbench?: AssetWorkbenchState
   sourceDocument: ProjectSourceDocument | null
+  projectWorkflow?: ProjectWorkflowState
 }
 
 export interface ProjectArchiveManifest {

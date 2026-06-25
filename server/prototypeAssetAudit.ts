@@ -183,8 +183,8 @@ export function normalizePrototypeAssetManifest(value: unknown): PrototypeAssetM
           const kind = item.kind
           const source = item.source
           if (!id || !name || !url) return null
-          if (!['interface_html', 'interface_image', 'ui_image', 'effect_preview', 'effect_spine'].includes(String(kind))) return null
-          if (!['ui_asset', 'effect_asset'].includes(String(source))) return null
+          if (!['interface_html', 'interface_image', 'ui_image', 'effect_preview', 'effect_spine', 'audio_clip'].includes(String(kind))) return null
+          if (!['ui_asset', 'effect_asset', 'audio_asset'].includes(String(source))) return null
           return {
             id,
             kind: kind as PrototypeAllowedAsset['kind'],
@@ -223,6 +223,7 @@ function formatPrototypeAssetKind(kind: PrototypeAllowedAsset['kind']) {
   if (kind === 'interface_image') return '界面子图'
   if (kind === 'ui_image') return '散图/图标/item'
   if (kind === 'effect_spine') return 'Spine playable effect'
+  if (kind === 'audio_clip') return 'Audio clip'
   return '特效预览'
 }
 
@@ -374,6 +375,7 @@ export function extractPrototypeResourceReferences(html: string) {
   const refs: string[] = []
   const attrPattern = /\b(?:src|href|poster)\s*=\s*(["'])(.*?)\1/giu
   const cssUrlPattern = /url\(\s*(["']?)(.*?)\1\s*\)/giu
+  const audioConstructorPattern = /\bnew\s+Audio\s*\(\s*(["'])(.*?)\1\s*\)/giu
   const spineConfigUrlPattern = /\b(?:jsonUrl|binaryUrl|atlasUrl|playerJsUrl|playerCssUrl)\s*:\s*(["'])(.*?)\1/giu
   const spineTextureUrlsPattern = /\btextureUrls\s*:\s*\[([\s\S]*?)\]/giu
   for (const match of html.matchAll(attrPattern)) {
@@ -381,6 +383,10 @@ export function extractPrototypeResourceReferences(html: string) {
     if (value) refs.push(value)
   }
   for (const match of html.matchAll(cssUrlPattern)) {
+    const value = match[2]?.trim()
+    if (value) refs.push(value)
+  }
+  for (const match of html.matchAll(audioConstructorPattern)) {
     const value = match[2]?.trim()
     if (value) refs.push(value)
   }

@@ -3,7 +3,6 @@ import type { ReactElement } from 'react'
 import type { FigmaFrameImportResponse } from '../../lib/api'
 import { findLatestUserMessageIndex, getTextFromMessage } from '../../lib/chatRecall'
 import { getClipboardImageFiles, readImageFileAsClipboardAttachment } from '../../lib/clipboardImages'
-import { formatReusableLogicAssetForPrompt, reusableLogicTypeLabel } from '../../lib/reusableLogicSedimentation'
 import type { PrototypeVersion } from '../../store/appStore'
 import type {
   ChatMessage,
@@ -15,8 +14,9 @@ import type {
   ReferenceImageRole,
 } from '../../types/chat'
 import type { PrototypeVariant } from '../../types/prototypeVariant'
-import type { PrdNodeOperationSuggestion, PrdPerformanceBlockingQuestion, PrdPerformanceSpec } from '../../types/prdNode'
-import type { AssetWorkbenchState } from '../../types/assetWorkbench'
+import type { PrototypeSpec } from '../../types/prototypeSpec'
+import type { PrdNodeOperationSuggestion, PrdPerformanceBlockingQuestion, PrdPerformanceSequenceStep, PrdPerformanceSpec } from '../../types/prdNode'
+import type { AssetWorkbenchState, EffectAssetRow } from '../../types/assetWorkbench'
 import type { PrototypeGenerationMode } from '../../types/prototypeAssets'
 import { NodeOperationReview } from './NodeOperationReview'
 import { PrototypeBoard } from '../state/PrototypeBoard'
@@ -30,6 +30,8 @@ interface ForgeChatProps {
   prototypeHistory: PrototypeVersion[]
   prototypeVariants: PrototypeVariant[]
   selectedVariantIndex: number
+  draftPrototypeSpec: PrototypeSpec | null
+  standardPrototypeSpec: PrototypeSpec | null
   isGeneratingPrototype: boolean
   isCancellingPrototype: boolean
   nodeOperationSuggestions: PrdNodeOperationSuggestion[]
@@ -80,6 +82,20 @@ interface ForgeChatSendOptions {
   performancePolishMode?: boolean
   suppressUserEcho?: boolean
   generationMode?: PrototypeGenerationMode
+}
+
+interface PerformanceEffectPoint {
+  id: string
+  title: string
+  detail: string
+  layer: string | null
+  assets: string[]
+}
+
+interface PerformanceEffectBinding {
+  pointId: string
+  effectRowIds: string[]
+  note: string
 }
 
 const CHAT_WRAP_ANYWHERE_CLASS = 'break-words [overflow-wrap:anywhere]'
@@ -755,6 +771,538 @@ function performanceSlotLabel(slot: PrdPerformanceBlockingQuestion['slot']) {
   return labels[slot]
 }
 
+function effectAssetKindLabel(kind: EffectAssetRow['kind']) {
+  const labels: Record<EffectAssetRow['kind'], string> = {
+    spine: 'Spine',
+    particle: '粒子',
+    sequence: '序列帧',
+    prefab: 'Prefab',
+    audio: '音频',
+    texture: '贴图',
+    scripted: '脚本',
+    unknown: '未知',
+  }
+  return labels[kind]
+}
+
+function effectAssetStatusLabel(row: EffectAssetRow) {
+  if (row.status === 'ready' && row.loadStatus === 'loaded') return '已加载'
+  if (row.status === 'ready') return '可引用'
+  if (row.loadStatus === 'loading') return '加载中'
+  if (row.status === 'error' || row.loadStatus === 'error') return '异常'
+  return '待准备'
+}
+
+function isUsableEffectAsset(row: EffectAssetRow) {
+  return row.status === 'ready' || row.loadStatus === 'loaded' || Boolean(row.previewUrl || row.spine)
+}
+
+function EffectAssetPreviewThumb({ row, compact = false }: { row: EffectAssetRow; compact?: boolean }) {
+  const sizeClass = compact ? 'h-12 w-12' : 'h-16 w-16'
+  const iconSize = compact ? '18px' : '22px'
+  const frameClassName = `${sizeClass} shrink-0 overflow-hidden rounded-md border border-outline-variant/40 bg-surface-container-high`
+
+  if (!row.previewUrl || !row.previewType) {
+    return (
+      <div className={`${frameClassName} flex items-center justify-center text-on-surface-variant`} title="暂无预览">
+        <span className="material-symbols-outlined" style={{ fontSize: iconSize }}>hide_image</span>
+      </div>
+    )
+  }
+
+  if (row.previewType === 'video') {
+    return (
+      <video
+        src={row.previewUrl}
+        className={`${frameClassName} object-cover`}
+        muted
+        loop
+        playsInline
+        autoPlay
+        title={row.name}
+      />
+    )
+  }
+
+  if (row.previewType === 'audio') {
+    return (
+      <div className={`${frameClassName} flex items-center justify-center text-tertiary`} title={row.previewUrl}>
+        <span className="material-symbols-outlined" style={{ fontSize: iconSize }}>volume_up</span>
+      </div>
+    )
+  }
+
+  return (
+    <img
+      src={row.previewUrl}
+      alt={row.name}
+      className={`${frameClassName} object-cover`}
+      title={row.previewUrl}
+    />
+  )
+}
+
+function buildPerformanceEffectPoints(spec: PrdPerformanceSpec | null): PerformanceEffectPoint[] {
+  if (!spec?.detected || spec.disabled) return []
+  if (spec.sequence.length > 0) {
+    return spec.sequence.map((step: PrdPerformanceSequenceStep, index) => ({
+      id: step.id ?? `sequence-${index + 1}`,
+      title: step.title || `表现点 ${index + 1}`,
+      detail: step.detail || '等待补充播放细节。',
+      layer: step.layer ?? null,
+      assets: step.assets ?? [],
+    }))
+  }
+  const eventTypes = spec.eventTypes.length ? spec.eventTypes : ['表现反馈']
+  return eventTypes.map((eventType, index) => ({
+    id: `event-${index + 1}`,
+    title: eventType,
+    detail: spec.trigger ?? spec.openQuestions[0] ?? '等待确认触发条件、播放顺序和资源接入方式。',
+    layer: spec.layers[index] ?? spec.layers[0] ?? null,
+    assets: spec.assets,
+  }))
+}
+
+function buildEffectAssetSummary(row: EffectAssetRow) {
+  return [
+    row.purpose,
+    row.usageNote,
+    row.pageHint,
+    row.implementationHint,
+  ].filter(Boolean).join(' / ') || row.relativePath || row.localPath || '暂无备注'
+}
+
+function buildPerformancePrototypeInstruction(
+  spec: PrdPerformanceSpec | null,
+  effectRows: EffectAssetRow[],
+  bindings: PerformanceEffectBinding[],
+) {
+  const points = buildPerformanceEffectPoints(spec)
+  const usableEffects = effectRows.filter(isUsableEffectAsset).slice(0, 12)
+  const effectById = new Map(effectRows.map((row) => [row.id, row]))
+  const pointById = new Map(points.map((point) => [point.id, point]))
+  const boundLines = bindings.flatMap((binding, index) => {
+    const point = pointById.get(binding.pointId)
+    const rows = binding.effectRowIds.flatMap((id) => {
+      const row = effectById.get(id)
+      return row ? [row] : []
+    })
+    if (!point || rows.length === 0) return []
+    return [
+      `${index + 1}. ${point.title} -> ${rows.map((row) => `${row.name}（${effectAssetKindLabel(row.kind)}）`).join('、')}${binding.note ? `；备注：${binding.note}` : ''}`,
+    ]
+  })
+  const lines = [
+    '请把当前“特效编排”结果同步到右侧 HTML 原型。',
+    '目标：只增强表现层、动效层和反馈状态，不重绘已有界面底板，不引用资源库清单外的素材。',
+    '',
+    '表现触发与流程：',
+    spec?.trigger ? `- 触发：${spec.trigger}` : '- 触发：按当前节点语义推断，缺失处用明显占位状态表达。',
+    spec?.branches.length ? `- 分支：${spec.branches.join('；')}` : null,
+    spec?.integrationModes?.length ? `- 接入方式：${spec.integrationModes.join('、')}` : null,
+    spec?.layers.length ? `- 层级：${spec.layers.join('、')}` : null,
+    spec?.controls.length ? `- 控制规则：${spec.controls.join('；')}` : null,
+    spec?.endState ? `- 结束状态：${spec.endState}` : null,
+    '',
+    '表现点：',
+    ...(points.length
+      ? points.map((point, index) => (
+        `${index + 1}. ${point.title}：${point.detail}${point.layer ? `；层级 ${point.layer}` : ''}${point.assets.length ? `；期望资源 ${point.assets.join('、')}` : ''}`
+      ))
+      : ['1. 根据当前节点需求生成一个可见的触发反馈、播放中状态和结束反馈。']),
+    '',
+    '已绑定特效节点：',
+    ...(boundLines.length
+      ? boundLines
+      : ['- 当前尚未手动绑定特效节点；请优先按可用特效资源和表现点语义自动匹配，无法匹配处用占位反馈表达。']),
+    '',
+    '可用特效资源：',
+    ...(usableEffects.length
+      ? usableEffects.map((row, index) => (
+        `${index + 1}. ${row.name}（${effectAssetKindLabel(row.kind)}，${effectAssetStatusLabel(row)}）：${buildEffectAssetSummary(row)}`
+      ))
+      : ['- 当前没有已准备好的特效资源；不要虚构真实素材路径，只能使用占位动效或界面状态表达。']),
+  ].filter((line): line is string => Boolean(line))
+
+  return lines.join('\n')
+}
+
+function PerformanceEffectWorkbench({
+  performanceSpec,
+  blockingQuestion,
+  effectRows,
+  bindings,
+  isBusy,
+  onOpenAssets,
+  onBindEffect,
+  onBindEffects,
+  onUnbindEffect,
+  onBindingNoteChange,
+  onAskQuestion,
+  onSyncToPrototype,
+}: {
+  performanceSpec: PrdPerformanceSpec | null
+  blockingQuestion: PrdPerformanceBlockingQuestion | null
+  effectRows: EffectAssetRow[]
+  bindings: PerformanceEffectBinding[]
+  isBusy: boolean
+  onOpenAssets?: () => void
+  onBindEffect: (pointId: string, effectRowId: string) => void
+  onBindEffects: (pointId: string, effectRowIds: string[]) => void
+  onUnbindEffect: (pointId: string, effectRowId: string) => void
+  onBindingNoteChange: (pointId: string, note: string) => void
+  onAskQuestion: () => void
+  onSyncToPrototype: () => void
+}) {
+  const points = buildPerformanceEffectPoints(performanceSpec)
+  const usableEffects = effectRows.filter(isUsableEffectAsset)
+  const effectKinds = Array.from(new Set(usableEffects.map((row) => row.kind)))
+  const [selectedPointId, setSelectedPointId] = useState(points[0]?.id ?? '')
+  const [effectSearch, setEffectSearch] = useState('')
+  const [effectKindFilter, setEffectKindFilter] = useState<EffectAssetRow['kind'] | 'all'>('all')
+  const [checkedEffectIds, setCheckedEffectIds] = useState<string[]>([])
+  const selectedPoint = points.find((point) => point.id === selectedPointId) ?? points[0] ?? null
+  const selectedBinding = selectedPoint
+    ? bindings.find((binding) => binding.pointId === selectedPoint.id) ?? { pointId: selectedPoint.id, effectRowIds: [], note: '' }
+    : null
+  const boundEffects = selectedBinding
+    ? selectedBinding.effectRowIds.flatMap((id) => {
+      const row = effectRows.find((item) => item.id === id)
+      return row ? [row] : []
+    })
+    : []
+  const score = clampUnderstandingScore(performanceSpec?.readiness?.score ?? performanceSpec?.confidence ?? 0)
+  const readyLevel = performanceSpec?.readiness?.level ?? (performanceSpec?.detected ? 'risk' : 'blocked')
+  const unresolvedCount = performanceSpec?.readiness
+    ? performanceSpec.readiness.inferredSlots.length + performanceSpec.readiness.missingSlots.length
+    : 0
+  const normalizedEffectSearch = effectSearch.trim().toLowerCase()
+  const filteredEffects = usableEffects.filter((row) => {
+    if (effectKindFilter !== 'all' && row.kind !== effectKindFilter) return false
+    if (!normalizedEffectSearch) return true
+    return [
+      row.name,
+      row.relativePath,
+      row.localPath,
+      row.purpose,
+      row.usageNote,
+      row.pageHint,
+      row.implementationHint,
+      row.previewType,
+      effectAssetKindLabel(row.kind),
+      effectAssetStatusLabel(row),
+    ].filter(Boolean).some((value) => String(value).toLowerCase().includes(normalizedEffectSearch))
+  })
+  const bindableCheckedEffectIds = checkedEffectIds.filter((id) => !selectedBinding?.effectRowIds.includes(id))
+
+  useEffect(() => {
+    if (!points.length) {
+      if (selectedPointId) setSelectedPointId('')
+      return
+    }
+    if (!points.some((point) => point.id === selectedPointId)) {
+      setSelectedPointId(points[0].id)
+    }
+  }, [points, selectedPointId])
+
+  useEffect(() => {
+    setCheckedEffectIds((current) => current.filter((id) => filteredEffects.some((row) => row.id === id)))
+  }, [filteredEffects])
+
+  return (
+    <div className="flex h-full min-h-0 flex-1 flex-col gap-md overflow-hidden px-lg py-md">
+      <section className="shrink-0 rounded-lg border border-secondary/35 bg-secondary/10 p-md">
+        <div className="flex flex-wrap items-start justify-between gap-sm">
+          <div className="min-w-0">
+            <div className="mb-xs flex items-center gap-xs text-secondary">
+              <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>auto_awesome_motion</span>
+              <h3 className="text-title-md font-semibold text-on-surface">特效编排</h3>
+            </div>
+            <p className={`max-w-3xl text-body-sm text-on-surface-variant ${CHAT_WRAP_ANYWHERE_CLASS}`}>
+              把当前节点的触发、分支、播放顺序、接入方式、资源和层级整理成可同步到右侧原型的表现约束。
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-xs">
+            <span className="inline-flex min-h-[28px] items-center gap-xs rounded-md border border-secondary/40 bg-surface px-sm font-mono text-[10px] uppercase text-secondary">
+              <span className="material-symbols-outlined" style={{ fontSize: '13px' }}>speed</span>
+              {score}%
+            </span>
+            <span className="inline-flex min-h-[28px] items-center gap-xs rounded-md border border-outline-variant/40 bg-surface px-sm font-mono text-[10px] uppercase text-on-surface-variant">
+              {readyLevel}
+            </span>
+            <span className="inline-flex min-h-[28px] items-center gap-xs rounded-md border border-outline-variant/40 bg-surface px-sm font-mono text-[10px] uppercase text-on-surface-variant">
+              {unresolvedCount} unresolved
+            </span>
+          </div>
+        </div>
+        {blockingQuestion ? (
+          <div className="mt-sm rounded-md border border-error/35 bg-error-container/15 p-sm text-body-sm text-on-surface">
+            <span className="font-medium text-error">当前阻塞：</span>
+            [{performanceSlotLabel(blockingQuestion.slot)}] {blockingQuestion.question}
+          </div>
+        ) : null}
+      </section>
+
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-md overflow-hidden 2xl:grid-cols-[0.9fr_1.05fr_0.95fr]">
+        <section className="flex min-h-0 flex-col rounded-lg border border-outline-variant/35 bg-surface-container-low p-md">
+          <div className="mb-sm flex items-center justify-between gap-sm">
+            <div className="flex items-center gap-xs">
+              <span className="material-symbols-outlined text-primary" style={{ fontSize: '17px' }}>route</span>
+              <h4 className="text-title-sm font-semibold text-on-surface">表现点</h4>
+            </div>
+            <span className="font-mono text-[10px] uppercase text-on-surface-variant">{points.length} items</span>
+          </div>
+          {points.length ? (
+            <div className="min-h-0 flex-1 space-y-xs overflow-y-auto pr-xs">
+              {points.map((point, index) => (
+                <button
+                  key={point.id}
+                  type="button"
+                  onClick={() => setSelectedPointId(point.id)}
+                  className={[
+                    'block w-full rounded-md border p-sm text-left transition-colors',
+                    selectedPoint?.id === point.id
+                      ? 'border-secondary bg-secondary-container/20'
+                      : 'border-outline-variant/30 bg-surface hover:border-secondary/45',
+                  ].join(' ')}
+                >
+                  <div className="mb-[2px] flex items-center gap-xs">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-primary-container font-mono text-[10px] text-on-primary-container">
+                      {index + 1}
+                    </span>
+                    <h5 className={`min-w-0 flex-1 truncate text-label-lg font-semibold text-on-surface ${CHAT_WRAP_ANYWHERE_CLASS}`}>
+                      {point.title}
+                    </h5>
+                  </div>
+                  <p className={`text-body-sm text-on-surface-variant ${CHAT_WRAP_ANYWHERE_CLASS}`}>{point.detail}</p>
+                  <div className="mt-xs flex flex-wrap gap-xs">
+                    {point.layer ? (
+                      <span className="rounded border border-primary/25 bg-primary/10 px-xs py-[2px] font-mono text-[10px] text-primary">{point.layer}</span>
+                    ) : null}
+                    {point.assets.map((asset) => (
+                      <span key={asset} className="rounded border border-tertiary/25 bg-tertiary/10 px-xs py-[2px] font-mono text-[10px] text-tertiary">{asset}</span>
+                    ))}
+                  </div>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="rounded-md border border-dashed border-outline-variant/50 bg-surface p-md text-body-sm text-on-surface-variant">
+              当前节点还没有识别出明确表现点。可以先让 AI 追问表现问题，或在资源库导入特效后再同步到原型。
+            </div>
+          )}
+        </section>
+
+        <section className="flex min-h-0 flex-col rounded-lg border border-outline-variant/35 bg-surface-container-low p-md">
+          <div className="mb-sm flex items-center justify-between gap-sm">
+            <div className="flex items-center gap-xs">
+              <span className="material-symbols-outlined text-secondary" style={{ fontSize: '17px' }}>hub</span>
+              <h4 className="text-title-sm font-semibold text-on-surface">节点绑定</h4>
+            </div>
+            <span className="font-mono text-[10px] uppercase text-on-surface-variant">{boundEffects.length} bound</span>
+          </div>
+          {selectedPoint ? (
+            <div className="flex min-h-0 flex-1 flex-col gap-sm">
+              <div className="shrink-0 rounded-md border border-outline-variant/30 bg-surface p-sm">
+                <div className="text-label-lg font-semibold text-on-surface">{selectedPoint.title}</div>
+                <p className={`mt-[2px] text-body-sm text-on-surface-variant ${CHAT_WRAP_ANYWHERE_CLASS}`}>{selectedPoint.detail}</p>
+              </div>
+              <div className="min-h-0 flex-1 space-y-xs overflow-y-auto pr-xs">
+                {boundEffects.length ? boundEffects.map((row) => (
+                  <div key={row.id} className="flex min-w-0 items-start justify-between gap-sm rounded-md border border-secondary/25 bg-secondary/10 p-sm">
+                    <div className="flex min-w-0 items-start gap-sm">
+                      <EffectAssetPreviewThumb row={row} compact />
+                      <div className="min-w-0">
+                        <div className="truncate text-label-md font-semibold text-on-surface">{row.name}</div>
+                        <div className="font-mono text-[10px] text-on-surface-variant">{effectAssetKindLabel(row.kind)} / {effectAssetStatusLabel(row)}</div>
+                        <p className={`mt-[2px] text-body-sm text-on-surface-variant ${CHAT_WRAP_ANYWHERE_CLASS}`}>{buildEffectAssetSummary(row)}</p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onUnbindEffect(selectedPoint.id, row.id)}
+                      className="shrink-0 rounded border border-outline-variant/45 px-xs py-[2px] text-label-md text-on-surface-variant hover:border-error/60 hover:text-error"
+                    >
+                      移除
+                    </button>
+                  </div>
+                )) : (
+                  <div className="rounded-md border border-dashed border-outline-variant/50 bg-surface p-md text-body-sm text-on-surface-variant">
+                    还没有绑定特效资源。请从右侧资源候选中选择一个资源绑定到当前表现点。
+                  </div>
+                )}
+              </div>
+              <label className="block shrink-0">
+                <span className="mb-xs block text-label-md text-on-surface-variant">绑定备注</span>
+                <textarea
+                  value={selectedBinding?.note ?? ''}
+                  onChange={(event) => onBindingNoteChange(selectedPoint.id, event.target.value)}
+                  rows={4}
+                  className="w-full resize-none rounded-md border border-outline-variant bg-surface px-sm py-xs text-body-sm text-on-surface outline-none focus:border-secondary"
+                  placeholder="补充播放时机、资源参数、层级、循环/打断规则或降级方案..."
+                />
+              </label>
+            </div>
+          ) : (
+            <div className="rounded-md border border-dashed border-outline-variant/50 bg-surface p-md text-body-sm text-on-surface-variant">
+              当前没有可绑定的表现点。
+            </div>
+          )}
+        </section>
+
+        <section className="flex min-h-0 flex-col rounded-lg border border-outline-variant/35 bg-surface-container-low p-md">
+          <div className="mb-sm flex items-center justify-between gap-sm">
+            <div className="flex items-center gap-xs">
+              <span className="material-symbols-outlined text-tertiary" style={{ fontSize: '17px' }}>animation</span>
+              <h4 className="text-title-sm font-semibold text-on-surface">可用特效资源</h4>
+            </div>
+            <span className="font-mono text-[10px] uppercase text-on-surface-variant">{filteredEffects.length}/{usableEffects.length}/{effectRows.length}</span>
+          </div>
+          <div className="mb-sm grid shrink-0 grid-cols-[minmax(0,1fr)_112px] gap-xs">
+            <label className="relative block min-w-0">
+              <span className="material-symbols-outlined pointer-events-none absolute left-xs top-1/2 -translate-y-1/2 text-on-surface-variant" style={{ fontSize: '15px' }}>search</span>
+              <input
+                value={effectSearch}
+                onChange={(event) => setEffectSearch(event.target.value)}
+                className="h-8 w-full rounded-md border border-outline-variant bg-surface pl-lg pr-xs text-body-sm text-on-surface outline-none focus:border-tertiary"
+                placeholder="搜索名称、路径、备注"
+              />
+            </label>
+            <select
+              value={effectKindFilter}
+              onChange={(event) => setEffectKindFilter(event.target.value as EffectAssetRow['kind'] | 'all')}
+              className="h-8 rounded-md border border-outline-variant bg-surface px-xs text-label-md text-on-surface outline-none focus:border-tertiary"
+              title="按资源类型筛选"
+            >
+              <option value="all">全部类型</option>
+              {effectKinds.map((kind) => (
+                <option key={kind} value={kind}>{effectAssetKindLabel(kind)}</option>
+              ))}
+            </select>
+          </div>
+          {selectedPoint && filteredEffects.length ? (
+            <div className="mb-sm flex shrink-0 flex-wrap items-center justify-between gap-xs rounded-md border border-outline-variant/30 bg-surface px-sm py-xs">
+              <div className="flex items-center gap-xs">
+                <button
+                  type="button"
+                  onClick={() => setCheckedEffectIds(filteredEffects.map((row) => row.id))}
+                  className="rounded border border-outline-variant/45 px-xs py-[2px] text-label-md text-on-surface-variant hover:border-tertiary/50 hover:text-tertiary"
+                >
+                  全选当前筛选
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCheckedEffectIds([])}
+                  className="rounded border border-outline-variant/45 px-xs py-[2px] text-label-md text-on-surface-variant hover:border-error/50 hover:text-error"
+                >
+                  清空
+                </button>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!selectedPoint || bindableCheckedEffectIds.length === 0) return
+                  onBindEffects(selectedPoint.id, bindableCheckedEffectIds)
+                  setCheckedEffectIds([])
+                }}
+                disabled={bindableCheckedEffectIds.length === 0}
+                className="inline-flex min-h-[28px] items-center gap-xs rounded-md border border-tertiary bg-tertiary-container px-sm text-label-md font-medium text-on-tertiary-container transition-opacity hover:opacity-90 disabled:opacity-40"
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>playlist_add</span>
+                批量绑定 {bindableCheckedEffectIds.length}
+              </button>
+            </div>
+          ) : null}
+          {usableEffects.length ? (
+            <div className="min-h-0 flex-1 space-y-xs overflow-y-auto pr-xs">
+              {filteredEffects.map((row) => (
+                <article key={row.id} className="rounded-md border border-outline-variant/30 bg-surface p-sm">
+                  <div className="flex min-w-0 items-center justify-between gap-xs">
+                    <div className="flex min-w-0 items-start gap-sm">
+                      <input
+                        type="checkbox"
+                        checked={checkedEffectIds.includes(row.id)}
+                        onChange={(event) => {
+                          setCheckedEffectIds((current) => event.target.checked
+                            ? Array.from(new Set([...current, row.id]))
+                            : current.filter((id) => id !== row.id))
+                        }}
+                        className="mt-[3px] h-4 w-4 shrink-0 accent-tertiary"
+                        aria-label={`选择 ${row.name}`}
+                      />
+                      <EffectAssetPreviewThumb row={row} />
+                      <div className="min-w-0">
+                        <h5 className="truncate text-label-lg font-semibold text-on-surface">{row.name}</h5>
+                        <p className="font-mono text-[10px] text-on-surface-variant">{effectAssetKindLabel(row.kind)} / {effectAssetStatusLabel(row)}</p>
+                      </div>
+                    </div>
+                    {row.previewType ? (
+                      <span className="shrink-0 rounded border border-tertiary/30 bg-tertiary/10 px-xs py-[2px] font-mono text-[10px] text-tertiary">
+                        {row.previewType}
+                      </span>
+                    ) : null}
+                  </div>
+                  <p className={`mt-xs text-body-sm text-on-surface-variant ${CHAT_WRAP_ANYWHERE_CLASS}`}>{buildEffectAssetSummary(row)}</p>
+                  <button
+                    type="button"
+                    onClick={() => selectedPoint && onBindEffect(selectedPoint.id, row.id)}
+                    disabled={!selectedPoint || selectedBinding?.effectRowIds.includes(row.id)}
+                    className="mt-xs inline-flex min-h-[28px] items-center gap-xs rounded-md border border-secondary/40 bg-secondary/10 px-sm text-label-md text-secondary transition-colors hover:bg-secondary/20 disabled:opacity-40"
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>
+                      {selectedBinding?.effectRowIds.includes(row.id) ? 'check' : 'add_link'}
+                    </span>
+                    {selectedBinding?.effectRowIds.includes(row.id) ? '已绑定' : '绑定到节点'}
+                  </button>
+                </article>
+              ))}
+              {filteredEffects.length === 0 ? (
+                <div className="rounded-md border border-dashed border-outline-variant/50 bg-surface p-md text-body-sm text-on-surface-variant">
+                  当前筛选下没有可绑定的特效资源。
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <div className="rounded-md border border-dashed border-outline-variant/50 bg-surface p-md text-body-sm text-on-surface-variant">
+              资源库里还没有可引用的特效资源。
+              {onOpenAssets ? (
+                <button
+                  type="button"
+                  onClick={onOpenAssets}
+                  className="ml-xs rounded border border-tertiary/40 px-xs py-[2px] text-label-md text-tertiary hover:bg-tertiary/10"
+                >
+                  打开资源库
+                </button>
+              ) : null}
+            </div>
+          )}
+        </section>
+      </div>
+
+      <div className="flex shrink-0 flex-wrap items-center justify-end gap-sm rounded-lg border border-outline-variant/35 bg-surface-container-low p-sm">
+        <button
+          type="button"
+          onClick={onAskQuestion}
+          disabled={isBusy}
+          className="inline-flex min-h-[36px] items-center gap-xs rounded-lg border border-secondary/45 bg-secondary/10 px-md text-label-md font-medium text-secondary transition-colors hover:bg-secondary/20 disabled:opacity-40"
+        >
+          <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>psychology_alt</span>
+          追问表现问题
+        </button>
+        <button
+          type="button"
+          onClick={onSyncToPrototype}
+          disabled={isBusy}
+          className="inline-flex min-h-[36px] items-center gap-xs rounded-lg border border-tertiary bg-tertiary-container px-md text-label-md font-medium text-on-tertiary-container transition-opacity hover:opacity-90 disabled:opacity-40"
+        >
+          <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>sync_alt</span>
+          同步到原型
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function latestUserPrototypeInstruction(messages: ChatMessage[]) {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]
@@ -799,6 +1347,8 @@ export function ForgeChat({
   prototypeHistory,
   prototypeVariants,
   selectedVariantIndex,
+  draftPrototypeSpec,
+  standardPrototypeSpec,
   isGeneratingPrototype,
   isCancellingPrototype,
   nodeOperationSuggestions,
@@ -830,8 +1380,9 @@ export function ForgeChat({
   const [variantView, setVariantView] = useState<'grid' | 'single'>('single')
   const [singlePrototypeOnly, setSinglePrototypeOnly] = useState(true)
   const [performancePolishMode, setPerformancePolishMode] = useState(false)
+  const [effectIntegrationOpen, setEffectIntegrationOpen] = useState(false)
+  const [effectBindings, setEffectBindings] = useState<PerformanceEffectBinding[]>([])
   const [selectedInterfaceAssetId, setSelectedInterfaceAssetId] = useState('')
-  const [selectedReusableLogicAssetId, setSelectedReusableLogicAssetId] = useState('')
   const [showFigmaImporter, setShowFigmaImporter] = useState(false)
   const [figmaUrl, setFigmaUrl] = useState('')
   const [isImportingFigma, setIsImportingFigma] = useState(false)
@@ -846,18 +1397,17 @@ export function ForgeChat({
     assetWorkbench.uiRows.filter((row) => row.kind === 'interface' && row.status === 'ready' && Boolean(row.result?.html?.trim()))
   ), [assetWorkbench.uiRows])
   const selectedInterfacePackage = readyInterfacePackages.find((row) => row.id === selectedInterfaceAssetId) ?? readyInterfacePackages[0] ?? null
-  const approvedReusableLogicAssets = useMemo(() => (
-    assetWorkbench.reusableLogicAssets.filter((asset) => asset.status === 'approved')
-  ), [assetWorkbench.reusableLogicAssets])
-  const selectedReusableLogicAsset = approvedReusableLogicAssets.find((asset) => asset.id === selectedReusableLogicAssetId)
-    ?? approvedReusableLogicAssets[0]
-    ?? null
-
-  // Whenever a fresh batch of variants arrives, default back to the comparison grid so the
-  // user can choose; collapse to single preview when there is at most one variant.
+  // Keep generation in comparison mode, but preserve the user's chosen single preview
+  // after generation settles so the selected prototype becomes the interactive work area.
   useEffect(() => {
-    setVariantView(prototypeVariants.length > 1 ? 'grid' : 'single')
-  }, [prototypeVariants])
+    if (prototypeVariants.length <= 1) {
+      setVariantView('single')
+      return
+    }
+    if (isGeneratingPrototype || selectedVariantIndex < 0) {
+      setVariantView('grid')
+    }
+  }, [isGeneratingPrototype, prototypeVariants.length, selectedVariantIndex])
 
   useEffect(() => {
     if (generationMode === 'resource_standard') setShowFigmaImporter(false)
@@ -872,17 +1422,6 @@ export function ForgeChat({
       setSelectedInterfaceAssetId(readyInterfacePackages[0].id)
     }
   }, [readyInterfacePackages, selectedInterfaceAssetId])
-
-  useEffect(() => {
-    if (approvedReusableLogicAssets.length === 0) {
-      if (selectedReusableLogicAssetId) setSelectedReusableLogicAssetId('')
-      return
-    }
-    if (!approvedReusableLogicAssets.some((asset) => asset.id === selectedReusableLogicAssetId)) {
-      setSelectedReusableLogicAssetId(approvedReusableLogicAssets[0].id)
-    }
-  }, [approvedReusableLogicAssets, selectedReusableLogicAssetId])
-
 
   function handleSelectVariant(index: number) {
     onSelectVariant(index)
@@ -1133,9 +1672,13 @@ export function ForgeChat({
     }
 
     if (performancePolishMode) return
-
     setPerformancePolishMode(true)
+    await handleAskPerformanceQuestion()
+  }
+
+  async function handleAskPerformanceQuestion() {
     if (isSending || isClassifying || isImportingFigma) return
+    setPerformancePolishMode(true)
 
     setError(null)
     setIsSending(true)
@@ -1150,6 +1693,67 @@ export function ForgeChat({
     } finally {
       setIsSending(false)
     }
+  }
+
+  async function handleSyncPerformanceToPrototype() {
+    if (isSending || isClassifying || isImportingFigma || isGeneratingPrototype) return
+    setError(null)
+    onGenerationModeChange('resource_standard')
+    const instruction = buildPerformancePrototypeInstruction(performanceSpec, assetWorkbench.effectRows, effectBindings)
+    const updated = await handleGeneratePrototype(instruction, {
+      singlePrototypeOnly,
+      recordInstruction: true,
+      generationMode: 'resource_standard',
+    })
+    if (updated) setEffectIntegrationOpen(false)
+  }
+
+  function handleBindEffectToPoint(pointId: string, effectRowId: string) {
+    setEffectBindings((current) => {
+      const existing = current.find((binding) => binding.pointId === pointId)
+      if (!existing) return [...current, { pointId, effectRowIds: [effectRowId], note: '' }]
+      if (existing.effectRowIds.includes(effectRowId)) return current
+      return current.map((binding) =>
+        binding.pointId === pointId
+          ? { ...binding, effectRowIds: [...binding.effectRowIds, effectRowId] }
+          : binding,
+      )
+    })
+  }
+
+  function handleBindEffectsToPoint(pointId: string, effectRowIds: string[]) {
+    if (effectRowIds.length === 0) return
+    setEffectBindings((current) => {
+      const existing = current.find((binding) => binding.pointId === pointId)
+      const uniqueEffectRowIds = Array.from(new Set(effectRowIds))
+      if (!existing) return [...current, { pointId, effectRowIds: uniqueEffectRowIds, note: '' }]
+      const nextEffectRowIds = Array.from(new Set([...existing.effectRowIds, ...uniqueEffectRowIds]))
+      return current.map((binding) =>
+        binding.pointId === pointId
+          ? { ...binding, effectRowIds: nextEffectRowIds }
+          : binding,
+      )
+    })
+  }
+
+  function handleUnbindEffectFromPoint(pointId: string, effectRowId: string) {
+    setEffectBindings((current) => current.flatMap((binding) => {
+      if (binding.pointId !== pointId) return [binding]
+      const effectRowIds = binding.effectRowIds.filter((id) => id !== effectRowId)
+      if (effectRowIds.length === 0 && !binding.note.trim()) return []
+      return [{ ...binding, effectRowIds }]
+    }))
+  }
+
+  function handleEffectBindingNoteChange(pointId: string, note: string) {
+    setEffectBindings((current) => {
+      const existing = current.find((binding) => binding.pointId === pointId)
+      if (!existing) return note.trim() ? [...current, { pointId, effectRowIds: [], note }] : current
+      if (!note.trim() && existing.effectRowIds.length === 0) {
+        return current.filter((binding) => binding.pointId !== pointId)
+      }
+      return current.map((binding) => binding.pointId === pointId ? { ...binding, note } : binding)
+    })
   }
 
   async function handleGeneratePrototype(instruction?: string, options?: { singlePrototypeOnly?: boolean; recordInstruction?: boolean; evidenceContent?: ChatMessage['content']; currentTurnOnly?: boolean; generationMode?: PrototypeGenerationMode; preferredInterfaceAssetId?: string | null; forceInterfaceBase?: boolean }) {
@@ -1199,36 +1803,6 @@ export function ForgeChat({
       generationMode: 'resource_standard',
       preferredInterfaceAssetId: selectedInterfacePackage.id,
       forceInterfaceBase: true,
-    })
-  }
-
-  async function handleGenerateFromReusableLogic() {
-    if (isSending || isClassifying || isImportingFigma || isGeneratingPrototype) return
-    if (!selectedReusableLogicAsset) {
-      setError('请先在草稿模式中确认一条可复用表现逻辑。')
-      return
-    }
-
-    const draftInstruction = draft.trim()
-    const hasPendingEvidence = Boolean(draftInstruction || attachments.length > 0)
-    const pendingEvidenceContent = hasPendingEvidence ? buildMessageContent(draftInstruction) : undefined
-    const instruction = [
-      formatReusableLogicAssetForPrompt(selectedReusableLogicAsset),
-      draftInstruction ? `当前补充要求：${draftInstruction}` : null,
-    ].filter(Boolean).join('\n\n')
-
-    if (hasPendingEvidence) {
-      setDraft('')
-      setAttachments([])
-    }
-    setError(null)
-    await handleGeneratePrototype(instruction, {
-      singlePrototypeOnly,
-      recordInstruction: true,
-      evidenceContent: pendingEvidenceContent,
-      generationMode: 'resource_standard',
-      preferredInterfaceAssetId: selectedInterfacePackage?.id ?? null,
-      forceInterfaceBase: Boolean(selectedInterfacePackage),
     })
   }
 
@@ -1389,29 +1963,32 @@ export function ForgeChat({
     : overallUnderstanding.score >= 60
       ? 'bg-secondary'
       : 'bg-error'
-  const modeTitle = performancePolishMode ? 'AI 追问表现' : '自由迭代'
-  const modeSubtitle = performancePolishMode
-    ? '单问单答 · 回答后重算理解度'
-    : '自由补充 · AI 自动归类处理'
   const focusValue = performancePolishMode && blockingQuestion
     ? performanceSlotLabel(blockingQuestion.slot)
     : performancePolishMode
       ? '等待下一问'
       : '未启用'
+  const modeTitle = performancePolishMode ? 'AI 追问表现' : '自由迭代'
+  const modeSubtitle = performancePolishMode
+    ? '单问单答 / 回答后重算理解度'
+    : '自由补充 / AI 自动归类处理'
   const assetAuditText = assetAuditErrorCount > 0
     ? `审计错误 ${assetAuditErrorCount}`
     : assetAuditWarningCount > 0
       ? `审计提示 ${assetAuditWarningCount}`
       : null
   const prototypeCancelText = isCancellingPrototype ? '取消中' : '取消生成'
-  const prototypePrimaryText = isGeneratingPrototype ? prototypeCancelText : prototypeHtml ? '按对话更新' : '生成原型'
+  const prototypePrimaryText = isGeneratingPrototype ? prototypeCancelText : prototypeHtml ? '按对话更新' : '生成预览'
   const prototypeCompareText = isGeneratingPrototype ? prototypeCancelText : '双方案'
   const prototypePrimaryIcon = isCancellingPrototype ? 'hourglass_empty' : isGeneratingPrototype ? 'stop_circle' : 'auto_awesome'
   const prototypeCompareIcon = isCancellingPrototype ? 'hourglass_empty' : isGeneratingPrototype ? 'stop_circle' : 'view_comfy'
   const prototypeActionDisabled = (isImportingFigma && !isGeneratingPrototype) || isCancellingPrototype
+  const specStatusItems = [
+    { id: 'draft', label: '草稿 Spec', ready: Boolean(draftPrototypeSpec), title: draftPrototypeSpec?.updatedAt ?? '尚未生成草稿 Spec' },
+    { id: 'standard', label: '正式 Spec', ready: Boolean(standardPrototypeSpec), title: standardPrototypeSpec?.updatedAt ?? '尚未标准化正式 Spec' },
+  ]
   const figmaImportActionText = '生成草稿'
   const figmaImporterTitle = '从 Figma 提取视觉证据，并结合当前文档生成草稿预览'
-
   return (
     <div className="flex min-w-0 flex-1 bg-background blueprint-grid">
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
@@ -1691,32 +2268,6 @@ export function ForgeChat({
                       </span>
                       用界面生成
                     </button>
-                    <span className="h-5 w-px bg-tertiary/30" />
-                    <select
-                      value={selectedReusableLogicAsset?.id ?? ''}
-                      onChange={(event) => setSelectedReusableLogicAssetId(event.target.value)}
-                      disabled={approvedReusableLogicAssets.length === 0 || isGeneratingPrototype}
-                      className="h-7 min-w-[124px] max-w-[190px] rounded-md border border-tertiary/30 bg-surface px-xs text-label-md text-on-surface outline-none disabled:opacity-50"
-                      title={selectedReusableLogicAsset ? `${reusableLogicTypeLabel(selectedReusableLogicAsset.type)} / ${selectedReusableLogicAsset.name}` : '暂无已入库表现逻辑'}
-                    >
-                      {approvedReusableLogicAssets.length === 0 ? (
-                        <option value="">暂无表现逻辑</option>
-                      ) : approvedReusableLogicAssets.map((asset) => (
-                        <option key={asset.id} value={asset.id}>{asset.name}</option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      onClick={() => void handleGenerateFromReusableLogic()}
-                      disabled={!selectedReusableLogicAsset || isGeneratingPrototype || isClassifying || isImportingFigma}
-                      className="flex h-7 shrink-0 items-center gap-[2px] rounded-md border border-secondary bg-secondary-container px-sm text-label-md font-medium text-on-secondary-container transition-opacity hover:opacity-90 disabled:opacity-40"
-                      title={selectedReusableLogicAsset ? '按选中的表现逻辑生成资源库标准 HTML' : '请先从草稿模式沉淀并确认表现逻辑'}
-                    >
-                      <span className={['material-symbols-outlined', isGeneratingPrototype ? 'animate-spin' : ''].join(' ')} style={{ fontSize: '14px' }}>
-                        {isGeneratingPrototype ? 'sync' : 'schema'}
-                      </span>
-                      用逻辑生成
-                    </button>
                     {readyInterfacePackages.length === 0 && onOpenAssets ? (
                       <button
                         type="button"
@@ -1840,6 +2391,27 @@ export function ForgeChat({
                 </button>
               ))}
             </div>
+            <div className="flex min-h-[28px] flex-wrap items-center gap-xs">
+              {specStatusItems.map((item) => (
+                <span
+                  key={item.id}
+                  className={[
+                    'inline-flex items-center gap-[4px] rounded-md border px-xs py-[3px] font-mono text-[10px] uppercase',
+                    item.ready
+                      ? item.id === 'standard'
+                        ? 'border-tertiary/45 bg-tertiary/10 text-tertiary'
+                        : 'border-secondary/45 bg-secondary/10 text-secondary'
+                      : 'border-outline-variant/35 bg-surface-container-low text-on-surface-variant',
+                  ].join(' ')}
+                  title={item.title}
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>
+                    {item.ready ? 'task_alt' : 'radio_button_unchecked'}
+                  </span>
+                  {item.label}
+                </span>
+              ))}
+            </div>
 
             <div className="flex min-w-0 flex-wrap items-center justify-end gap-xs">
               {assetAuditText ? (
@@ -1869,6 +2441,15 @@ export function ForgeChat({
                   资源库
                 </button>
               ) : null}
+              <button
+                type="button"
+                onClick={() => setEffectIntegrationOpen(true)}
+                className="inline-flex min-h-[28px] items-center gap-xs rounded-md border border-secondary/45 bg-secondary/10 px-sm text-label-md text-secondary transition-colors hover:bg-secondary/20"
+                title="打开全屏特效接入工作台"
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>auto_awesome_motion</span>
+                特效接入
+              </button>
             </div>
           </div>
         </div>
@@ -1919,6 +2500,57 @@ export function ForgeChat({
             )}
           </div>
       </aside>
+      {effectIntegrationOpen ? (
+        <div className="fixed inset-0 z-50 flex flex-col bg-background blueprint-grid">
+          <div className="flex min-h-[56px] items-center justify-between gap-md border-b border-outline-variant bg-surface/95 px-lg py-sm shadow-sm backdrop-blur">
+            <div className="flex min-w-0 items-center gap-sm">
+              <span className="material-symbols-outlined text-secondary" style={{ fontSize: '22px' }}>auto_awesome_motion</span>
+              <div className="min-w-0">
+                <h2 className="truncate text-headline-sm font-semibold text-on-surface">特效接入工作台</h2>
+                <p className="truncate text-body-sm text-on-surface-variant">整理表现点、匹配资源库特效，并同步到右侧 HTML 原型</p>
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-xs">
+              {onOpenAssets ? (
+                <button
+                  type="button"
+                  onClick={onOpenAssets}
+                  className="inline-flex min-h-[36px] items-center gap-xs rounded-md border border-outline-variant/45 bg-surface-container-low px-sm text-label-md text-on-surface-variant transition-colors hover:border-tertiary/50 hover:text-tertiary"
+                  title="打开资源库"
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>folder_open</span>
+                  资源库
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => setEffectIntegrationOpen(false)}
+                className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-outline-variant/45 bg-surface-container-low text-on-surface-variant transition-colors hover:border-error/60 hover:text-error"
+                aria-label="关闭特效接入工作台"
+                title="关闭"
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>close</span>
+              </button>
+            </div>
+          </div>
+          <div className="min-h-0 flex-1 overflow-hidden">
+            <PerformanceEffectWorkbench
+              performanceSpec={performanceSpec}
+              blockingQuestion={blockingQuestion}
+              effectRows={assetWorkbench.effectRows}
+              bindings={effectBindings}
+              isBusy={isSending || isClassifying || isImportingFigma || isGeneratingPrototype}
+              onOpenAssets={onOpenAssets}
+              onBindEffect={handleBindEffectToPoint}
+              onBindEffects={handleBindEffectsToPoint}
+              onUnbindEffect={handleUnbindEffectFromPoint}
+              onBindingNoteChange={handleEffectBindingNoteChange}
+              onAskQuestion={() => { void handleAskPerformanceQuestion() }}
+              onSyncToPrototype={() => { void handleSyncPerformanceToPrototype() }}
+            />
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }

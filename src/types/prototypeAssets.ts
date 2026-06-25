@@ -1,6 +1,6 @@
 import type { ReusableLogicAsset } from './reusableLogic'
 
-export type PrototypeAssetKind = 'interface_html' | 'interface_image' | 'ui_image' | 'effect_preview' | 'effect_spine'
+export type PrototypeAssetKind = 'interface_html' | 'interface_image' | 'ui_image' | 'effect_preview' | 'effect_spine' | 'audio_clip'
 export type PrototypeAssetManifestMode = 'audit' | 'strict'
 export type PrototypeGenerationMode = 'draft_preview' | 'resource_standard'
 
@@ -58,7 +58,7 @@ export interface PrototypeAllowedAsset {
   kind: PrototypeAssetKind
   name: string
   url: string
-  source: 'ui_asset' | 'effect_asset'
+  source: 'ui_asset' | 'effect_asset' | 'audio_asset'
   purpose?: string | null
   usageNote?: string | null
   originalName?: string | null

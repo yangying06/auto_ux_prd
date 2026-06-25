@@ -1,12 +1,29 @@
 import { useRef, useState } from 'react'
+import type { ProjectWorkflowMode } from '../../types/projectWorkflow'
 
 interface UploadCardProps {
   onFileRead: (text: string, filename: string) => void
   onOpenArchive?: () => void
   error?: string | null
+  workflowMode: ProjectWorkflowMode
+  iterationCodebasePath: string
+  iterationFocus: string
+  onWorkflowModeChange: (mode: ProjectWorkflowMode) => void
+  onIterationCodebasePathChange: (path: string) => void
+  onIterationFocusChange: (focus: string) => void
 }
 
-export function UploadCard({ onFileRead, onOpenArchive, error }: UploadCardProps) {
+export function UploadCard({
+  onFileRead,
+  onOpenArchive,
+  error,
+  workflowMode,
+  iterationCodebasePath,
+  iterationFocus,
+  onWorkflowModeChange,
+  onIterationCodebasePathChange,
+  onIterationFocusChange,
+}: UploadCardProps) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [rejectionError, setRejectionError] = useState<string | null>(null)
@@ -40,6 +57,52 @@ export function UploadCard({ onFileRead, onOpenArchive, error }: UploadCardProps
       <span className="material-symbols-outlined text-on-surface" style={{ fontSize: '32px' }}>account_tree</span>
       <h1 className="text-headline-sm font-semibold text-on-surface">GameUX PromptForge</h1>
       <p className="text-label-md font-semibold text-on-surface-variant uppercase tracking-wider">PRD 拆解引擎</p>
+
+      <div className="grid w-full grid-cols-2 gap-xs rounded-lg border border-outline-variant bg-surface-container p-xs">
+        {[
+          { id: 'new_project' as const, label: '新项目打磨', icon: 'note_add' },
+          { id: 'existing_project_iteration' as const, label: '已有项目迭代', icon: 'difference' },
+        ].map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => onWorkflowModeChange(item.id)}
+            aria-pressed={workflowMode === item.id}
+            className={[
+              'flex min-h-[40px] items-center justify-center gap-xs rounded-md px-sm py-xs text-label-md transition-colors',
+              workflowMode === item.id
+                ? 'bg-secondary-container text-on-secondary-container'
+                : 'text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface',
+            ].join(' ')}
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>{item.icon}</span>
+            {item.label}
+          </button>
+        ))}
+      </div>
+
+      {workflowMode === 'existing_project_iteration' ? (
+        <div className="grid w-full gap-sm rounded-lg border border-outline-variant bg-surface-container-low p-md">
+          <label className="grid gap-xs">
+            <span className="text-label-md text-on-surface">代码库路径</span>
+            <input
+              value={iterationCodebasePath}
+              onChange={(event) => onIterationCodebasePathChange(event.target.value)}
+              className="min-h-[40px] rounded-md border border-outline-variant bg-surface px-sm py-xs text-body-md text-on-surface outline-none focus:border-secondary"
+              placeholder="D:\\project\\client"
+            />
+          </label>
+          <label className="grid gap-xs">
+            <span className="text-label-md text-on-surface">本次迭代焦点</span>
+            <textarea
+              value={iterationFocus}
+              onChange={(event) => onIterationFocusChange(event.target.value)}
+              className="min-h-[72px] resize-none rounded-md border border-outline-variant bg-surface px-sm py-xs text-body-md text-on-surface outline-none focus:border-secondary"
+              placeholder="例如：帮助界面的任务说明功能"
+            />
+          </label>
+        </div>
+      ) : null}
 
       {/* Drop zone */}
       <div

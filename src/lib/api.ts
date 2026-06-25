@@ -13,9 +13,10 @@ import type {
 import type { UXRequirementState } from '../types/uxRequirement'
 import type { MapAdjustmentOperation, PrdImportPreview, PrdNode, PrdNodeBackendContractRef, PrdNodeEvidenceRef, PrdNodeOperationSuggestion, PrdPerformanceSpec } from '../types/prdNode'
 import type { QaChatResponse, QaIssue } from '../types/qa'
-import type { AssetWorkbenchState, EffectAssetRow, UiAssetKind, UiAssetParseResult } from '../types/assetWorkbench'
+import type { AssetWorkbenchState, AudioAssetRow, EffectAssetRow, UiAssetKind, UiAssetParseResult } from '../types/assetWorkbench'
 import type { PrototypeAssetAuditIssue, PrototypeAssetManifest } from '../types/prototypeAssets'
 import type { ProjectSourceDocument } from '../types/archive'
+import type { ProjectBaselineScan, ProjectWorkflowState } from '../types/projectWorkflow'
 
 function apiErrorMessage(data: unknown, status: number) {
   if (data && typeof data === 'object') {
@@ -126,6 +127,20 @@ export function searchProjectKnowledge(
   })
 }
 
+export function scanProjectBaseline(
+  baseUrl: string,
+  payload: {
+    rootPath: string
+    iterationPrd: string
+    focus?: string
+  },
+) {
+  return requestJson<ProjectBaselineScan>(baseUrl, '/api/project-baseline/scan', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 export interface PrototypeVariantPayload {
   index: number
   html: string | null
@@ -184,17 +199,17 @@ export function exportFinalPrompt(baseUrl: string, requirementState: UXRequireme
 
 // ── Decomposition API ────────────────────────────────────────────────────────
 
-export function previewDecomposition(baseUrl: string, mdText: string) {
+export function previewDecomposition(baseUrl: string, mdText: string, projectWorkflow?: ProjectWorkflowState) {
   return requestJson<PrdImportPreview>(baseUrl, '/api/decompose/preview', {
     method: 'POST',
-    body: JSON.stringify({ mdText }),
+    body: JSON.stringify({ mdText, projectWorkflow }),
   })
 }
 
-export function startDecomposition(baseUrl: string, mdText: string) {
+export function startDecomposition(baseUrl: string, mdText: string, projectWorkflow?: ProjectWorkflowState) {
   return requestJson<{ sessionId: string }>(baseUrl, '/api/decompose/start', {
     method: 'POST',
-    body: JSON.stringify({ mdText }),
+    body: JSON.stringify({ mdText, projectWorkflow }),
   })
 }
 
@@ -352,6 +367,40 @@ export interface EffectAssetLoadResponse {
 
 export function loadEffectAssetRow(baseUrl: string, row: EffectAssetRow) {
   return requestJson<EffectAssetLoadResponse>(baseUrl, '/api/assets/effects/load', {
+    method: 'POST',
+    body: JSON.stringify({ row }),
+  })
+}
+
+export interface AudioAssetScanResponse {
+  sourceRoot: string
+  scannedFileCount: number
+  truncated: boolean
+  rows: AudioAssetRow[]
+}
+
+export interface AudioAssetScanOptions {
+  smartNotes?: boolean
+  contextHints?: string[]
+}
+
+export function scanAudioAssetDirectory(baseUrl: string, rootPath: string, options: AudioAssetScanOptions = {}) {
+  return requestJson<AudioAssetScanResponse>(baseUrl, '/api/assets/audio/scan', {
+    method: 'POST',
+    body: JSON.stringify({
+      rootPath,
+      smartNotes: options.smartNotes ?? false,
+      contextHints: options.contextHints ?? [],
+    }),
+  })
+}
+
+export interface AudioAssetLoadResponse {
+  row: AudioAssetRow
+}
+
+export function loadAudioAssetRow(baseUrl: string, row: AudioAssetRow) {
+  return requestJson<AudioAssetLoadResponse>(baseUrl, '/api/assets/audio/load', {
     method: 'POST',
     body: JSON.stringify({ row }),
   })

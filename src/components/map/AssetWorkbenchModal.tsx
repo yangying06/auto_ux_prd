@@ -1,8 +1,7 @@
-import { useEffect, useState } from 'react'
-import { loadEffectAssetRow, openAssetLibraryLocalPath, parseUiFigmaAsset, scanEffectAssetDirectory } from '../../lib/api'
-import { reusableLogicTypeLabel } from '../../lib/reusableLogicSedimentation'
+import { useEffect, useRef, useState } from 'react'
+import { loadAudioAssetRow, loadEffectAssetRow, openAssetLibraryLocalPath, parseUiFigmaAsset, scanAudioAssetDirectory, scanEffectAssetDirectory } from '../../lib/api'
 import { useAppStore } from '../../store/appStore'
-import type { AssetRowStatus, EffectAssetKind, EffectAssetLoadStatus, EffectAssetRow, UiAssetKind, UiAssetParseResult, UiAssetRow } from '../../types/assetWorkbench'
+import type { AssetRowStatus, AudioAssetKind, AudioAssetLoadStatus, AudioAssetRow, EffectAssetKind, EffectAssetLoadStatus, EffectAssetRow, UiAssetKind, UiAssetParseResult, UiAssetRow } from '../../types/assetWorkbench'
 import type { ProjectSourceDocument } from '../../types/archive'
 import type { PrdTree } from '../../types/prdNode'
 
@@ -18,6 +17,8 @@ interface UiAssetFormState {
 }
 
 const DEFAULT_EFFECT_ROOT = '\\\\172.16.10.252\\共享文件夹\\设计文件\\交付产运研\\游戏\\2026年文件汇总\\wyak\\金字塔\\动画-灿斌\\spine输出'
+
+const DEFAULT_AUDIO_ROOT = ''
 
 const inputClassName = 'min-h-[36px] w-full min-w-0 rounded-md border border-outline-variant bg-surface px-sm py-xs text-body-sm text-on-surface outline-none focus:border-secondary'
 const compactTextareaClassName = 'min-h-[42px] w-full min-w-0 resize-y rounded-md border border-outline-variant bg-surface px-sm py-xs text-body-sm text-on-surface outline-none focus:border-secondary'
@@ -84,14 +85,14 @@ function statusTone(status: AssetRowStatus) {
   return 'border-outline-variant bg-surface-container-high text-on-surface-variant'
 }
 
-function loadStatusLabel(status: EffectAssetLoadStatus) {
+function loadStatusLabel(status: EffectAssetLoadStatus | AudioAssetLoadStatus) {
   if (status === 'loading') return '加载中'
   if (status === 'loaded') return '已加载'
   if (status === 'error') return '失败'
   return '未加载'
 }
 
-function loadStatusTone(status: EffectAssetLoadStatus) {
+function loadStatusTone(status: EffectAssetLoadStatus | AudioAssetLoadStatus) {
   if (status === 'loaded') return 'border-tertiary/50 bg-tertiary/10 text-tertiary'
   if (status === 'error') return 'border-error/50 bg-error/10 text-error'
   if (status === 'loading') return 'border-secondary/50 bg-secondary/10 text-secondary'
@@ -107,6 +108,17 @@ function effectKindLabel(kind: EffectAssetKind) {
     audio: '音频',
     texture: '贴图',
     scripted: '脚本',
+    unknown: '未知',
+  }
+  return labels[kind]
+}
+
+function audioKindLabel(kind: AudioAssetKind) {
+  const labels: Record<AudioAssetKind, string> = {
+    sfx: '音效',
+    music: '音乐',
+    voice: '语音',
+    ambient: '环境音',
     unknown: '未知',
   }
   return labels[kind]
@@ -145,6 +157,10 @@ function joinUniqueNoteParts(parts: Array<string | null | undefined>) {
 
 function effectRowNote(row: EffectAssetRow) {
   return joinUniqueNoteParts([row.usageNote, row.purpose, row.pageHint, row.implementationHint])
+}
+
+function audioRowNote(row: AudioAssetRow) {
+  return joinUniqueNoteParts([row.usageNote, row.purpose, row.triggerHint, row.playbackHint])
 }
 
 function buildEffectSmartNoteContext(prdTree: PrdTree | null, sourceDocument: ProjectSourceDocument | null) {
@@ -463,7 +479,7 @@ function TypeSegmentedControl({
 }
 
 export function AssetWorkbenchModal({ isOpen, baseUrl, onClose }: AssetWorkbenchModalProps) {
-  const [activeTab, setActiveTab] = useState<'ui' | 'effect' | 'logic'>('ui')
+  const [activeTab, setActiveTab] = useState<'ui' | 'effect' | 'audio'>('ui')
   const [uiForm, setUiForm] = useState<UiAssetFormState>(() => emptyUiForm())
   const [uiError, setUiError] = useState<string | null>(null)
   const [uiNotice, setUiNotice] = useState<string | null>(null)
@@ -474,6 +490,13 @@ export function AssetWorkbenchModal({ isOpen, baseUrl, onClose }: AssetWorkbench
   const [isScanningEffects, setIsScanningEffects] = useState(false)
   const [smartEffectNotes, setSmartEffectNotes] = useState(true)
   const [loadProgress, setLoadProgress] = useState<LoadProgressState>({ active: false, done: 0, total: 0, label: '' })
+  const [audioRoot, setAudioRoot] = useState(() => useAppStore.getState().assetWorkbench.lastAudioScanRoot ?? DEFAULT_AUDIO_ROOT)
+  const [audioError, setAudioError] = useState<string | null>(null)
+  const [isScanningAudio, setIsScanningAudio] = useState(false)
+  const [smartAudioNotes, setSmartAudioNotes] = useState(true)
+  const [audioLoadProgress, setAudioLoadProgress] = useState<LoadProgressState>({ active: false, done: 0, total: 0, label: '' })
+  const [playingAudioRowId, setPlayingAudioRowId] = useState<string | null>(null)
+  const audioElementRef = useRef<HTMLAudioElement | null>(null)
   const [localPathError, setLocalPathError] = useState<string | null>(null)
   const [localPathMessage, setLocalPathMessage] = useState<string | null>(null)
   const [isOpeningLocalPath, setIsOpeningLocalPath] = useState(false)
@@ -487,7 +510,9 @@ export function AssetWorkbenchModal({ isOpen, baseUrl, onClose }: AssetWorkbench
   const replaceEffectAssetRows = useAppStore((s) => s.replaceEffectAssetRows)
   const updateEffectAssetRow = useAppStore((s) => s.updateEffectAssetRow)
   const removeEffectAssetRow = useAppStore((s) => s.removeEffectAssetRow)
-  const removeReusableLogicAsset = useAppStore((s) => s.removeReusableLogicAsset)
+  const replaceAudioAssetRows = useAppStore((s) => s.replaceAudioAssetRows)
+  const updateAudioAssetRow = useAppStore((s) => s.updateAudioAssetRow)
+  const removeAudioAssetRow = useAppStore((s) => s.removeAudioAssetRow)
 
   useEffect(() => {
     if (!isOpen) return
@@ -504,6 +529,15 @@ export function AssetWorkbenchModal({ isOpen, baseUrl, onClose }: AssetWorkbench
       }
     }
   }, [assetWorkbench.uiRows, isOpen, prdTree, sourceDocument, updateUiAssetRow])
+
+  useEffect(() => () => {
+    audioElementRef.current?.pause()
+    audioElementRef.current = null
+  }, [])
+
+  useEffect(() => {
+    if (!isOpen) stopAudioPreview()
+  }, [isOpen])
 
   if (!isOpen) return null
 
@@ -679,6 +713,90 @@ export function AssetWorkbenchModal({ isOpen, baseUrl, onClose }: AssetWorkbench
     setLoadProgress((current) => ({ ...current, active: false, label: '加载完成' }))
   }
 
+  async function handleScanAudio() {
+    const root = audioRoot.trim()
+    if (!root) {
+      setAudioError('请填写音频素材目录。')
+      return
+    }
+    setAudioError(null)
+    setIsScanningAudio(true)
+    try {
+      const result = await scanAudioAssetDirectory(baseUrl, root, {
+        smartNotes: smartAudioNotes,
+        contextHints: smartAudioNotes ? buildEffectSmartNoteContext(prdTree, sourceDocument) : [],
+      })
+      replaceAudioAssetRows(result.sourceRoot, result.rows)
+      setAudioRoot(result.sourceRoot)
+      if (result.truncated) {
+        setAudioError(`已达到扫描上限，当前导入 ${result.scannedFileCount} 个音频文件。`)
+      }
+    } catch (error) {
+      setAudioError(error instanceof Error ? error.message : '扫描音频素材失败，请检查路径和权限。')
+    } finally {
+      setIsScanningAudio(false)
+    }
+  }
+
+  async function handleLoadAudioRows(rows: AudioAssetRow[]) {
+    const targets = rows.filter((row) => row.files.length > 0)
+    if (!targets.length || audioLoadProgress.active) return
+
+    setAudioError(null)
+    setAudioLoadProgress({ active: true, done: 0, total: targets.length, label: '准备加载音频' })
+    for (const [index, row] of targets.entries()) {
+      setAudioLoadProgress({ active: true, done: index, total: targets.length, label: row.name })
+      updateAudioAssetRow(row.id, { loadStatus: 'loading', loadError: null })
+      try {
+        const result = await loadAudioAssetRow(baseUrl, row)
+        updateAudioAssetRow(row.id, result.row)
+      } catch (error) {
+        updateAudioAssetRow(row.id, {
+          loadStatus: 'error',
+          loadError: error instanceof Error ? error.message : '加载失败',
+        })
+        setAudioError(error instanceof Error ? error.message : '加载失败')
+      }
+      setAudioLoadProgress({ active: true, done: index + 1, total: targets.length, label: row.name })
+    }
+    setAudioLoadProgress((current) => ({ ...current, active: false, label: '加载完成' }))
+  }
+
+  function stopAudioPreview() {
+    audioElementRef.current?.pause()
+    audioElementRef.current = null
+    setPlayingAudioRowId(null)
+  }
+
+  async function handleToggleAudioPreview(row: AudioAssetRow) {
+    if (playingAudioRowId === row.id) {
+      stopAudioPreview()
+      return
+    }
+    if (!row.previewUrl) {
+      setAudioError('请先 Load 音频素材后再试听。')
+      return
+    }
+    stopAudioPreview()
+    setAudioError(null)
+    const audio = new Audio(row.previewUrl)
+    audioElementRef.current = audio
+    audio.addEventListener('ended', () => {
+      if (audioElementRef.current === audio) {
+        audioElementRef.current = null
+        setPlayingAudioRowId(null)
+      }
+    })
+    try {
+      await audio.play()
+      setPlayingAudioRowId(row.id)
+    } catch (error) {
+      audioElementRef.current = null
+      setPlayingAudioRowId(null)
+      setAudioError(error instanceof Error ? error.message : '试听播放失败。')
+    }
+  }
+
   async function handleOpenLocalPath() {
     if (isOpeningLocalPath) return
     setLocalPathError(null)
@@ -697,10 +815,16 @@ export function AssetWorkbenchModal({ isOpen, baseUrl, onClose }: AssetWorkbench
   const effectRowCount = assetWorkbench.effectRows.length
   const loadedEffectRowCount = assetWorkbench.effectRows.filter((row) => row.loadStatus === 'loaded').length
   const loadableEffectRowCount = assetWorkbench.effectRows.filter((row) => row.files.length > 0).length
+  const audioRowCount = assetWorkbench.audioRows.length
+  const loadedAudioRowCount = assetWorkbench.audioRows.filter((row) => row.loadStatus === 'loaded').length
+  const loadableAudioRowCount = assetWorkbench.audioRows.filter((row) => row.files.length > 0).length
   const unparsedUiRowCount = assetWorkbench.uiRows.filter(isUnparsedUiRow).length
-  const approvedReusableLogicCount = assetWorkbench.reusableLogicAssets.filter((asset) => asset.status === 'approved').length
-  const candidateReusableLogicCount = assetWorkbench.reusableLogicAssets.filter((asset) => asset.status === 'candidate').length
   const activeUiParseCount = parsingUiRowIds.length
+  const audioLoadSummary = audioLoadProgress.active
+    ? `加载中 ${audioLoadProgress.done}/${audioLoadProgress.total}`
+    : audioLoadProgress.total > 0
+      ? `上次加载 ${audioLoadProgress.done}/${audioLoadProgress.total}`
+      : `已加载 ${loadedAudioRowCount}/${audioRowCount}`
   const effectLoadSummary = loadProgress.active
     ? `加载中 ${loadProgress.done}/${loadProgress.total}`
     : loadProgress.total > 0
@@ -772,19 +896,19 @@ export function AssetWorkbenchModal({ isOpen, baseUrl, onClose }: AssetWorkbench
           </button>
           <button
             type="button"
-            onClick={() => setActiveTab('logic')}
+            onClick={() => setActiveTab('audio')}
             className={[
               'flex min-h-[36px] items-center gap-xs whitespace-nowrap rounded-lg border px-md text-label-md transition-colors',
-              activeTab === 'logic'
+              activeTab === 'audio'
                 ? 'border-secondary bg-secondary-container text-on-secondary-container'
                 : 'border-outline-variant bg-surface-container-high text-on-surface-variant hover:text-on-surface',
             ].join(' ')}
           >
-            <span className="material-symbols-outlined" style={{ fontSize: '17px' }}>schema</span>
-            表现逻辑
-            {assetWorkbench.reusableLogicAssets.length ? (
+            <span className="material-symbols-outlined" style={{ fontSize: '17px' }}>graphic_eq</span>
+            音频素材
+            {assetWorkbench.audioRows.length ? (
               <span className="rounded bg-surface px-xs font-mono text-[11px] text-on-surface-variant">
-                {assetWorkbench.reusableLogicAssets.length}
+                {assetWorkbench.audioRows.length}
               </span>
             ) : null}
           </button>
@@ -1127,83 +1251,172 @@ export function AssetWorkbenchModal({ isOpen, baseUrl, onClose }: AssetWorkbench
               </table>
             </div>
           </div>
-        ) : (
+        ) : activeTab === 'audio' ? (
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             <div className="shrink-0 border-b border-outline-variant bg-surface-container-low px-md py-sm md:px-lg">
-              <div className="flex flex-wrap items-center gap-sm text-body-sm text-on-surface-variant">
-                <span className="inline-flex min-h-[30px] items-center gap-xs rounded-md border border-secondary/40 bg-secondary/10 px-sm text-secondary">
-                  <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>verified</span>
-                  已入库 {approvedReusableLogicCount}
-                </span>
-                <span className="inline-flex min-h-[30px] items-center gap-xs rounded-md border border-outline-variant bg-surface px-sm">
-                  <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>pending_actions</span>
-                  待确认 {candidateReusableLogicCount}
-                </span>
+              <div className="grid gap-sm md:grid-cols-[minmax(340px,1fr)_auto_auto_auto_minmax(180px,auto)] md:items-end">
+                <label className={toolbarFieldClassName}>
+                  <span className={toolbarLabelClassName}>音频目录</span>
+                  <input
+                    value={audioRoot}
+                    onChange={(event) => setAudioRoot(event.target.value)}
+                    placeholder="共享目录或本地音频目录"
+                    className={inputClassName}
+                  />
+                </label>
+                <label className="flex min-h-[36px] items-center gap-xs whitespace-nowrap rounded-md border border-outline-variant bg-surface px-sm text-label-md text-on-surface-variant md:self-end">
+                  <input
+                    type="checkbox"
+                    checked={smartAudioNotes}
+                    onChange={(event) => setSmartAudioNotes(event.target.checked)}
+                    className="h-4 w-4 accent-secondary"
+                  />
+                  智能备注
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void handleScanAudio()}
+                  disabled={isScanningAudio}
+                  className="flex min-h-[36px] items-center justify-center gap-xs whitespace-nowrap rounded-md border border-secondary bg-secondary-container px-md text-label-md text-on-secondary-container transition-opacity hover:opacity-90 disabled:opacity-40 md:self-end"
+                >
+                  <span className={['material-symbols-outlined', isScanningAudio ? 'animate-spin' : ''].join(' ')} style={{ fontSize: '16px' }}>
+                    {isScanningAudio ? 'sync' : 'folder_search'}
+                  </span>
+                  扫描
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleLoadAudioRows(assetWorkbench.audioRows)}
+                  disabled={audioLoadProgress.active || isScanningAudio || loadableAudioRowCount === 0}
+                  className="flex min-h-[36px] items-center justify-center gap-xs whitespace-nowrap rounded-md border border-secondary bg-secondary-container px-md text-label-md text-on-secondary-container transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40 md:self-end"
+                >
+                  <span className={['material-symbols-outlined', audioLoadProgress.active ? 'animate-spin' : ''].join(' ')} style={{ fontSize: '16px' }}>
+                    {audioLoadProgress.active ? 'sync' : 'download'}
+                  </span>
+                  Load 全部
+                </button>
+                <div className={`${toolbarSummaryClassName} md:self-end`} title={audioLoadProgress.active ? audioLoadProgress.label : undefined}>
+                  <span className="material-symbols-outlined shrink-0 text-on-surface-variant" style={{ fontSize: '16px' }}>
+                    {audioLoadProgress.active ? 'sync' : 'graphic_eq'}
+                  </span>
+                  <span className="min-w-0 truncate">{audioLoadSummary}</span>
+                  <span className="font-mono text-[11px] text-on-surface-variant">{audioRowCount} 项</span>
+                </div>
               </div>
             </div>
+
+            {audioError ? (
+              <div className="shrink-0 border-b border-error/30 bg-error/10 px-lg py-sm text-body-sm text-error">{audioError}</div>
+            ) : null}
+
             <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
               <table className="w-full table-fixed border-collapse text-left">
                 <colgroup>
-                  <col className="w-[24%]" />
-                  <col className="w-[18%]" />
+                  <col className="w-[25%]" />
+                  <col className="w-[21%]" />
                   <col />
-                  <col className="w-[112px]" />
+                  <col className="w-[126px]" />
                 </colgroup>
                 <thead className="sticky top-0 z-10 bg-surface-container-high text-label-md text-on-surface-variant">
                   <tr>
-                    {['逻辑', '状态', '内容', '操作'].map((label) => (
+                    {['资源', '加载与试听', '用途与播放规则', '操作'].map((label) => (
                       <th key={label} className="whitespace-nowrap border-b border-outline-variant px-sm py-sm">{label}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-outline-variant">
-                  {assetWorkbench.reusableLogicAssets.length === 0 ? (
+                  {assetWorkbench.audioRows.length === 0 ? (
                     <tr>
                       <td colSpan={4} className="px-lg py-xl text-center text-body-sm text-on-surface-variant">
-                        还没有沉淀的表现逻辑。草稿模式确认候选后，会出现在这里供资源库标准模式复用。
+                        还没有音频素材记录。填写音频目录后扫描，支持 mp3、wav、ogg、m4a、aac。
                       </td>
                     </tr>
-                  ) : assetWorkbench.reusableLogicAssets.map((asset) => (
-                    <tr key={asset.id} className="align-top text-body-sm text-on-surface">
+                  ) : assetWorkbench.audioRows.map((row) => (
+                    <tr key={row.id} className="align-top text-body-sm text-on-surface">
                       <td className="px-sm py-sm">
                         <div className="grid gap-xs">
-                          <span className="font-label-md text-label-md text-on-surface">{asset.name}</span>
-                          <span className="text-[11px] leading-4 text-on-surface-variant">
-                            来自 {asset.source.nodeLabel}
-                          </span>
-                          <div className="flex flex-wrap gap-xs">
-                            {asset.tags.slice(0, 4).map((tag) => (
-                              <span key={tag} className="rounded border border-outline-variant px-xs py-[1px] text-[10px] text-on-surface-variant">{tag}</span>
-                            ))}
+                          <input
+                            value={row.name}
+                            onChange={(event) => updateAudioAssetRow(row.id, { name: event.target.value })}
+                            className={inputClassName}
+                          />
+                          <div className="flex flex-wrap items-center gap-xs">
+                            <span className="inline-flex whitespace-nowrap rounded border border-secondary/40 bg-secondary/10 px-xs py-[2px] text-label-md text-secondary">
+                              {audioKindLabel(row.kind)}
+                            </span>
+                            <span className="font-mono text-[11px] text-on-surface-variant">{row.fileCount} 文件</span>
                           </div>
+                          <PathSummaryLine label="源" value={row.localPath} />
                         </div>
                       </td>
                       <td className="px-sm py-sm">
                         <div className="grid gap-xs">
-                          <span className="inline-flex w-fit whitespace-nowrap rounded border border-secondary/40 bg-secondary/10 px-xs py-[2px] text-label-md text-secondary">
-                            {reusableLogicTypeLabel(asset.type)}
-                          </span>
-                          <span className="text-[11px] leading-4 text-on-surface-variant">
-                            {asset.status === 'approved' ? '已入库' : asset.status === 'ignored' ? '已忽略' : '待确认'}
-                          </span>
+                          <div className="flex flex-wrap items-center gap-xs">
+                            <span className={['inline-flex whitespace-nowrap rounded border px-xs py-[2px] text-label-md', loadStatusTone(row.loadStatus)].join(' ')}>
+                              {loadStatusLabel(row.loadStatus)}
+                            </span>
+                            <span className="whitespace-nowrap font-mono text-code-sm text-on-surface-variant">
+                              {row.loadedFileCount}/{row.fileCount}
+                            </span>
+                            <span className="whitespace-nowrap font-mono text-[11px] text-on-surface-variant">
+                              {formatBytes(row.loadedBytes)}
+                            </span>
+                          </div>
+                          {row.loadError ? <div className="text-[11px] leading-4 text-error">{row.loadError}</div> : null}
+                          <PathSummaryLine label="缓存" value={row.loadedPath ?? row.loadedRoot} />
+                          <button
+                            type="button"
+                            onClick={() => void handleToggleAudioPreview(row)}
+                            disabled={!row.previewUrl}
+                            className={`${actionButtonClassName} w-fit border-secondary/40 bg-secondary/15 text-secondary`}
+                          >
+                            <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>
+                              {playingAudioRowId === row.id ? 'stop' : 'play_arrow'}
+                            </span>
+                            {playingAudioRowId === row.id ? '停止' : '试听'}
+                          </button>
                         </div>
                       </td>
                       <td className="px-sm py-sm">
                         <div className="grid gap-xs">
-                          <p className="line-clamp-2 text-body-sm text-on-surface">{asset.description}</p>
-                          <p className="line-clamp-3 whitespace-pre-wrap text-[11px] leading-4 text-on-surface-variant">{asset.logic}</p>
-                          <p className="line-clamp-2 text-[11px] leading-4 text-on-surface-variant">{asset.usageGuidance}</p>
+                          <textarea
+                            value={audioRowNote(row)}
+                            onChange={(event) => updateAudioAssetRow(row.id, {
+                              usageNote: event.target.value,
+                              purpose: '',
+                              triggerHint: '',
+                              playbackHint: '',
+                            })}
+                            placeholder="补充用途、触发事件、音量、循环、叠加/打断、淡入淡出等规则"
+                            className="min-h-[92px] w-full min-w-0 resize-y rounded-md border border-outline-variant bg-surface px-sm py-xs text-body-sm text-on-surface outline-none focus:border-secondary"
+                          />
                         </div>
                       </td>
                       <td className="px-sm py-sm">
-                        <button
-                          type="button"
-                          onClick={() => removeReusableLogicAsset(asset.id)}
-                          className={`${actionButtonClassName} border-error/40 bg-error/10 text-error`}
-                        >
-                          <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>delete</span>
-                          删除
-                        </button>
+                        <div className="flex flex-col gap-xs">
+                          <button
+                            type="button"
+                            onClick={() => void handleLoadAudioRows([row])}
+                            disabled={audioLoadProgress.active || row.files.length === 0}
+                            className={`${actionButtonClassName} border-secondary/40 bg-secondary/15 text-secondary`}
+                          >
+                            <span className={['material-symbols-outlined', row.loadStatus === 'loading' ? 'animate-spin' : ''].join(' ')} style={{ fontSize: '15px' }}>
+                              {row.loadStatus === 'loading' ? 'sync' : 'download'}
+                            </span>
+                            Load
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (playingAudioRowId === row.id) stopAudioPreview()
+                              removeAudioAssetRow(row.id)
+                            }}
+                            className={`${actionButtonClassName} border-error/40 bg-error/10 text-error`}
+                          >
+                            <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>delete</span>
+                            删除
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -1211,7 +1424,7 @@ export function AssetWorkbenchModal({ isOpen, baseUrl, onClose }: AssetWorkbench
               </table>
             </div>
           </div>
-        )}
+        ) : null}
       </section>
     </div>
   )

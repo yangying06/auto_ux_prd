@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'wouter'
-import { getAiEnvironmentConfig, previewDecomposition, startDecomposition, pollDecomposition, exportSpecFolder, exportNodeMarkdown, suggestPrdNodeOperations } from '../lib/api'
+import { getAiEnvironmentConfig, previewDecomposition, startDecomposition, pollDecomposition, exportSpecFolder, exportNodeMarkdown, suggestPrdNodeOperations, scanProjectBaseline } from '../lib/api'
 import { MapAdjustmentPanel } from '../components/map/MapAdjustmentPanel'
 import type { PrdImportPreview, PrdNode, PrdNodeOperationSuggestion, PrdTree } from '../types/prdNode'
 import type { AiEnvironmentConfig } from '../types/chat'
@@ -14,13 +14,14 @@ import { TopAppBar } from '../components/map/TopAppBar'
 import { TreeCanvas } from '../components/map/TreeCanvas'
 import { PreviewDrawer } from '../components/map/PreviewDrawer'
 import { buildProjectArchiveFile, encodeProjectArchive } from '../lib/archiveCodec'
-import { openProjectArchiveFile, saveProjectArchiveBytes } from '../lib/archiveIO'
+import { formatProjectArchiveError, openProjectArchiveFile, saveProjectArchiveBytes } from '../lib/archiveIO'
 import { createProjectWorkspaceSnapshot } from '../lib/archiveSnapshot'
 import { AddNodeModal, type AddNodePayload } from '../components/map/AddNodeModal'
 import { buildDeliveryDisplayTree, collectDeliveryNodes, isDeliveryNode } from '../lib/prdNodeDelivery'
 import { EnvironmentConfigModal } from '../components/map/EnvironmentConfigModal'
 import { AssetWorkbenchModal } from '../components/map/AssetWorkbenchModal'
 import type { AssetWorkbenchState } from '../types/assetWorkbench'
+import type { ProjectBaselineScan, ProjectIterationContext, ProjectWorkflowMode } from '../types/projectWorkflow'
 
 type Stage = 'upload' | 'preview' | 'decomposing' | 'error' | 'map'
 
@@ -129,7 +130,36 @@ function countExportableAssetRows(assetWorkbench: AssetWorkbenchState) {
   const effectCount = assetWorkbench.effectRows.filter((row) =>
     row.loadStatus === 'loaded' || Boolean(row.loadedPath) || row.files.length > 0
   ).length
-  return uiCount + effectCount
+  const audioCount = assetWorkbench.audioRows.filter((row) =>
+    row.loadStatus === 'loaded' || Boolean(row.loadedPath) || row.files.length > 0
+  ).length
+  return uiCount + effectCount + audioCount
+}
+
+function buildPlatformStrategyNotes(scan: ProjectBaselineScan) {
+  return scan.platforms.map((platform) => `${platform.platform}: ${platform.strategy}`)
+}
+
+function buildIterationAcceptanceFocus(scan: ProjectBaselineScan) {
+  const evidenceKinds = Array.from(new Set(scan.evidence.map((item) => item.kind))).filter(Boolean)
+  return [
+    '只生成本次迭代 PRD 命中的界面节点',
+    '代码证据只挂在界面节点详情中，不生成代码结构导图',
+    '标出当前现状、本次变更、影响范围、资源/文案/数据变更和待确认问题',
+    evidenceKinds.length ? `重点回归证据类型：${evidenceKinds.join(' / ')}` : '若缺少代码证据，先要求用户确认目标界面',
+  ]
+}
+
+function compactIterationContext(context: ProjectIterationContext | null | undefined) {
+  if (!context) return null
+  const scan = context.baselineScan
+  return {
+    codebasePath: context.codebasePath,
+    focus: context.focus,
+    platforms: scan?.platforms.map((item) => `${item.platform} ${item.confidence}%`) ?? [],
+    evidenceCount: scan?.evidence.length ?? 0,
+    queryTerms: scan?.queryTerms.slice(0, 8) ?? [],
+  }
 }
 
 export function MapPage() {
@@ -167,6 +197,7 @@ export function MapPage() {
   const prdTree = useAppStore((s) => s.prdTree)
   const settings = useAppStore((s) => s.settings)
   const sourceDocument = useAppStore((s) => s.sourceDocument)
+  const projectWorkflow = useAppStore((s) => s.projectWorkflow)
   const currentArchivePath = useAppStore((s) => s.currentArchivePath)
   const archiveDirty = useAppStore((s) => s.archiveDirty)
   const nodePrototypeStates = useAppStore((s) => s.nodePrototypeStates)
@@ -179,6 +210,8 @@ export function MapPage() {
   const resetDecomposition = useAppStore((s) => s.resetDecomposition)
   const setPrdTree = useAppStore((s) => s.setPrdTree)
   const setSourceDocument = useAppStore((s) => s.setSourceDocument)
+  const setProjectWorkflowMode = useAppStore((s) => s.setProjectWorkflowMode)
+  const setProjectIterationContext = useAppStore((s) => s.setProjectIterationContext)
   const loadArchiveSnapshot = useAppStore((s) => s.loadArchiveSnapshot)
   const markArchiveSaved = useAppStore((s) => s.markArchiveSaved)
   const resetProject = useAppStore((s) => s.resetProject)
@@ -243,7 +276,7 @@ export function MapPage() {
         markArchiveSaved(result.path, archive.manifest.savedAt)
       }
     } catch (err) {
-      setProjectError(err instanceof Error ? err.message : '保存项目存档失败')
+      setProjectError(formatProjectArchiveError(err, '保存项目存档失败'))
     }
   }
 
@@ -261,7 +294,7 @@ export function MapPage() {
       setStage(hasTree ? 'map' : 'upload')
       navigate('/')
     } catch (err) {
-      setProjectError(err instanceof Error ? err.message : '打开项目存档失败')
+      setProjectError(formatProjectArchiveError(err, '打开项目存档失败'))
     }
   }
 
@@ -382,7 +415,7 @@ export function MapPage() {
     appendDecompositionStep({ label: INITIAL_STEP, status: 'active' })
 
     try {
-      const { sessionId } = await startDecomposition(settings.proxyBaseUrl, mdText)
+      const { sessionId } = await startDecomposition(settings.proxyBaseUrl, mdText, useAppStore.getState().projectWorkflow)
       sessionIdRef.current = sessionId
       startPolling(sessionId)
     } catch (err) {
@@ -393,6 +426,17 @@ export function MapPage() {
   }
 
   const handleFileRead = async (mdText: string, filename: string) => {
+    const workflowBeforeReset = useAppStore.getState().projectWorkflow
+    const iterationDraft = workflowBeforeReset.iteration
+    const isIterationMode = workflowBeforeReset.mode === 'existing_project_iteration'
+    const codebasePath = iterationDraft?.codebasePath.trim() ?? ''
+    const focus = iterationDraft?.focus.trim() ?? ''
+
+    if (isIterationMode && !codebasePath) {
+      setUploadError('已有项目迭代需要先填写代码库路径。')
+      return
+    }
+
     clearPolling()
     sessionIdRef.current = null
     resetProject()
@@ -411,7 +455,25 @@ export function MapPage() {
     previewRequestRef.current = requestId
 
     try {
-      const preview = await previewDecomposition(settings.proxyBaseUrl, mdText)
+      if (isIterationMode) {
+        const baselineScan = await scanProjectBaseline(settings.proxyBaseUrl, {
+          rootPath: codebasePath,
+          iterationPrd: mdText,
+          focus,
+        })
+        const iterationContext: ProjectIterationContext = {
+          codebasePath,
+          focus,
+          baselineScan,
+          platformStrategyNotes: buildPlatformStrategyNotes(baselineScan),
+          acceptanceFocus: buildIterationAcceptanceFocus(baselineScan),
+        }
+        setProjectIterationContext(iterationContext)
+      } else {
+        setProjectWorkflowMode('new_project')
+      }
+
+      const preview = await previewDecomposition(settings.proxyBaseUrl, mdText, useAppStore.getState().projectWorkflow)
       if (previewRequestRef.current !== requestId) return
       setImportPreview(preview)
     } catch (err) {
@@ -425,6 +487,32 @@ export function MapPage() {
   const handleConfirmPreview = () => {
     if (!pendingMdText) return
     void beginDecomposition(pendingMdText)
+  }
+
+  const handleWorkflowModeChange = (mode: ProjectWorkflowMode) => {
+    setProjectWorkflowMode(mode)
+  }
+
+  const handleIterationCodebasePathChange = (codebasePath: string) => {
+    const current = useAppStore.getState().projectWorkflow.iteration
+    setProjectIterationContext({
+      codebasePath,
+      focus: current?.focus ?? '',
+      baselineScan: null,
+      platformStrategyNotes: current?.platformStrategyNotes ?? [],
+      acceptanceFocus: current?.acceptanceFocus ?? [],
+    })
+  }
+
+  const handleIterationFocusChange = (focus: string) => {
+    const current = useAppStore.getState().projectWorkflow.iteration
+    setProjectIterationContext({
+      codebasePath: current?.codebasePath ?? '',
+      focus,
+      baselineScan: null,
+      platformStrategyNotes: current?.platformStrategyNotes ?? [],
+      acceptanceFocus: current?.acceptanceFocus ?? [],
+    })
   }
 
   const handleReset = () => {
@@ -486,6 +574,9 @@ export function MapPage() {
     const hasProject = hasProjectData(prdTree, sourceDocument)
     const topError = exportError ?? projectError
     const qaOpenIssueCount = Object.values(qaIssues).filter((issue) => issue.status !== 'draft' && issue.status !== 'closed').length
+    const iterationInfo = projectWorkflow.mode === 'existing_project_iteration'
+      ? compactIterationContext(projectWorkflow.iteration)
+      : null
 
     const handleExport = async () => {
       setIsExporting(true)
@@ -683,6 +774,16 @@ export function MapPage() {
           onOpenQa={handleOpenQaFromToolbar}
           qaOpenIssueCount={qaOpenIssueCount}
         />
+        {iterationInfo ? (
+          <div className="flex shrink-0 flex-wrap items-center gap-sm border-b border-secondary/30 bg-secondary/10 px-lg py-sm text-label-md text-on-surface-variant">
+            <span className="material-symbols-outlined text-secondary" style={{ fontSize: '18px' }}>difference</span>
+            <span className="font-semibold text-secondary">已有项目迭代</span>
+            <span className="max-w-[320px] truncate">{iterationInfo.focus || '未填写迭代焦点'}</span>
+            <span className="max-w-[360px] truncate font-mono text-code-sm">{iterationInfo.codebasePath}</span>
+            <span>{iterationInfo.platforms.join(' / ') || '平台待确认'}</span>
+            <span>证据 {iterationInfo.evidenceCount}</span>
+          </div>
+        ) : null}
         {topError && (
           <div className="bg-error/10 border-b border-error/30 px-lg py-sm text-error font-label-md text-label-md flex items-center gap-sm">
             <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>error</span>
@@ -856,6 +957,7 @@ export function MapPage() {
             preview={importPreview}
             isLoading={isPreviewLoading}
             error={previewError}
+            projectWorkflow={projectWorkflow}
             onConfirm={handleConfirmPreview}
             onReset={handleReset}
           />
@@ -874,6 +976,12 @@ export function MapPage() {
               onFileRead={handleFileRead}
               onOpenArchive={() => { void handleOpenArchive() }}
               error={uploadError ?? projectError}
+              workflowMode={projectWorkflow.mode}
+              iterationCodebasePath={projectWorkflow.iteration?.codebasePath ?? ''}
+              iterationFocus={projectWorkflow.iteration?.focus ?? ''}
+              onWorkflowModeChange={handleWorkflowModeChange}
+              onIterationCodebasePathChange={handleIterationCodebasePathChange}
+              onIterationFocusChange={handleIterationFocusChange}
             />
           ) : (
             <DecompProgress steps={decompositionSteps} nodeCount={nodeCount} error={decompError} />

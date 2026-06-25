@@ -1,4 +1,5 @@
 import type { PrototypeAssetAuditIssue } from './prototypeAssets'
+import type { PrototypeSpec } from './prototypeSpec'
 
 export type PrototypeVariantStatus = 'pending' | 'streaming' | 'complete' | 'error'
 
@@ -11,4 +12,5 @@ export interface PrototypeVariant {
   history?: string[]
   error?: string
   assetAudit?: PrototypeAssetAuditIssue[]
+  prototypeSpec?: PrototypeSpec | null
 }
