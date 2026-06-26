@@ -19,6 +19,7 @@ export function createProjectWorkspaceSnapshot(state: AppStoreState): ProjectWor
     settings: state.settings,
     prdTree: state.prdTree,
     selectedNodeId: state.selectedNodeId,
+    canvasNodePositions: state.canvasNodePositions,
     nodeChats: persistableNodeChats(state.nodeChats),
     nodePolishRevisions: state.nodePolishRevisions,
     nodeOperationSuggestions: state.nodeOperationSuggestions,

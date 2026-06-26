@@ -53,6 +53,11 @@ export interface NodePrototypeState {
   standardPrototypeSpec: PrototypeSpec | null
 }
 
+export interface CanvasNodePosition {
+  x: number
+  y: number
+}
+
 interface PrototypeVersionMeta {
   mode?: PrototypeVersion['mode']
   note?: string | null
@@ -717,6 +722,22 @@ function normalizeNodePrototypeStates(value: unknown): Record<string, NodeProtot
   )
 }
 
+function normalizeCanvasNodePositions(value: unknown, tree: PrdTree | null | undefined): Record<string, CanvasNodePosition> {
+  if (!value || typeof value !== 'object') return {}
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .map(([nodeId, raw]) => {
+        if (tree && !tree[nodeId]) return null
+        if (!raw || typeof raw !== 'object') return null
+        const position = raw as Partial<CanvasNodePosition>
+        if (typeof position.x !== 'number' || typeof position.y !== 'number') return null
+        if (!Number.isFinite(position.x) || !Number.isFinite(position.y)) return null
+        return [nodeId, { x: Math.max(24, position.x), y: Math.max(72, position.y) }]
+      })
+      .filter((entry): entry is [string, CanvasNodePosition] => Boolean(entry)),
+  )
+}
+
 function normalizeUiAssetKind(rowOrKind: unknown) {
   const rawKind = isRecord(rowOrKind) ? rowOrKind.kind : rowOrKind
   const rawParseMode = isRecord(rowOrKind) ? rowOrKind.parseMode : undefined
@@ -1044,6 +1065,7 @@ export interface AppStoreState {
   settings: AppSettings
   prdTree: PrdTree | null
   selectedNodeId: string | null
+  canvasNodePositions: Record<string, CanvasNodePosition>
   decompositionStatus: DecompositionStatus
   decompositionSteps: DecompositionStep[]
   nodeChats: Record<string, ChatMessage[]>
@@ -1136,6 +1158,7 @@ export interface AppStoreState {
   resetRequirement: () => void
   setPrdTree: (tree: PrdTree) => void
   setSelectedNodeId: (id: string | null) => void
+  setCanvasNodePosition: (nodeId: string, position: CanvasNodePosition) => void
   setDecompositionStatus: (s: DecompositionStatus) => void
   appendDecompositionStep: (step: DecompositionStep) => void
   updateDecompositionStep: (index: number, update: Partial<DecompositionStep>) => void
@@ -1157,6 +1180,7 @@ export const useAppStore = create<AppStoreState>()(
       settings: defaultSettings,
       prdTree: null,
       selectedNodeId: null,
+      canvasNodePositions: {},
       decompositionStatus: 'idle',
       decompositionSteps: [],
       nodeChats: {},
@@ -1213,6 +1237,7 @@ export const useAppStore = create<AppStoreState>()(
             settings: snapshot.settings ?? defaultSettings,
             prdTree,
             selectedNodeId,
+            canvasNodePositions: normalizeCanvasNodePositions(snapshot.canvasNodePositions, prdTree),
             decompositionStatus: prdTree ? 'done' : 'idle',
             decompositionSteps: [],
             nodeChats: snapshot.nodeChats ?? {},
@@ -1243,6 +1268,7 @@ export const useAppStore = create<AppStoreState>()(
           nodePrototypeStates: {},
           prdTree: null,
           selectedNodeId: null,
+          canvasNodePositions: {},
           decompositionStatus: 'idle',
           decompositionSteps: [],
           nodeChats: {},
@@ -1331,6 +1357,9 @@ export const useAppStore = create<AppStoreState>()(
           return {
             prdTree: rebuildPrdTreeLinks(next),
             selectedNodeId: removedIds.has(state.selectedNodeId ?? '') ? null : state.selectedNodeId,
+            canvasNodePositions: Object.fromEntries(
+              Object.entries(state.canvasNodePositions).filter(([id]) => !removedIds.has(id)),
+            ),
             nodePolishRevisions: Object.fromEntries(
               Object.entries(state.nodePolishRevisions).filter(([id]) => !removedIds.has(id)),
             ),
@@ -2142,6 +2171,17 @@ export const useAppStore = create<AppStoreState>()(
       resetRequirement: () => set({ requirement: emptyRequirement, latestRag: null, prototypeHtml: null, prototypeHistory: [], prototypeVariants: [], selectedVariantIndex: -1, archiveDirty: true }),
       setPrdTree: (prdTree) => set({ prdTree: normalizePrdTree(prdTree), archiveDirty: true }),
       setSelectedNodeId: (selectedNodeId) => set({ selectedNodeId }),
+      setCanvasNodePosition: (nodeId, position) =>
+        set((state) => {
+          if (!state.prdTree?.[nodeId]) return state
+          return {
+            canvasNodePositions: {
+              ...state.canvasNodePositions,
+              [nodeId]: { x: Math.max(24, position.x), y: Math.max(72, position.y) },
+            },
+            archiveDirty: true,
+          }
+        }),
       setDecompositionStatus: (decompositionStatus) => set({ decompositionStatus }),
       appendDecompositionStep: (step) =>
         set((state) => ({ decompositionSteps: [...state.decompositionSteps, step] })),
@@ -2157,6 +2197,7 @@ export const useAppStore = create<AppStoreState>()(
         set({
           prdTree: null,
           selectedNodeId: null,
+          canvasNodePositions: {},
           decompositionStatus: 'idle',
           decompositionSteps: [],
           nodeChats: {},
@@ -2182,6 +2223,7 @@ export const useAppStore = create<AppStoreState>()(
             settings?: unknown
             prdTree?: unknown
             selectedNodeId?: unknown
+            canvasNodePositions?: unknown
             prototypeHtml?: unknown
             prototypeHistory?: unknown
             prototypeVariants?: unknown
@@ -2208,6 +2250,7 @@ export const useAppStore = create<AppStoreState>()(
             settings: previous.settings ?? defaultSettings,
             prdTree,
             selectedNodeId: prdTree ? previous.selectedNodeId ?? null : null,
+            canvasNodePositions: normalizeCanvasNodePositions(previous.canvasNodePositions, prdTree),
             prototypeHtml: typeof previous.prototypeHtml === 'string' ? previous.prototypeHtml : null,
             prototypeHistory: Array.isArray(previous.prototypeHistory) ? previous.prototypeHistory.slice(0, PROTOTYPE_HISTORY_LIMIT) : [],
             prototypeVariants: Array.isArray(previous.prototypeVariants) ? previous.prototypeVariants : [],
@@ -2235,6 +2278,7 @@ export const useAppStore = create<AppStoreState>()(
           settings: defaultSettings,
           prdTree: null,
           selectedNodeId: null,
+          canvasNodePositions: {},
           prototypeHtml: null,
           prototypeHistory: [],
           prototypeVariants: [],
@@ -2265,6 +2309,7 @@ export const useAppStore = create<AppStoreState>()(
         settings: state.settings,
         prdTree: state.prdTree as PrdTree | null,
         selectedNodeId: state.selectedNodeId,
+        canvasNodePositions: state.canvasNodePositions,
         nodeChats: persistableNodeChats(state.nodeChats, 24),
         nodePolishRevisions: state.nodePolishRevisions,
         nodePrototypeStates: state.nodePrototypeStates,

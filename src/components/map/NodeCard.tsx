@@ -3,11 +3,13 @@ import { formatSpecLens, resolveNodeSpecLens } from '../../lib/prdNodeLens'
 import { buildDeliverySections, deliverySectionStatusLabel, isDeliveryNode, type DeliverySectionStatus, type DeliverySectionSummary } from '../../lib/prdNodeDelivery'
 import type { PrdNode, PrdNodeSectionKey, PrdNodeSpecLens, PrdTree } from '../../types/prdNode'
 import { DocumentMiniPreview } from './DocumentPreview'
+import { PrototypePreviewSurface } from '../state/PrototypeSandboxPreview'
 
 interface NodeCardProps {
   node: PrdNode
   tree: PrdTree
   isSelected: boolean
+  previewHtml?: string | null
   onNodeClick: (id: string) => void
   onNodeDoubleClick: (id: string) => void
 }
@@ -19,7 +21,7 @@ function canForgeNode(node: PrdNode, tree: PrdTree) {
 function StatusBadge({ node, tree }: { node: PrdNode; tree: PrdTree }) {
   if (node.status === 'done') {
     return (
-      <div className="flex items-center gap-xs bg-tertiary-container/40 border border-on-tertiary-container text-tertiary px-2 py-1 rounded-full text-[10px] font-bold tracking-wider">
+      <div className="flex items-center gap-xs rounded-full border border-on-tertiary-container bg-tertiary-container/40 px-2 py-1 text-[10px] font-bold tracking-wider text-tertiary">
         <span className="material-symbols-outlined" style={{ fontSize: '12px', fontVariationSettings: "'FILL' 1" }}>check_circle</span>
         已确认
       </div>
@@ -27,7 +29,7 @@ function StatusBadge({ node, tree }: { node: PrdNode; tree: PrdTree }) {
   }
   if (canForgeNode(node, tree)) {
     return (
-      <div className="flex items-center gap-xs bg-[#b22a00]/20 border border-[#ff5429] text-[#ff8b6b] px-2 py-1 rounded-full text-[10px] font-bold tracking-wider">
+      <div className="flex items-center gap-xs rounded-full border border-[#ff5429] bg-[#b22a00]/20 px-2 py-1 text-[10px] font-bold tracking-wider text-[#ff8b6b]">
         <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>auto_awesome</span>
         待打磨
       </div>
@@ -36,9 +38,9 @@ function StatusBadge({ node, tree }: { node: PrdNode; tree: PrdTree }) {
   if (node.status === 'pending_refine') return null
   if (node.status === 'pending') {
     return (
-      <div className="flex items-center gap-xs bg-surface-container-high border border-outline-variant text-on-surface-variant px-2 py-1 rounded-full text-[10px] font-bold tracking-wider">
+      <div className="flex items-center gap-xs rounded-full border border-outline-variant bg-surface-container-high px-2 py-1 text-[10px] font-bold tracking-wider text-on-surface-variant">
         <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>checklist</span>
-        可导出
+        可整理
       </div>
     )
   }
@@ -66,9 +68,7 @@ function toneForLens(lens: PrdNodeSpecLens) {
 }
 
 function sectionTone(key: PrdNodeSectionKey, status: DeliverySectionStatus) {
-  if (status !== 'ready') {
-    return mvcTone('default')
-  }
+  if (status !== 'ready') return mvcTone('default')
   return mvcTone(toneForSection(key))
 }
 
@@ -95,10 +95,47 @@ function DeliveryMiniPreview({ sections }: { sections: DeliverySectionSummary[] 
   )
 }
 
-export function NodeCard({ node, tree, isSelected, onNodeClick, onNodeDoubleClick }: NodeCardProps) {
+function incomingReferenceCount(nodeId: string, tree: PrdTree) {
+  return Object.values(tree).reduce((count, node) => (
+    count + (node.references ?? []).filter((reference) => reference.targetNodeId === nodeId).length
+  ), 0)
+}
+
+function flowCounts(node: PrdNode, tree: PrdTree) {
+  return {
+    upstream: (node.parentId ? 1 : 0) + incomingReferenceCount(node.id, tree),
+    downstream: node.children.length + (node.references ?? []).filter((reference) => Boolean(reference.targetNodeId)).length,
+  }
+}
+
+function FlowCountChips({ node, tree }: { node: PrdNode; tree: PrdTree }) {
+  const counts = flowCounts(node, tree)
+  return (
+    <div className="flex shrink-0 items-center gap-xs">
+      <span className="inline-flex items-center gap-[2px] rounded border border-outline-variant/70 bg-surface-container px-xs py-[1px] font-code-sm text-[10px] text-on-surface-variant">
+        <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>input</span>
+        {counts.upstream}
+      </span>
+      <span className="inline-flex items-center gap-[2px] rounded border border-outline-variant/70 bg-surface-container px-xs py-[1px] font-code-sm text-[10px] text-on-surface-variant">
+        <span className="material-symbols-outlined" style={{ fontSize: '12px' }}>output</span>
+        {counts.downstream}
+      </span>
+    </div>
+  )
+}
+
+function nodeKindMeta(node: PrdNode, tree: PrdTree) {
+  if (node.type === 'module' && node.parentId === null) return { icon: 'inventory_2', label: 'PRD 源包' }
+  if (node.type === 'module') return { icon: 'hub', label: '流程分组' }
+  if (isDeliveryNode(node, tree)) return { icon: 'web_asset', label: '界面屏' }
+  return { icon: 'conversion_path', label: '交互细节' }
+}
+
+export function NodeCard({ node, tree, isSelected, previewHtml, onNodeClick, onNodeDoubleClick }: NodeCardProps) {
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const specLens = resolveNodeSpecLens(node)
   const lensLabel = formatSpecLens(specLens)
+  const meta = nodeKindMeta(node, tree)
 
   useEffect(() => {
     return () => {
@@ -119,15 +156,18 @@ export function NodeCard({ node, tree, isSelected, onNodeClick, onNodeDoubleClic
     }
   }
 
-  if (node.parentId === null) {
+  if (node.type === 'module' && node.parentId === null) {
     return (
       <div
         onClick={handleClick}
         className={`relative flex h-full cursor-pointer flex-col rounded-lg border border-outline-variant bg-surface-container p-md transition-colors hover:border-primary ${isSelected ? 'active-glow' : 'node-glow'}`}
       >
-        <div className="flex items-center gap-sm mb-sm text-primary">
-          <span className="material-symbols-outlined">folder_special</span>
-          <span className="font-label-md text-label-md">原文目录</span>
+        <div className="mb-sm flex items-center justify-between gap-sm">
+          <div className="flex min-w-0 items-center gap-sm text-primary">
+            <span className="material-symbols-outlined">{meta.icon}</span>
+            <span className="truncate font-label-md text-label-md">{meta.label}</span>
+          </div>
+          <FlowCountChips node={node} tree={tree} />
         </div>
         <h2 className="mb-sm line-clamp-2 font-headline-sm text-headline-sm text-on-surface">{node.label}</h2>
         <div className="min-h-0 flex-1 overflow-hidden rounded border border-outline-variant/60 bg-surface-container-low/70 p-sm">
@@ -146,9 +186,12 @@ export function NodeCard({ node, tree, isSelected, onNodeClick, onNodeDoubleClic
         onClick={handleClick}
         className={`flex h-full cursor-pointer flex-col rounded-lg border border-outline-variant bg-surface-container p-md shadow-sm transition-colors hover:border-primary ${isSelected ? 'active-glow' : 'node-glow'}`}
       >
-        <div className="flex items-center gap-sm mb-xs text-secondary">
-          <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>category</span>
-          <span className="font-label-md text-label-md">文档分组</span>
+        <div className="mb-xs flex items-center justify-between gap-sm">
+          <div className="flex min-w-0 items-center gap-sm text-secondary">
+            <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>{meta.icon}</span>
+            <span className="truncate font-label-md text-label-md">{meta.label}</span>
+          </div>
+          <FlowCountChips node={node} tree={tree} />
         </div>
         <h3 className="mb-xs line-clamp-2 font-body-lg text-body-lg text-on-surface">{node.label}</h3>
         <div className="mt-sm min-h-0 flex-1 overflow-hidden rounded border border-outline-variant/60 bg-surface-container-low/70 p-sm">
@@ -161,7 +204,6 @@ export function NodeCard({ node, tree, isSelected, onNodeClick, onNodeDoubleClic
   const canForge = canForgeNode(node, tree)
   const isDelivery = isDeliveryNode(node, tree)
   const deliverySections = isDelivery ? buildDeliverySections(node, tree) : []
-  const hasDeliveryPreview = deliverySections.some((section) => section.status !== 'missing')
 
   return (
     <div
@@ -171,25 +213,47 @@ export function NodeCard({ node, tree, isSelected, onNodeClick, onNodeDoubleClic
       <div className="mb-sm flex items-start justify-between gap-sm">
         <div className="min-w-0">
           <div className="mb-xs flex items-center gap-xs text-primary">
-            <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>{node.type === 'page' ? 'web_asset' : 'article'}</span>
-            <span className="truncate font-code-sm text-code-sm">{node.docPath ?? node.id}</span>
+            <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>{meta.icon}</span>
+            <span className="truncate font-label-md text-label-md">{meta.label}</span>
+            <span className="truncate font-code-sm text-code-sm text-on-surface-variant">{node.docPath ?? node.id}</span>
           </div>
           <h4 className="line-clamp-2 font-headline-sm text-headline-sm text-on-surface">{node.label}</h4>
-          <div className={`mt-xs inline-flex max-w-full rounded border px-xs py-[2px] font-code-sm text-code-sm ${mvcTone(node.status === 'done' ? toneForLens(specLens) : 'default')}`}>
-            <span className="truncate">{lensLabel}</span>
+          <div className="mt-xs flex max-w-full flex-wrap items-center gap-xs">
+            <span className={`inline-flex max-w-full rounded border px-xs py-[2px] font-code-sm text-code-sm ${mvcTone(node.status === 'done' ? toneForLens(specLens) : 'default')}`}>
+              <span className="truncate">{lensLabel}</span>
+            </span>
+            <FlowCountChips node={node} tree={tree} />
           </div>
         </div>
         <StatusBadge node={node} tree={tree} />
       </div>
-      <div className="min-h-0 flex-1 overflow-hidden rounded border border-outline-variant/60 bg-surface-container/70 p-sm">
-        {isDelivery && hasDeliveryPreview
+      <div
+        data-node-preview-kind={previewHtml ? 'prototype' : isDelivery ? 'delivery' : 'document'}
+        className="min-h-0 flex-1 overflow-hidden rounded border border-outline-variant/60 bg-surface-container/70 p-sm"
+      >
+        {previewHtml ? (
+          <div data-node-prototype-preview={node.id} className="h-full w-full">
+            <PrototypePreviewSurface
+              html={previewHtml}
+              title={`${node.label} preview`}
+              fit="thumbnail"
+              interactive={false}
+              surfaceClassName="!h-full !w-full"
+              fallback={(
+                <div className="flex h-full items-center justify-center p-xs text-center text-[10px] text-on-surface-variant">
+                  预览加载中
+                </div>
+              )}
+            />
+          </div>
+        ) : isDelivery
           ? <DeliveryMiniPreview sections={deliverySections} />
           : <DocumentMiniPreview node={node} tree={tree} maxLines={8} />}
       </div>
       <div className="mt-sm flex items-center justify-between border-t border-outline-variant pt-sm">
-        <span className="font-label-md text-label-md text-on-surface-variant">文档预览</span>
-        <span className="font-label-md text-label-md text-primary opacity-0 group-hover:opacity-100 transition-opacity">
-        {canForge ? '双击打磨' : '单击查看'}
+        <span className="font-label-md text-label-md text-on-surface-variant">界面与链路预览</span>
+        <span className="font-label-md text-label-md text-primary opacity-0 transition-opacity group-hover:opacity-100">
+          {canForge ? '双击打磨' : '单击查看'}
         </span>
       </div>
     </div>

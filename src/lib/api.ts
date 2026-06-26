@@ -199,17 +199,23 @@ export function exportFinalPrompt(baseUrl: string, requirementState: UXRequireme
 
 // ── Decomposition API ────────────────────────────────────────────────────────
 
-export function previewDecomposition(baseUrl: string, mdText: string, projectWorkflow?: ProjectWorkflowState) {
+export interface DecompositionSourcePayload {
+  mdText?: string | null
+  mdFilename?: string | null
+  figmaUrl?: string | null
+}
+
+export function previewDecomposition(baseUrl: string, sources: DecompositionSourcePayload, projectWorkflow?: ProjectWorkflowState) {
   return requestJson<PrdImportPreview>(baseUrl, '/api/decompose/preview', {
     method: 'POST',
-    body: JSON.stringify({ mdText, projectWorkflow }),
+    body: JSON.stringify({ ...sources, projectWorkflow }),
   })
 }
 
-export function startDecomposition(baseUrl: string, mdText: string, projectWorkflow?: ProjectWorkflowState) {
+export function startDecomposition(baseUrl: string, sources: DecompositionSourcePayload, projectWorkflow?: ProjectWorkflowState) {
   return requestJson<{ sessionId: string }>(baseUrl, '/api/decompose/start', {
     method: 'POST',
-    body: JSON.stringify({ mdText, projectWorkflow }),
+    body: JSON.stringify({ ...sources, projectWorkflow }),
   })
 }
 

@@ -1,8 +1,14 @@
 import { useRef, useState } from 'react'
 import type { ProjectWorkflowMode } from '../../types/projectWorkflow'
 
+export interface ImportSourceInput {
+  mdText?: string | null
+  mdFilename?: string | null
+  figmaUrl?: string | null
+}
+
 interface UploadCardProps {
-  onFileRead: (text: string, filename: string) => void
+  onImportSources: (sources: ImportSourceInput) => void
   onOpenArchive?: () => void
   error?: string | null
   workflowMode: ProjectWorkflowMode
@@ -14,7 +20,7 @@ interface UploadCardProps {
 }
 
 export function UploadCard({
-  onFileRead,
+  onImportSources,
   onOpenArchive,
   error,
   workflowMode,
@@ -27,8 +33,13 @@ export function UploadCard({
   const inputRef = useRef<HTMLInputElement>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [rejectionError, setRejectionError] = useState<string | null>(null)
+  const [mdText, setMdText] = useState<string | null>(null)
+  const [mdFilename, setMdFilename] = useState<string | null>(null)
+  const [figmaUrl, setFigmaUrl] = useState('')
 
   const displayError = error ?? rejectionError
+  const normalizedFigmaUrl = figmaUrl.trim()
+  const canImport = Boolean(mdText?.trim() || normalizedFigmaUrl)
 
   const handleFile = (file: File) => {
     if (!file.name.endsWith('.md') && file.type !== 'text/markdown') {
@@ -39,9 +50,29 @@ export function UploadCard({
     const reader = new FileReader()
     reader.onload = (e) => {
       const text = e.target?.result as string
-      if (text) onFileRead(text, file.name)
+      if (text) {
+        setMdText(text)
+        setMdFilename(file.name)
+      }
     }
     reader.readAsText(file, 'UTF-8')
+  }
+
+  const handleImport = () => {
+    if (!canImport) {
+      setRejectionError('请至少提供 Figma 链接或 Markdown PRD 文档。')
+      return
+    }
+    if (normalizedFigmaUrl && !/https?:\/\/(?:www\.)?figma\.com\//iu.test(normalizedFigmaUrl)) {
+      setRejectionError('Figma 链接格式不正确，请粘贴 figma.com/design 或 figma.com/file 链接。')
+      return
+    }
+    setRejectionError(null)
+    onImportSources({
+      mdText,
+      mdFilename,
+      figmaUrl: normalizedFigmaUrl || null,
+    })
   }
 
   const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
@@ -104,6 +135,19 @@ export function UploadCard({
         </div>
       ) : null}
 
+      <label className="grid w-full gap-xs">
+        <span className="text-label-md text-on-surface">Figma 设计稿链接</span>
+        <input
+          value={figmaUrl}
+          onChange={(event) => setFigmaUrl(event.target.value)}
+          className="min-h-[42px] rounded-lg border border-outline-variant bg-surface px-md py-sm text-body-md text-on-surface outline-none transition-colors placeholder:text-on-surface-variant/60 focus:border-secondary"
+          placeholder="https://www.figma.com/design/...?...node-id=..."
+        />
+        <span className="text-code-sm text-on-surface-variant">
+          有 Figma 时优先按设计稿解析；Markdown PRD 会作为功能、规则和验收补充。
+        </span>
+      </label>
+
       {/* Drop zone */}
       <div
         className={`w-full min-h-[160px] rounded-lg border-2 border-dashed
@@ -118,10 +162,13 @@ export function UploadCard({
       >
         <span className="material-symbols-outlined text-on-surface-variant" style={{ fontSize: '40px' }}>upload_file</span>
         <span className="text-headline-sm text-on-surface">
-          {isDragging ? '松开即可上传' : '拖拽PRD文档到这里'}
+          {isDragging ? '松开即可上传' : mdFilename ? mdFilename : '拖拽PRD文档到这里'}
         </span>
-        {!isDragging && (
+        {!isDragging && !mdFilename && (
           <span className="text-body-md text-on-surface-variant">或点击选择文件 · 仅支持 .md 格式</span>
+        )}
+        {mdFilename && (
+          <span className="text-body-md text-tertiary">Markdown PRD 已就绪，可继续补充 Figma 链接后一起解析</span>
         )}
       </div>
 
@@ -145,7 +192,20 @@ export function UploadCard({
           onClick={() => inputRef.current?.click()}
         >
           <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>upload_file</span>
-          上传PRD文档
+          {mdFilename ? '更换PRD文档' : '上传PRD文档'}
+        </button>
+        <button
+          className={[
+            'flex min-h-[44px] items-center gap-2 rounded-lg px-4 py-2 text-label-md transition-colors',
+            canImport
+              ? 'border border-secondary-container bg-secondary-container text-on-secondary-container hover:bg-secondary-container/80'
+              : 'cursor-not-allowed border border-outline-variant bg-surface-container text-on-surface-variant opacity-60',
+          ].join(' ')}
+          disabled={!canImport}
+          onClick={handleImport}
+        >
+          <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>account_tree</span>
+          开始解析资料
         </button>
         {onOpenArchive ? (
           <button

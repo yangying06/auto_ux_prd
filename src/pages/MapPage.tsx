@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'wouter'
 import { getAiEnvironmentConfig, previewDecomposition, startDecomposition, pollDecomposition, exportSpecFolder, exportNodeMarkdown, suggestPrdNodeOperations, scanProjectBaseline } from '../lib/api'
+import type { DecompositionSourcePayload } from '../lib/api'
 import { MapAdjustmentPanel } from '../components/map/MapAdjustmentPanel'
-import type { PrdImportPreview, PrdNode, PrdNodeOperationSuggestion, PrdTree } from '../types/prdNode'
+import type { PrdImportPreview, PrdNode, PrdNodeOperationSuggestion, PrdNodeReference, PrdTree } from '../types/prdNode'
 import type { AiEnvironmentConfig } from '../types/chat'
 import { useAppStore } from '../store/appStore'
 import { UploadCard } from '../components/upload/UploadCard'
@@ -17,7 +18,7 @@ import { buildProjectArchiveFile, encodeProjectArchive } from '../lib/archiveCod
 import { formatProjectArchiveError, openProjectArchiveFile, saveProjectArchiveBytes } from '../lib/archiveIO'
 import { createProjectWorkspaceSnapshot } from '../lib/archiveSnapshot'
 import { AddNodeModal, type AddNodePayload } from '../components/map/AddNodeModal'
-import { buildDeliveryDisplayTree, collectDeliveryNodes, isDeliveryNode } from '../lib/prdNodeDelivery'
+import { collectDeliveryNodes, isDeliveryNode } from '../lib/prdNodeDelivery'
 import { EnvironmentConfigModal } from '../components/map/EnvironmentConfigModal'
 import { AssetWorkbenchModal } from '../components/map/AssetWorkbenchModal'
 import type { AssetWorkbenchState } from '../types/assetWorkbench'
@@ -28,6 +29,101 @@ type Stage = 'upload' | 'preview' | 'decomposing' | 'error' | 'map'
 const INITIAL_STEP = '正在建立原文索引'
 const POLL_INTERVAL_MS = 700
 const EMPTY_NODE_SUGGESTIONS: PrdNodeOperationSuggestion[] = []
+
+function buildImportSourceDocumentText(sources: DecompositionSourcePayload) {
+  const figmaUrl = sources.figmaUrl?.trim()
+  const mdText = sources.mdText?.trim()
+  const parts: string[] = []
+
+  if (figmaUrl) {
+    parts.push(`# Figma 设计稿链接\n\n${figmaUrl}`)
+  }
+
+  if (mdText) {
+    const filename = sources.mdFilename?.trim() || 'Markdown PRD'
+    parts.push(`# Markdown PRD：${filename}\n\n${mdText}`)
+  }
+
+  return parts.join('\n\n---\n\n')
+}
+
+function buildImportSourceFilename(sources: DecompositionSourcePayload) {
+  const hasFigma = Boolean(sources.figmaUrl?.trim())
+  const mdFilename = sources.mdFilename?.trim()
+  if (hasFigma && mdFilename) return `figma+${mdFilename}`
+  if (hasFigma) return 'figma-design.md'
+  return mdFilename || 'prd.md'
+}
+
+function buildIterationSourceText(sources: DecompositionSourcePayload) {
+  return [
+    sources.figmaUrl?.trim() ? `Figma 设计稿：${sources.figmaUrl.trim()}` : null,
+    sources.mdText?.trim() ? sources.mdText.trim() : null,
+  ].filter(Boolean).join('\n\n')
+}
+
+interface FlowConnectionDraft {
+  isOpen: boolean
+  mode: 'incoming' | 'outgoing' | 'edge'
+  sourceNodeId: string
+  targetNodeId: string
+  originalSourceNodeId: string | null
+  originalTargetNodeId: string | null
+  label: string
+  reason: string
+}
+
+interface CanvasConnectionDraft {
+  nodeId: string
+  direction: 'incoming' | 'outgoing'
+}
+
+function compactText(value: string | null | undefined, maxLength = 72) {
+  const normalized = (value ?? '').replace(/\s+/g, ' ').trim()
+  if (!normalized) return ''
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized
+}
+
+function nodeInteractionHint(node: PrdNode) {
+  return compactText(
+    node.sections?.interaction?.summary
+    ?? node.sections?.interaction?.content
+    ?? node.sections?.view?.summary
+    ?? node.summary
+    ?? node.content,
+  )
+}
+
+function buildSmartReference(sourceNode: PrdNode, targetNode: PrdNode): PrdNodeReference {
+  const sourceHint = nodeInteractionHint(sourceNode)
+  const targetHint = nodeInteractionHint(targetNode)
+  const label = `${sourceNode.label} → ${targetNode.label}`
+  const reasonParts = [
+    `${sourceNode.label} 触发后进入 ${targetNode.label}。`,
+    sourceHint ? `源界面线索：${sourceHint}` : '',
+    targetHint ? `目标界面线索：${targetHint}` : '',
+  ].filter(Boolean)
+
+  return {
+    targetNodeId: targetNode.id,
+    label,
+    reason: reasonParts.join(' '),
+    sourceNodeId: sourceNode.id,
+  }
+}
+
+function buildInterfaceFlowDisplayTree(tree: PrdTree): PrdTree {
+  return Object.fromEntries(
+    collectDeliveryNodes(tree).map((node) => [
+      node.id,
+      {
+        ...node,
+        parentId: null,
+        children: [],
+      },
+    ]),
+  ) as PrdTree
+}
 
 function findLastActiveIdx(steps: Array<{ status: string }>) {
   for (let i = steps.length - 1; i >= 0; i--) {
@@ -44,10 +140,6 @@ function normalizeStepPhase(label: string) {
     .trim()
 }
 
-function canForgeNode(node: PrdNode | null, tree: PrdTree | null | undefined) {
-  return Boolean(node && isDeliveryNode(node, tree) && (node.needsPolish || node.status === 'done'))
-}
-
 function completionGateNodes(tree: PrdTree) {
   const deliveryNodes = collectDeliveryNodes(tree)
   if (deliveryNodes.length) return deliveryNodes
@@ -59,12 +151,6 @@ function completionGateNodes(tree: PrdTree) {
 function allCompletionGateNodesDone(tree: PrdTree) {
   const targets = completionGateNodes(tree)
   return targets.length > 0 && targets.every((node) => node.status === 'done')
-}
-
-function getPrimaryRootId(tree: PrdTree) {
-  return Object.values(tree)
-    .filter((node) => node.parentId === null)
-    .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id))[0]?.id ?? null
 }
 
 function clipNodeSourceText(text: string) {
@@ -125,6 +211,20 @@ function collectGeneratedNodePrototypes(tree: PrdTree, nodePrototypeStates: Retu
     .filter((item): item is { node: PrdNode; html: string } => Boolean(item))
 }
 
+function buildNodePreviewHtmlMap(nodePrototypeStates: ReturnType<typeof useAppStore.getState>['nodePrototypeStates']) {
+  return Object.fromEntries(
+    Object.entries(nodePrototypeStates)
+      .map(([nodeId, state]) => {
+        const selectedVariant = state.prototypeVariants.find((variant) => (
+          variant.index === state.selectedVariantIndex && Boolean(variant.html)
+        ))
+        const html = selectedVariant?.html ?? state.prototypeHtml ?? null
+        return html ? [nodeId, html] : null
+      })
+      .filter((entry): entry is [string, string] => Boolean(entry)),
+  )
+}
+
 function countExportableAssetRows(assetWorkbench: AssetWorkbenchState) {
   const uiCount = assetWorkbench.uiRows.filter((row) => row.status === 'ready' && row.result).length
   const effectCount = assetWorkbench.effectRows.filter((row) =>
@@ -171,7 +271,7 @@ export function MapPage() {
   const [nodeCount, setNodeCount] = useState(0)
   const [isExporting, setIsExporting] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
-  const [pendingMdText, setPendingMdText] = useState<string | null>(null)
+  const [pendingImportSources, setPendingImportSources] = useState<DecompositionSourcePayload | null>(null)
   const [importPreview, setImportPreview] = useState<PrdImportPreview | null>(null)
   const [isPreviewLoading, setIsPreviewLoading] = useState(false)
   const [previewError, setPreviewError] = useState<string | null>(null)
@@ -187,6 +287,9 @@ export function MapPage() {
   const [environmentConfigOpen, setEnvironmentConfigOpen] = useState(false)
   const [assetWorkbenchOpen, setAssetWorkbenchOpen] = useState(false)
   const [environmentStatus, setEnvironmentStatus] = useState<AiEnvironmentConfig | null>(null)
+  const [flowConnectionDraft, setFlowConnectionDraft] = useState<FlowConnectionDraft | null>(null)
+  const [canvasConnectionDraft, setCanvasConnectionDraft] = useState<CanvasConnectionDraft | null>(null)
+  const [canvasFocusNodeId, setCanvasFocusNodeId] = useState<string | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const pollInFlightRef = useRef(false)
@@ -216,6 +319,7 @@ export function MapPage() {
   const markArchiveSaved = useAppStore((s) => s.markArchiveSaved)
   const resetProject = useAppStore((s) => s.resetProject)
   const createPageNode = useAppStore((s) => s.createPageNode)
+  const updateNode = useAppStore((s) => s.updateNode)
   const updateNodeContent = useAppStore((s) => s.updateNodeContent)
   const deleteNode = useAppStore((s) => s.deleteNode)
   const createQaIssue = useAppStore((s) => s.createQaIssue)
@@ -225,6 +329,8 @@ export function MapPage() {
   const applyNodeOperationSuggestion = useAppStore((s) => s.applyNodeOperationSuggestion)
   const setNodeDocPath = useAppStore((s) => s.setNodeDocPath)
   const setSelectedNodeId = useAppStore((s) => s.setSelectedNodeId)
+  const canvasNodePositions = useAppStore((s) => s.canvasNodePositions)
+  const setCanvasNodePosition = useAppStore((s) => s.setCanvasNodePosition)
   const selectedNodeId = useAppStore((s) => s.selectedNodeId)
   const addNodeSuggestions = useAppStore((s) => (
     createdAddNodeId ? s.nodeOperationSuggestions[createdAddNodeId] ?? EMPTY_NODE_SUGGESTIONS : EMPTY_NODE_SUGGESTIONS
@@ -245,7 +351,7 @@ export function MapPage() {
     setPreviewError(null)
     setProjectError(null)
     setImportPreview(null)
-    setPendingMdText(null)
+    setPendingImportSources(null)
     setIsPreviewLoading(false)
     setNodeCount(0)
   }
@@ -403,7 +509,7 @@ export function MapPage() {
     }, POLL_INTERVAL_MS)
   }
 
-  const beginDecomposition = async (mdText: string) => {
+  const beginDecomposition = async (sources: DecompositionSourcePayload) => {
     clearPolling()
     sessionIdRef.current = null
     resetDecomposition()
@@ -415,7 +521,7 @@ export function MapPage() {
     appendDecompositionStep({ label: INITIAL_STEP, status: 'active' })
 
     try {
-      const { sessionId } = await startDecomposition(settings.proxyBaseUrl, mdText, useAppStore.getState().projectWorkflow)
+      const { sessionId } = await startDecomposition(settings.proxyBaseUrl, sources, useAppStore.getState().projectWorkflow)
       sessionIdRef.current = sessionId
       startPolling(sessionId)
     } catch (err) {
@@ -425,7 +531,13 @@ export function MapPage() {
     }
   }
 
-  const handleFileRead = async (mdText: string, filename: string) => {
+  const handleImportSources = async (sources: DecompositionSourcePayload) => {
+    const sourceText = buildImportSourceDocumentText(sources)
+    if (!sourceText.trim()) {
+      setUploadError('请至少提供 Figma 链接或 Markdown PRD 文档。')
+      return
+    }
+
     const workflowBeforeReset = useAppStore.getState().projectWorkflow
     const iterationDraft = workflowBeforeReset.iteration
     const isIterationMode = workflowBeforeReset.mode === 'existing_project_iteration'
@@ -445,8 +557,12 @@ export function MapPage() {
     setDecompError(null)
     setProjectError(null)
     setNodeCount(0)
-    setSourceDocument({ filename, text: mdText, importedAt: new Date().toISOString() })
-    setPendingMdText(mdText)
+    setSourceDocument({
+      filename: buildImportSourceFilename(sources),
+      text: sourceText,
+      importedAt: new Date().toISOString(),
+    })
+    setPendingImportSources(sources)
     setImportPreview(null)
     setPreviewError(null)
     setIsPreviewLoading(true)
@@ -456,9 +572,10 @@ export function MapPage() {
 
     try {
       if (isIterationMode) {
+        const iterationSourceText = buildIterationSourceText(sources)
         const baselineScan = await scanProjectBaseline(settings.proxyBaseUrl, {
           rootPath: codebasePath,
-          iterationPrd: mdText,
+          iterationPrd: iterationSourceText,
           focus,
         })
         const iterationContext: ProjectIterationContext = {
@@ -473,7 +590,7 @@ export function MapPage() {
         setProjectWorkflowMode('new_project')
       }
 
-      const preview = await previewDecomposition(settings.proxyBaseUrl, mdText, useAppStore.getState().projectWorkflow)
+      const preview = await previewDecomposition(settings.proxyBaseUrl, sources, useAppStore.getState().projectWorkflow)
       if (previewRequestRef.current !== requestId) return
       setImportPreview(preview)
     } catch (err) {
@@ -485,8 +602,8 @@ export function MapPage() {
   }
 
   const handleConfirmPreview = () => {
-    if (!pendingMdText) return
-    void beginDecomposition(pendingMdText)
+    if (!pendingImportSources) return
+    void beginDecomposition(pendingImportSources)
   }
 
   const handleWorkflowModeChange = (mode: ProjectWorkflowMode) => {
@@ -560,9 +677,16 @@ export function MapPage() {
     return () => { clearPolling() }
   }, [])
 
+  useEffect(() => {
+    if (!canvasFocusNodeId) return
+    if (prdTree?.[canvasFocusNodeId]) return
+    setCanvasFocusNodeId(null)
+  }, [canvasFocusNodeId, prdTree])
+
   if (stage === 'map' && prdTree) {
-    const selectedNode = selectedNodeId ? (prdTree[selectedNodeId] ?? null) : null
-    const displayTree = buildDeliveryDisplayTree(prdTree)
+    const nodePreviewHtmlMap = buildNodePreviewHtmlMap(nodePrototypeStates)
+    const displayTree = buildInterfaceFlowDisplayTree(prdTree)
+    const selectedNode = selectedNodeId && displayTree[selectedNodeId] ? (prdTree[selectedNodeId] ?? null) : null
 
     const completionTargets = completionGateNodes(prdTree)
     const incompleteCompletionTargets = completionTargets.filter((node) => node.status !== 'done')
@@ -577,6 +701,139 @@ export function MapPage() {
     const iterationInfo = projectWorkflow.mode === 'existing_project_iteration'
       ? compactIterationContext(projectWorkflow.iteration)
       : null
+    const connectableNodes = collectDeliveryNodes(prdTree)
+    const fallbackConnectableNode = (excludeNodeId?: string | null) => (
+      connectableNodes.find((node) => node.id !== excludeNodeId) ?? connectableNodes[0] ?? null
+    )
+    const connectableNodeIds = connectableNodes.map((node) => node.id)
+
+    const startCanvasConnection = (nodeId: string, direction: 'incoming' | 'outgoing') => {
+      if (!prdTree[nodeId] || !connectableNodeIds.includes(nodeId)) return
+      setCanvasFocusNodeId(nodeId)
+      setSelectedNodeId(null)
+      setFlowConnectionDraft(null)
+      setCanvasConnectionDraft({ nodeId, direction })
+    }
+
+    const cancelCanvasConnection = () => {
+      setCanvasConnectionDraft(null)
+    }
+
+    const completeCanvasConnection = (clickedNodeId: string) => {
+      if (!canvasConnectionDraft) return
+      if (!connectableNodeIds.includes(clickedNodeId) || clickedNodeId === canvasConnectionDraft.nodeId) return
+
+      const sourceNodeId = canvasConnectionDraft.direction === 'outgoing' ? canvasConnectionDraft.nodeId : clickedNodeId
+      const targetNodeId = canvasConnectionDraft.direction === 'outgoing' ? clickedNodeId : canvasConnectionDraft.nodeId
+      const sourceNode = prdTree[sourceNodeId]
+      const targetNode = prdTree[targetNodeId]
+      if (!sourceNode || !targetNode || sourceNode.id === targetNode.id) return
+
+      const smartReference = buildSmartReference(sourceNode, targetNode)
+      const existing = (sourceNode.references ?? []).find((reference) => reference.targetNodeId === targetNode.id)
+      const references = (sourceNode.references ?? []).filter((reference) => reference.targetNodeId !== targetNode.id)
+      updateNode(sourceNode.id, {
+        references: [
+          ...references,
+          {
+            ...smartReference,
+            label: existing?.label?.trim() || smartReference.label,
+            reason: existing?.reason?.trim() || smartReference.reason,
+          },
+        ],
+      })
+      setCanvasFocusNodeId(canvasConnectionDraft.nodeId)
+      setSelectedNodeId(null)
+      setCanvasConnectionDraft(null)
+    }
+
+    const openFlowConnectionDraft = (nodeId: string, direction: 'incoming' | 'outgoing') => {
+      const fallback = fallbackConnectableNode(nodeId)
+      if (!fallback) return
+      const sourceNodeId = direction === 'outgoing' ? nodeId : fallback.id
+      const targetNodeId = direction === 'outgoing' ? fallback.id : nodeId
+      const sourceNode = prdTree[sourceNodeId]
+      const targetNode = prdTree[targetNodeId]
+      if (!sourceNode || !targetNode || sourceNodeId === targetNodeId) return
+      const existing = (sourceNode.references ?? []).find((reference) => reference.targetNodeId === targetNodeId)
+
+      setFlowConnectionDraft({
+        isOpen: true,
+        mode: direction,
+        sourceNodeId,
+        targetNodeId,
+        originalSourceNodeId: existing ? sourceNodeId : null,
+        originalTargetNodeId: existing?.targetNodeId ?? null,
+        label: existing?.label ?? `${sourceNode.label} → ${targetNode.label}`,
+        reason: existing?.reason ?? '',
+      })
+    }
+
+    const openExistingReferenceDraft = (sourceNodeId: string, targetNodeId: string) => {
+      const sourceNode = prdTree[sourceNodeId]
+      const targetNode = prdTree[targetNodeId]
+      if (!sourceNode || !targetNode) return
+      const existing = (sourceNode.references ?? []).find((reference) => reference.targetNodeId === targetNodeId)
+
+      setFlowConnectionDraft({
+        isOpen: true,
+        mode: 'edge',
+        sourceNodeId,
+        targetNodeId,
+        originalSourceNodeId: sourceNodeId,
+        originalTargetNodeId: targetNodeId,
+        label: existing?.label ?? `${sourceNode.label} → ${targetNode.label}`,
+        reason: existing?.reason ?? '',
+      })
+    }
+
+    const closeFlowConnectionDraft = () => {
+      setFlowConnectionDraft(null)
+    }
+
+    const saveFlowConnectionDraft = () => {
+      if (!flowConnectionDraft) return
+      const sourceNode = prdTree[flowConnectionDraft.sourceNodeId]
+      const targetNode = prdTree[flowConnectionDraft.targetNodeId]
+      if (!sourceNode || !targetNode || sourceNode.id === targetNode.id) return
+
+      const nextReference: PrdNodeReference = {
+        targetNodeId: targetNode.id,
+        label: flowConnectionDraft.label.trim() || `${sourceNode.label} → ${targetNode.label}`,
+        reason: flowConnectionDraft.reason.trim() || null,
+        sourceNodeId: sourceNode.id,
+      }
+
+      if (flowConnectionDraft.originalSourceNodeId && flowConnectionDraft.originalSourceNodeId !== sourceNode.id) {
+        const originalSource = prdTree[flowConnectionDraft.originalSourceNodeId]
+        if (originalSource) {
+          updateNode(originalSource.id, {
+            references: (originalSource.references ?? []).filter((reference) => (
+              reference.targetNodeId !== flowConnectionDraft.originalTargetNodeId
+            )),
+          })
+        }
+      }
+
+      const references = (sourceNode.references ?? []).filter((reference) => (
+        reference.targetNodeId !== targetNode.id
+        && !(flowConnectionDraft.originalSourceNodeId === sourceNode.id && reference.targetNodeId === flowConnectionDraft.originalTargetNodeId)
+      ))
+      updateNode(sourceNode.id, { references: [...references, nextReference] })
+      setCanvasFocusNodeId(sourceNode.id)
+      setSelectedNodeId(null)
+      closeFlowConnectionDraft()
+    }
+
+    const deleteFlowConnectionDraft = () => {
+      if (!flowConnectionDraft?.originalSourceNodeId || !flowConnectionDraft.originalTargetNodeId) return
+      const sourceNode = prdTree[flowConnectionDraft.originalSourceNodeId]
+      if (!sourceNode) return
+      updateNode(sourceNode.id, {
+        references: (sourceNode.references ?? []).filter((reference) => reference.targetNodeId !== flowConnectionDraft.originalTargetNodeId),
+      })
+      closeFlowConnectionDraft()
+    }
 
     const handleExport = async () => {
       setIsExporting(true)
@@ -605,7 +862,7 @@ export function MapPage() {
     }
 
     const handleOpenAddNode = (parentId: string | null) => {
-      setAddNodeParentId(parentId ?? getPrimaryRootId(prdTree))
+      setAddNodeParentId(parentId)
       setCreatedAddNodeId(null)
       setAddNodeError(null)
       setAddNodeAssistantReply(null)
@@ -626,7 +883,7 @@ export function MapPage() {
       const sources = payload.sources.filter((source) => source.text.trim())
       const supplementText = payload.supplementText.trim()
       const hasSourceMaterial = Boolean(supplementText) || sources.length > 0
-      const parentId = addNodeParentId && prdTree[addNodeParentId] ? addNodeParentId : getPrimaryRootId(prdTree)
+      const parentId = addNodeParentId && prdTree[addNodeParentId] ? addNodeParentId : null
 
       setIsAddNodeSubmitting(true)
       setAddNodeError(null)
@@ -643,7 +900,8 @@ export function MapPage() {
         if (!newNodeId) throw new Error('无法创建节点，请输入有效名称。')
 
         setCreatedAddNodeId(newNodeId)
-        setSelectedNodeId(newNodeId)
+        setCanvasFocusNodeId(newNodeId)
+        setSelectedNodeId(null)
         setNodeOperationSuggestions(newNodeId, [])
 
         if (!hasSourceMaterial) {
@@ -810,18 +1068,27 @@ export function MapPage() {
             <TreeCanvas
               tree={displayTree}
               sourceTree={prdTree}
-              selectedNodeId={selectedNodeId}
-              onNodeClick={(id) => setSelectedNodeId(id)}
-              onNodeDoubleClick={(id) => {
-                const node = prdTree[id]
-                if (!canForgeNode(node, prdTree)) {
-                  setSelectedNodeId(id)
-                  return
-                }
+              layoutMode="free"
+              selectedNodeId={canvasFocusNodeId}
+              canvasNodePositions={canvasNodePositions}
+              previewHtmlByNodeId={nodePreviewHtmlMap}
+              connectableNodeIds={connectableNodeIds}
+              connectionDraft={canvasConnectionDraft}
+              onNodeClick={(id) => {
+                setCanvasFocusNodeId(id)
                 setSelectedNodeId(null)
-                navigate('/forge/' + id)
+              }}
+              onNodeDoubleClick={(id) => {
+                setCanvasFocusNodeId(id)
+                setSelectedNodeId(id)
               }}
               onAddNode={handleOpenAddNode}
+              onStartConnection={startCanvasConnection}
+              onCompleteConnection={completeCanvasConnection}
+              onNodePositionCommit={setCanvasNodePosition}
+              onCancelConnection={cancelCanvasConnection}
+              onOpenConnection={openFlowConnectionDraft}
+              onEditReference={openExistingReferenceDraft}
             />
           </div>
           <PreviewDrawer
@@ -832,8 +1099,140 @@ export function MapPage() {
             onOpenDoc={handleOpenDoc}
             onUpdateContent={updateNodeContent}
             onOpenQa={handleOpenQaForNode}
+            onSelectNode={(id) => setSelectedNodeId(id)}
           />
         </main>
+        {flowConnectionDraft?.isOpen ? (
+          <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/60 p-lg backdrop-blur-sm">
+            <section className="flex w-[min(720px,96vw)] flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface shadow-2xl">
+              <header className="flex items-center justify-between gap-md border-b border-outline-variant bg-surface-container-low px-lg py-md">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-sm text-primary">
+                    <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>conversion_path</span>
+                    <h2 className="truncate font-headline-sm text-headline-sm text-on-surface">编辑跳转线</h2>
+                  </div>
+                  <p className="mt-xs text-body-sm text-on-surface-variant">
+                    这条线会保存到源界面的 references，用于表达页面跳转、触发条件和设计备注。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={closeFlowConnectionDraft}
+                  className="rounded p-xs text-on-surface-variant transition-colors hover:bg-surface-variant hover:text-on-surface"
+                  aria-label="关闭跳转线编辑"
+                  title="关闭"
+                >
+                  <span className="material-symbols-outlined">close</span>
+                </button>
+              </header>
+
+              <div className="grid gap-md px-lg py-md md:grid-cols-2">
+                <label className="flex min-w-0 flex-col gap-xs">
+                  <span className="font-label-md text-label-md text-on-surface-variant">源界面</span>
+                  <select
+                    value={flowConnectionDraft.sourceNodeId}
+                    onChange={(event) => {
+                      const sourceNodeId = event.target.value
+                      const sourceNode = prdTree[sourceNodeId]
+                      const targetNode = prdTree[flowConnectionDraft.targetNodeId]
+                      setFlowConnectionDraft({
+                        ...flowConnectionDraft,
+                        sourceNodeId,
+                        label: sourceNode && targetNode ? `${sourceNode.label} → ${targetNode.label}` : flowConnectionDraft.label,
+                      })
+                    }}
+                    className="h-10 rounded border border-outline-variant bg-surface-container-low px-sm text-body-sm text-on-surface outline-none focus:border-primary"
+                  >
+                    {connectableNodes.map((node) => (
+                      <option key={node.id} value={node.id}>{node.label}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="flex min-w-0 flex-col gap-xs">
+                  <span className="font-label-md text-label-md text-on-surface-variant">目标界面</span>
+                  <select
+                    value={flowConnectionDraft.targetNodeId}
+                    onChange={(event) => {
+                      const targetNodeId = event.target.value
+                      const sourceNode = prdTree[flowConnectionDraft.sourceNodeId]
+                      const targetNode = prdTree[targetNodeId]
+                      setFlowConnectionDraft({
+                        ...flowConnectionDraft,
+                        targetNodeId,
+                        label: sourceNode && targetNode ? `${sourceNode.label} → ${targetNode.label}` : flowConnectionDraft.label,
+                      })
+                    }}
+                    className="h-10 rounded border border-outline-variant bg-surface-container-low px-sm text-body-sm text-on-surface outline-none focus:border-primary"
+                  >
+                    {connectableNodes.map((node) => (
+                      <option key={node.id} value={node.id}>{node.label}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <div className="space-y-md px-lg pb-lg">
+                <label className="flex min-w-0 flex-col gap-xs">
+                  <span className="font-label-md text-label-md text-on-surface-variant">线条标题</span>
+                  <input
+                    value={flowConnectionDraft.label}
+                    onChange={(event) => setFlowConnectionDraft({ ...flowConnectionDraft, label: event.target.value })}
+                    placeholder="例如：点击列表按钮打开帮助界面"
+                    className="h-10 rounded border border-outline-variant bg-surface-container-low px-sm text-body-sm text-on-surface outline-none focus:border-primary"
+                  />
+                </label>
+
+                <label className="flex min-w-0 flex-col gap-xs">
+                  <span className="font-label-md text-label-md text-on-surface-variant">条件 / 过程 / 备注</span>
+                  <textarea
+                    value={flowConnectionDraft.reason}
+                    onChange={(event) => setFlowConnectionDraft({ ...flowConnectionDraft, reason: event.target.value })}
+                    placeholder="例如：主界面点击“列表”先打开列表弹窗；列表中点击“帮助”选项后进入帮助界面。需要保留列表滚动位置。"
+                    className="min-h-[120px] rounded border border-outline-variant bg-surface-container-low p-sm text-body-sm leading-relaxed text-on-surface outline-none focus:border-primary"
+                  />
+                </label>
+
+                {flowConnectionDraft.sourceNodeId === flowConnectionDraft.targetNodeId ? (
+                  <div className="rounded border border-error/40 bg-error/10 px-sm py-xs text-body-sm text-error">
+                    源界面和目标界面不能相同。
+                  </div>
+                ) : null}
+              </div>
+
+              <footer className="flex flex-wrap items-center justify-between gap-sm border-t border-outline-variant bg-surface-container-low px-lg py-md">
+                <div>
+                  {flowConnectionDraft.originalSourceNodeId && flowConnectionDraft.originalTargetNodeId ? (
+                    <button
+                      type="button"
+                      onClick={deleteFlowConnectionDraft}
+                      className="rounded border border-error/50 px-md py-sm text-label-md text-error transition-colors hover:bg-error/10"
+                    >
+                      删除这条线
+                    </button>
+                  ) : null}
+                </div>
+                <div className="flex items-center gap-sm">
+                  <button
+                    type="button"
+                    onClick={closeFlowConnectionDraft}
+                    className="rounded border border-outline-variant px-md py-sm text-label-md text-on-surface-variant transition-colors hover:bg-surface-variant"
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    onClick={saveFlowConnectionDraft}
+                    disabled={flowConnectionDraft.sourceNodeId === flowConnectionDraft.targetNodeId}
+                    className="rounded bg-primary px-md py-sm text-label-md text-on-primary transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    保存跳转线
+                  </button>
+                </div>
+              </footer>
+            </section>
+          </div>
+        ) : null}
         <AddNodeModal
           isOpen={isAddNodeModalOpen}
           isSubmitting={isAddNodeSubmitting}
@@ -973,7 +1372,7 @@ export function MapPage() {
         <div className="w-full transition-opacity duration-300">
           {stage === 'upload' ? (
             <UploadCard
-              onFileRead={handleFileRead}
+              onImportSources={handleImportSources}
               onOpenArchive={() => { void handleOpenArchive() }}
               error={uploadError ?? projectError}
               workflowMode={projectWorkflow.mode}

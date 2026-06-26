@@ -1728,6 +1728,213 @@ function buildPrdImportPreview(mdText: string): PrdImportPreview {
   }
 }
 
+interface DecompositionSourceRequest {
+  mdText?: unknown
+  mdFilename?: unknown
+  figmaUrl?: unknown
+}
+
+interface NormalizedDecompositionSources {
+  mdText: string | null
+  mdFilename: string | null
+  figmaUrl: string | null
+}
+
+interface FigmaDesignEvidenceFrame {
+  id: string
+  name: string
+  type: string
+  depth: number
+  path: string
+  bounds: string
+  childNames: string[]
+  visibleTexts: string[]
+}
+
+const FIGMA_EVIDENCE_MAX_FRAMES = 80
+const FIGMA_EVIDENCE_MAX_TEXTS_PER_FRAME = 10
+const FIGMA_EVIDENCE_MAX_CHILD_NAMES = 10
+
+function normalizeOptionalSourceText(value: unknown) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+function normalizeDecompositionSources(body: DecompositionSourceRequest): NormalizedDecompositionSources {
+  const mdText = normalizeOptionalSourceText(body.mdText)
+  const mdFilename = normalizeOptionalSourceText(body.mdFilename)
+  const figmaUrl = normalizeOptionalSourceText(body.figmaUrl)
+
+  if (!mdText && !figmaUrl) {
+    throw new Error('请至少提供 Figma 设计稿链接或 Markdown PRD 文档。')
+  }
+
+  return { mdText, mdFilename, figmaUrl }
+}
+
+function getConfiguredFigmaToken() {
+  return figmaToken || process.env.FIGMA_TOKEN || process.env.FIGMA_ACCESS_TOKEN || ''
+}
+
+function compactFigmaText(value: string | null | undefined, maxLength = 180) {
+  const normalized = (value ?? '').replace(/\s+/g, ' ').trim()
+  if (!normalized) return ''
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized
+}
+
+function figmaBoundsLabel(node: FigmaApiNode) {
+  const bounds = figmaNodeBounds(node)
+  if (!bounds) return 'unknown'
+  return `x=${Math.round(bounds.x)}, y=${Math.round(bounds.y)}, w=${Math.round(bounds.width)}, h=${Math.round(bounds.height)}`
+}
+
+function sortFigmaChildrenByCanvasOrder(children: FigmaApiNode[]) {
+  return [...children].sort((a, b) => {
+    const aBounds = figmaNodeBounds(a)
+    const bBounds = figmaNodeBounds(b)
+    return (aBounds?.y ?? 0) - (bBounds?.y ?? 0)
+      || (aBounds?.x ?? 0) - (bBounds?.x ?? 0)
+      || a.name.localeCompare(b.name)
+  })
+}
+
+function collectFigmaVisibleTexts(root: FigmaApiNode, maxItems = FIGMA_EVIDENCE_MAX_TEXTS_PER_FRAME) {
+  const texts: string[] = []
+  const seen = new Set<string>()
+
+  function walk(node: FigmaApiNode) {
+    if (texts.length >= maxItems || node.visible === false) return
+    if (node.type === 'TEXT') {
+      const text = compactFigmaText(node.characters, 140)
+      if (text && !seen.has(text)) {
+        seen.add(text)
+        texts.push(text)
+      }
+    }
+    for (const child of node.children ?? []) walk(child)
+  }
+
+  walk(root)
+  return texts
+}
+
+function shouldIncludeFigmaEvidenceNode(node: FigmaApiNode, depth: number) {
+  if (depth === 0) return true
+  if (!isFigmaContainerType(node.type)) return false
+  if (['SECTION', 'FRAME', 'COMPONENT', 'COMPONENT_SET', 'INSTANCE'].includes(node.type)) return depth <= 5
+  return depth <= 2
+}
+
+function collectFigmaEvidenceFrames(root: FigmaApiNode) {
+  const frames: FigmaDesignEvidenceFrame[] = []
+
+  function walk(node: FigmaApiNode, depth: number, pathParts: string[]) {
+    if (node.visible === false || frames.length >= FIGMA_EVIDENCE_MAX_FRAMES) return
+
+    if (shouldIncludeFigmaEvidenceNode(node, depth)) {
+      const childNames = sortFigmaChildrenByCanvasOrder(node.children ?? [])
+        .filter((child) => child.visible !== false && isFigmaContainerType(child.type))
+        .slice(0, FIGMA_EVIDENCE_MAX_CHILD_NAMES)
+        .map((child) => `${child.name} (${child.type})`)
+
+      frames.push({
+        id: node.id,
+        name: node.name,
+        type: node.type,
+        depth,
+        path: pathParts.join(' / '),
+        bounds: figmaBoundsLabel(node),
+        childNames,
+        visibleTexts: collectFigmaVisibleTexts(node),
+      })
+    }
+
+    if (depth >= 6) return
+    for (const child of sortFigmaChildrenByCanvasOrder(node.children ?? [])) {
+      walk(child, depth + 1, [...pathParts, child.name])
+    }
+  }
+
+  walk(root, 0, [root.name])
+  return frames
+}
+
+async function buildFigmaDesignEvidenceMarkdown(figmaUrl: string) {
+  const token = getConfiguredFigmaToken()
+  if (!token) throw new Error('未配置 FIGMA_TOKEN。请在项目 .env 或 server/.env 中配置 Figma token，前端只需要粘贴 Figma 链接。')
+
+  const { fileKey, nodeId, sourceUrl } = parseFigmaFrameUrl(figmaUrl)
+  const root = await fetchFigmaSelectedNode(fileKey, nodeId, token)
+  const frames = collectFigmaEvidenceFrames(root)
+  const rootBounds = figmaBoundsLabel(root)
+
+  const frameLines = frames.map((frame, index) => {
+    const textLines = frame.visibleTexts.length
+      ? frame.visibleTexts.map((text) => `  - ${text}`).join('\n')
+      : '  - 无可见文本样本'
+    const childLines = frame.childNames.length
+      ? frame.childNames.map((name) => `  - ${name}`).join('\n')
+      : '  - 无主要子容器'
+
+    return [
+      `### ${index + 1}. ${frame.name}`,
+      `- 节点 ID：${frame.id}`,
+      `- 类型：${frame.type}`,
+      `- 层级：${frame.depth}`,
+      `- 路径：${frame.path}`,
+      `- 画布位置：${frame.bounds}`,
+      '- 子层/状态命名：',
+      childLines,
+      '- 可见文本样本：',
+      textLines,
+    ].join('\n')
+  })
+
+  return [
+    '# Figma 设计稿证据',
+    '',
+    '## 解析原则',
+    '- Figma 是主证据：优先依据页面/Frame/Section/Component 名称、画布顺序、状态命名、可见文本和层级关系拆出界面节点。',
+    '- 只能基于设计稿中出现的结构与文案推断页面、状态、入口、跳转和反馈；不要编造后端接口、计费、权限、运营配置或服务端规则。',
+    '- 如果只有 Figma 资料，缺失的业务规则、接口字段、异常分支和验收口径必须写入“需澄清点”。',
+    '- 如果同时有 Markdown PRD，PRD 只作为功能规则、边界条件、验收标准和服务端约束补充；不得覆盖 Figma 中明确存在的界面边界。',
+    '',
+    '## 选中节点',
+    `- Figma 链接：${sourceUrl}`,
+    `- File key：${fileKey}`,
+    `- Node ID：${nodeId}`,
+    `- 节点名称：${root.name}`,
+    `- 节点类型：${root.type}`,
+    `- 节点尺寸：${rootBounds}`,
+    `- 已提取结构节点数：${frames.length}`,
+    '',
+    '## 页面/状态帧',
+    frameLines.join('\n\n') || '- 未发现可解析的 Frame/Section/Component 结构。请确认链接选中了具体设计节点。',
+  ].join('\n')
+}
+
+async function buildCombinedDecompositionText(sources: NormalizedDecompositionSources) {
+  const parts: string[] = []
+
+  if (sources.figmaUrl) {
+    parts.push(await buildFigmaDesignEvidenceMarkdown(sources.figmaUrl))
+  }
+
+  if (sources.mdText) {
+    const filename = sources.mdFilename ? `：${sources.mdFilename}` : ''
+    parts.push([
+      `# Markdown PRD 补充资料${filename}`,
+      '',
+      sources.figmaUrl
+        ? '以下 Markdown PRD 用于补充功能规则、边界条件、验收标准、数据/API/配置约束；界面拆分边界优先以 Figma 设计稿证据为准。'
+        : '以下 Markdown PRD 是本次拆解的唯一资料来源。',
+      '',
+      sources.mdText,
+    ].join('\n'))
+  }
+
+  return parts.join('\n\n---\n\n')
+}
+
 function buildSourceOutlineForPrompt(mdText: string) {
   const headings = extractMarkdownHeadings(mdText)
   if (!headings.length) {
@@ -1746,6 +1953,22 @@ function buildSourceOutlineForPrompt(mdText: string) {
   return `${lines.join('\n')}${omitted}`
 }
 
+function sourceDirectoryLabel(mdText: string) {
+  const hasFigma = mdText.includes('# Figma 设计稿证据')
+  const hasMarkdown = mdText.includes('# Markdown PRD 补充资料')
+  if (hasFigma && hasMarkdown) return 'Figma+PRD 资料目录'
+  if (hasFigma) return 'Figma 设计稿目录'
+  return 'PRD 原文目录'
+}
+
+function sourceDirectoryExtractedFrom(mdText: string) {
+  const hasFigma = mdText.includes('# Figma 设计稿证据')
+  const hasMarkdown = mdText.includes('# Markdown PRD 补充资料')
+  if (hasFigma && hasMarkdown) return 'Figma 设计稿证据 + Markdown PRD'
+  if (hasFigma) return 'Figma 设计稿证据'
+  return '原文 Markdown 标题'
+}
+
 function buildSourceOutlineRootNode(mdText: string, sourceIndex = buildDocumentSourceIndex(mdText)): PrdNode {
   const headings = extractMarkdownHeadings(mdText)
   const content = headings.length
@@ -1761,7 +1984,7 @@ function buildSourceOutlineRootNode(mdText: string, sourceIndex = buildDocumentS
   return {
     id: SOURCE_OUTLINE_ROOT_ID,
     parentId: null,
-    label: 'PRD 原文目录',
+    label: sourceDirectoryLabel(mdText),
     summary: headings.length
       ? `原文包含 ${headings.length} 个 Markdown 标题、${sourceIndex.sectionCount} 个索引片段，页面节点均应回溯到这些原文位置。`
       : `原文没有明显 Markdown 标题，已建立 ${sourceIndex.sectionCount} 个索引片段供页面节点回溯。`,
@@ -1771,7 +1994,7 @@ function buildSourceOutlineRootNode(mdText: string, sourceIndex = buildDocumentS
     level: 0,
     order: 0,
     needsPolish: false,
-    extractedFrom: '原文 Markdown 标题',
+    extractedFrom: sourceDirectoryExtractedFrom(mdText),
     techNotes: null,
     children: [],
     docPath: null,
@@ -2202,8 +2425,11 @@ async function withDecompositionProgress<T>(
   }
 }
 
-const decompositionL1SystemPrompt = `你是游戏 UX 架构师，正在分析一份产品需求文档（PRD）。
-	任务：识别这份 PRD 中玩家实际会看到、且适合逐个打磨的页面/界面/弹窗节点。
+const decompositionL1SystemPrompt = `你是游戏 UX 架构师，正在分析一份产品资料（可能是 PRD、Figma 设计稿证据，或二者组合）。
+如果资料包含“Figma 设计稿证据”，Figma 是主证据：优先按 Frame/Section/Component 名称、画布顺序、状态命名、可见文本和层级关系确定页面/界面/弹窗节点边界。
+如果资料同时包含“Markdown PRD 补充资料”，PRD 只补充功能规则、边界条件、验收标准、数据/API/配置约束；不得覆盖 Figma 中明确存在的界面边界。
+如果只有 Figma 资料，不要编造未出现的业务规则、接口、计费、权限或服务端细节；缺失信息写入需澄清点。
+	任务：识别这份资料中玩家实际会看到、且适合逐个打磨的页面/界面/弹窗节点。
 	不要把按钮、字段、奖励条目、动画帧或规则段落单独拆成页面节点；这些内部细节必须放入所属页面节点的 content，并在后续 MVC 子节点中展开。
 	优先输出主界面、规则页、帮助页、排行榜、商城页、任务页、结算页、活动详情页、弹窗等页面级节点；只输出原文中确实存在或强烈暗示的页面。
 	如果内容涉及页面跳转，源页面只记录入口和跳转关系，目标页面记录完整页面内容；跨页面关系写入 references，不要复制全文。
@@ -2657,20 +2883,24 @@ app.post('/api/project-baseline/scan', (req, res) => {
   }
 })
 
-app.post('/api/decompose/preview', (req, res) => {
-  const { mdText } = req.body as { mdText?: string; projectWorkflow?: ProjectWorkflowState | null }
-  if (!mdText?.trim()) {
-    return void res.status(400).json({ error: '缺少 PRD 文档内容' })
+app.post('/api/decompose/preview', async (req, res) => {
+  try {
+    const sources = normalizeDecompositionSources(req.body as DecompositionSourceRequest)
+    const combinedText = await buildCombinedDecompositionText(sources)
+    res.json(buildPrdImportPreview(combinedText))
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : '无法建立导入预览' })
   }
-
-  res.json(buildPrdImportPreview(mdText))
 })
 
 app.post('/api/decompose/start', (req, res) => {
-  const { mdText, projectWorkflow = null } = req.body as { mdText?: string; projectWorkflow?: ProjectWorkflowState | null }
-  if (!mdText?.trim()) {
-    return void res.status(400).json({ error: '缺少 PRD 文档内容' })
+  let sources: NormalizedDecompositionSources
+  try {
+    sources = normalizeDecompositionSources(req.body as DecompositionSourceRequest)
+  } catch (err) {
+    return void res.status(400).json({ error: err instanceof Error ? err.message : '缺少资料内容' })
   }
+  const { projectWorkflow = null } = req.body as { projectWorkflow?: ProjectWorkflowState | null }
   if (!anthropic) {
     return void res.status(503).json({ error: '未配置 ANTHROPIC_API_KEY' })
   }
@@ -2686,7 +2916,7 @@ app.post('/api/decompose/start', (req, res) => {
   // Fire-and-forget: do NOT await. Frontend polls for status.
   const jobFn = process.env.MOCK_DECOMPOSE === 'true'
     ? runMockDecompositionJob(sessionId)
-    : runDecompositionJob(sessionId, mdText, projectWorkflow)
+    : buildCombinedDecompositionText(sources).then((combinedText) => runDecompositionJob(sessionId, combinedText, projectWorkflow))
   jobFn.catch((err: unknown) => {
     const session = decompositionSessions.get(sessionId)
     if (session) {

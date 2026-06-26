@@ -79,7 +79,7 @@ export function isLensChildNode(node: PrdNode, tree: PrdTree | null | undefined)
 }
 
 export function isDeliveryNode(node: PrdNode, tree: PrdTree | null | undefined) {
-  if (node.parentId === null || node.type === 'module') return false
+  if (node.type === 'module') return false
   if (isLensChildNode(node, tree)) return false
   return node.type === 'page' || node.type === 'ui'
 }

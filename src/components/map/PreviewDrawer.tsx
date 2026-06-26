@@ -12,6 +12,16 @@ interface PreviewDrawerProps {
   onOpenDoc?: (node: PrdNode) => void
   onUpdateContent?: (nodeId: string, content: string) => void
   onOpenQa?: (node: PrdNode) => void
+  onSelectNode?: (nodeId: string) => void
+}
+
+interface FlowRelation {
+  id: string
+  node: PrdNode
+  label: string
+  note?: string | null
+  icon: string
+  tone: 'primary' | 'secondary'
 }
 
 const previewTabs: Array<{ id: DocumentPreviewTab; label: string; icon: string }> = [
@@ -21,10 +31,6 @@ const previewTabs: Array<{ id: DocumentPreviewTab; label: string; icon: string }
   { id: 'data', label: '数据', icon: 'database' },
   { id: 'contracts', label: '服务端', icon: 'dns' },
 ]
-
-function isSectionTab(tab: DocumentPreviewTab): tab is PrdNodeSectionKey {
-  return tab === 'view' || tab === 'interaction' || tab === 'data'
-}
 
 const activeTabFrame = 'border-[#FACC15] ring-2 ring-[#FACC15] ring-offset-1 ring-offset-surface-container shadow-[0_0_0_1px_rgba(250,204,21,0.45)]'
 
@@ -51,12 +57,153 @@ const tabToneMap: Partial<Record<DocumentPreviewTab, { active: string; inactive:
   },
 }
 
+function isSectionTab(tab: DocumentPreviewTab): tab is PrdNodeSectionKey {
+  return tab === 'view' || tab === 'interaction' || tab === 'data'
+}
+
 function tabTone(tab: DocumentPreviewTab, active: boolean) {
   const tone = tabToneMap[tab] ?? tabToneMap.overview
   return active ? `${tone?.active ?? ''} ${activeTabFrame}` : tone?.inactive ?? ''
 }
 
-export function PreviewDrawer({ node, tree, onClose, onDelete, onOpenDoc, onUpdateContent, onOpenQa }: PreviewDrawerProps) {
+function relationKey(source: string, target: string, label: string) {
+  return `${source}->${target}:${label}`
+}
+
+function uniqueRelations(relations: FlowRelation[]) {
+  const seen = new Set<string>()
+  return relations.filter((relation) => {
+    if (seen.has(relation.id)) return false
+    seen.add(relation.id)
+    return true
+  })
+}
+
+function buildFlowRelations(node: PrdNode, tree?: PrdTree | null) {
+  if (!tree) return { upstream: [] as FlowRelation[], downstream: [] as FlowRelation[] }
+
+  const upstream: FlowRelation[] = []
+  const downstream: FlowRelation[] = []
+  const parent = node.parentId ? tree[node.parentId] : null
+
+  if (parent) {
+    upstream.push({
+      id: relationKey(parent.id, node.id, '上级流程'),
+      node: parent,
+      label: '上级流程',
+      icon: 'subdirectory_arrow_right',
+      tone: 'primary',
+    })
+  }
+
+  for (const childId of node.children) {
+    const child = tree[childId]
+    if (!child) continue
+    downstream.push({
+      id: relationKey(node.id, child.id, '进入下游'),
+      node: child,
+      label: child.type === 'module' ? '展开分组' : '进入下游',
+      icon: 'arrow_forward',
+      tone: 'primary',
+    })
+  }
+
+  for (const reference of node.references ?? []) {
+    if (!reference.targetNodeId) continue
+    const target = tree[reference.targetNodeId]
+    if (!target) continue
+    downstream.push({
+      id: relationKey(node.id, target.id, reference.label),
+      node: target,
+      label: reference.label || '跨页面跳转',
+      note: reference.reason,
+      icon: 'open_in_new',
+      tone: 'secondary',
+    })
+  }
+
+  for (const source of Object.values(tree)) {
+    for (const reference of source.references ?? []) {
+      if (reference.targetNodeId !== node.id) continue
+      upstream.push({
+        id: relationKey(source.id, node.id, reference.label),
+        node: source,
+        label: reference.label || '引用到当前',
+        note: reference.reason,
+        icon: 'call_received',
+        tone: 'secondary',
+      })
+    }
+  }
+
+  return {
+    upstream: uniqueRelations(upstream),
+    downstream: uniqueRelations(downstream),
+  }
+}
+
+function FlowRelationRail({
+  title,
+  icon,
+  empty,
+  relations,
+  onSelectNode,
+}: {
+  title: string
+  icon: string
+  empty: string
+  relations: FlowRelation[]
+  onSelectNode?: (nodeId: string) => void
+}) {
+  return (
+    <div className="min-w-0">
+      <div className="mb-xs flex items-center gap-xs font-label-md text-label-md text-on-surface-variant">
+        <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>{icon}</span>
+        {title}
+      </div>
+      {relations.length ? (
+        <div className="flex gap-xs overflow-x-auto pb-xs">
+          {relations.map((relation) => (
+            <button
+              key={relation.id}
+              type="button"
+              onClick={() => onSelectNode?.(relation.node.id)}
+              className={[
+                'flex max-w-[190px] shrink-0 items-center gap-xs rounded border px-sm py-xs text-left transition-colors',
+                relation.tone === 'secondary'
+                  ? 'border-secondary/40 bg-secondary-container/20 text-secondary hover:bg-secondary-container/30'
+                  : 'border-outline-variant bg-surface-container-high text-on-surface-variant hover:bg-surface-variant hover:text-on-surface',
+              ].join(' ')}
+              title={[`${relation.label}: ${relation.node.label}`, relation.note].filter(Boolean).join('\n')}
+            >
+              <span className="material-symbols-outlined shrink-0" style={{ fontSize: '15px' }}>{relation.icon}</span>
+              <span className="min-w-0">
+                <span className="block truncate font-label-md text-label-md">{relation.label}</span>
+                <span className="block truncate text-body-sm">{relation.node.label}</span>
+                {relation.note ? <span className="block truncate text-[10px] opacity-75">{relation.note}</span> : null}
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="rounded border border-dashed border-outline-variant bg-surface-container-low px-sm py-xs text-body-sm text-on-surface-variant">
+          {empty}
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function PreviewDrawer({
+  node,
+  tree,
+  onClose,
+  onDelete,
+  onOpenDoc,
+  onUpdateContent,
+  onOpenQa,
+  onSelectNode,
+}: PreviewDrawerProps) {
   const [, navigate] = useLocation()
   const isOpen = node !== null
   const canForge = Boolean(node && isDeliveryNode(node, tree) && (node.needsPolish || node.status === 'done'))
@@ -71,6 +218,7 @@ export function PreviewDrawer({ node, tree, onClose, onDelete, onOpenDoc, onUpda
       return true
     })
     : previewTabs
+  const relations = node ? buildFlowRelations(node, tree) : { upstream: [], downstream: [] }
 
   useEffect(() => {
     setIsEditing(false)
@@ -91,7 +239,8 @@ export function PreviewDrawer({ node, tree, onClose, onDelete, onOpenDoc, onUpda
 
   return (
     <aside
-      className="bg-surface-container border-l border-outline-variant shadow-[-8px_0_24px_rgba(0,0,0,0.5)] flex flex-col z-20 shrink-0 overflow-hidden"
+      data-preview-drawer="true"
+      className="z-20 flex shrink-0 flex-col overflow-hidden border-l border-outline-variant bg-surface-container shadow-[-8px_0_24px_rgba(0,0,0,0.5)]"
       style={{
         width: isOpen ? (isCollapsed ? '48px' : '38%') : '0',
         minWidth: isOpen ? (isCollapsed ? '48px' : '440px') : '0',
@@ -108,7 +257,7 @@ export function PreviewDrawer({ node, tree, onClose, onDelete, onOpenDoc, onUpda
           >
             <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>chevron_left</span>
           </button>
-          <span className="material-symbols-outlined mt-sm text-primary" style={{ fontSize: '20px' }}>description</span>
+          <span className="material-symbols-outlined mt-sm text-primary" style={{ fontSize: '20px' }}>route</span>
           <button
             onClick={onClose}
             title="关闭详情"
@@ -122,58 +271,74 @@ export function PreviewDrawer({ node, tree, onClose, onDelete, onOpenDoc, onUpda
 
       {node && !isCollapsed && (
         <>
-      {/* Header */}
-      <div className="flex justify-between items-center p-md border-b border-outline-variant shrink-0 bg-surface">
-        <div className="flex items-center gap-sm">
-          <span className="material-symbols-outlined text-primary">description</span>
-          <h2 className="font-headline-sm text-headline-sm text-on-surface truncate">{node?.label}</h2>
-        </div>
-        <div className="flex items-center gap-xs">
-          <button
-            onClick={() => setIsCollapsed(true)}
-            title="收缩详情"
-            aria-label="收缩详情"
-            className="cursor-pointer rounded p-xs text-on-surface-variant transition-colors hover:bg-surface-variant hover:text-primary"
-          >
-            <span className="material-symbols-outlined">chevron_right</span>
-          </button>
-          <button
-            onClick={onClose}
-            title="关闭详情"
-            aria-label="关闭详情"
-            className="cursor-pointer rounded p-xs text-on-surface-variant transition-colors hover:bg-surface-variant hover:text-primary"
-          >
-            <span className="material-symbols-outlined">close</span>
-          </button>
-        </div>
-      </div>
+          <div className="flex shrink-0 items-center justify-between border-b border-outline-variant bg-surface p-md">
+            <div className="flex min-w-0 items-center gap-sm">
+              <span className="material-symbols-outlined text-primary">route</span>
+              <h2 className="truncate font-headline-sm text-headline-sm text-on-surface">{node.label}</h2>
+            </div>
+            <div className="flex items-center gap-xs">
+              <button
+                onClick={() => setIsCollapsed(true)}
+                title="收起详情"
+                aria-label="收起详情"
+                className="cursor-pointer rounded p-xs text-on-surface-variant transition-colors hover:bg-surface-variant hover:text-primary"
+              >
+                <span className="material-symbols-outlined">chevron_right</span>
+              </button>
+              <button
+                onClick={onClose}
+                title="关闭详情"
+                aria-label="关闭详情"
+                className="cursor-pointer rounded p-xs text-on-surface-variant transition-colors hover:bg-surface-variant hover:text-primary"
+              >
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+          </div>
 
-      {/* Content — only render internals when node is available to avoid layout artifacts */}
-      {node && (
-        <>
           {!isEditing && (
-            <div className="shrink-0 border-b border-outline-variant bg-surface-container px-lg py-sm shadow-sm">
-              <div className="flex gap-xs overflow-x-auto">
-                {visibleTabs.map((tab) => {
-                  return (
-                    <button
-                      key={tab.id}
-                      type="button"
-                      onClick={() => setActiveTab(tab.id)}
-                      className={[
-                        'flex h-9 shrink-0 items-center gap-xs rounded-lg border px-sm text-label-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FACC15]',
-                        tabTone(tab.id, activeTab === tab.id),
-                      ].join(' ')}
-                    >
-                      <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>{tab.icon}</span>
-                      {tab.label}
-                    </button>
-                  )
-                })}
+            <div className="shrink-0 space-y-md border-b border-outline-variant bg-surface-container px-lg py-md shadow-sm">
+              <div className="grid gap-sm 2xl:grid-cols-2">
+                <FlowRelationRail
+                  title="流入"
+                  icon="login"
+                  empty="暂无上游入口"
+                  relations={relations.upstream}
+                  onSelectNode={onSelectNode}
+                />
+                <FlowRelationRail
+                  title="流出"
+                  icon="logout"
+                  empty="暂无下游跳转"
+                  relations={relations.downstream}
+                  onSelectNode={onSelectNode}
+                />
               </div>
             </div>
           )}
-          <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar px-lg py-md">
+
+          {!isEditing && (
+            <div className="shrink-0 border-b border-outline-variant bg-surface-container px-lg py-sm shadow-sm">
+              <div className="flex gap-xs overflow-x-auto">
+                {visibleTabs.map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setActiveTab(tab.id)}
+                    className={[
+                      'flex h-9 shrink-0 items-center gap-xs rounded-lg border px-sm text-label-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FACC15]',
+                      tabTone(tab.id, activeTab === tab.id),
+                    ].join(' ')}
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>{tab.icon}</span>
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto px-lg py-md">
             {isEditing ? (
               <div className="flex h-full flex-col gap-sm">
                 <textarea
@@ -203,49 +368,44 @@ export function PreviewDrawer({ node, tree, onClose, onDelete, onOpenDoc, onUpda
               <DocumentPreview key={`${node.id}-${activeTab}`} node={node} tree={tree} tab={activeTab} />
             )}
           </div>
-        </>
-      )}
 
-      {/* Footer */}
-      {node && (
-        <div className="p-md border-t border-outline-variant shrink-0 bg-surface-container-low">
-          <div className="mb-sm grid grid-cols-4 gap-xs">
-            <button
-              onClick={() => setIsEditing(true)}
-              className="rounded border border-outline-variant px-sm py-xs text-label-md text-on-surface-variant hover:bg-surface-variant"
-            >
-              编辑
-            </button>
-            <button
-              onClick={() => onOpenDoc?.(node)}
-              className="rounded border border-outline-variant px-sm py-xs text-label-md text-on-surface-variant hover:bg-surface-variant"
-            >
-              打开文档
-            </button>
-            <button
-              onClick={() => onOpenQa?.(node)}
-              className="rounded border border-primary/40 px-sm py-xs text-label-md text-primary hover:bg-primary-container/20"
-            >
-              提 Bug
-            </button>
-            <button
-              onClick={() => onDelete?.(node)}
-              className="rounded border border-error/40 px-sm py-xs text-label-md text-error hover:bg-error/10"
-            >
-              删除
-            </button>
+          <div className="shrink-0 border-t border-outline-variant bg-surface-container-low p-md">
+            <div className="mb-sm grid grid-cols-4 gap-xs">
+              <button
+                onClick={() => setIsEditing(true)}
+                className="rounded border border-outline-variant px-sm py-xs text-label-md text-on-surface-variant hover:bg-surface-variant"
+              >
+                编辑
+              </button>
+              <button
+                onClick={() => onOpenDoc?.(node)}
+                className="rounded border border-outline-variant px-sm py-xs text-label-md text-on-surface-variant hover:bg-surface-variant"
+              >
+                打开文档
+              </button>
+              <button
+                onClick={() => onOpenQa?.(node)}
+                className="rounded border border-primary/40 px-sm py-xs text-label-md text-primary hover:bg-primary-container/20"
+              >
+                提 Bug
+              </button>
+              <button
+                onClick={() => onDelete?.(node)}
+                className="rounded border border-error/40 px-sm py-xs text-label-md text-error hover:bg-error/10"
+              >
+                删除
+              </button>
+            </div>
+            {canForge && (
+              <button
+                onClick={() => navigate('/forge/' + node.id)}
+                className="flex w-full cursor-pointer items-center justify-center gap-sm rounded-lg border border-[#2b88ff]/30 bg-secondary-container px-lg py-sm font-headline-sm text-headline-sm text-on-secondary-container shadow-lg shadow-secondary-container/20 transition-all hover:bg-secondary-container/90"
+              >
+                <span className="material-symbols-outlined">construction</span>
+                打磨文档包
+              </button>
+            )}
           </div>
-          {canForge && (
-            <button
-              onClick={() => navigate('/forge/' + node.id)}
-              className="w-full bg-secondary-container hover:bg-secondary-container/90 text-on-secondary-container font-headline-sm text-headline-sm py-sm px-lg rounded-lg flex items-center justify-center gap-sm transition-all shadow-lg shadow-secondary-container/20 border border-[#2b88ff]/30 cursor-pointer"
-            >
-              <span className="material-symbols-outlined">construction</span>
-              打磨文档包
-            </button>
-          )}
-        </div>
-      )}
         </>
       )}
     </aside>

@@ -50,6 +50,7 @@ export interface ProjectWorkspaceSnapshot {
   settings: AppSettings
   prdTree: PrdTree | null
   selectedNodeId: string | null
+  canvasNodePositions?: Record<string, { x: number; y: number }>
   nodeChats: Record<string, ChatMessage[]>
   nodePolishRevisions?: Record<string, PrdNodePolishRevision>
   nodeOperationSuggestions: Record<string, PrdNodeOperationSuggestion[]>
