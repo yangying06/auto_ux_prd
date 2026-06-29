@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useLocation } from 'wouter'
 import { buildDeliverySections, isDeliveryNode } from '../../lib/prdNodeDelivery'
-import type { PrdNode, PrdNodeSectionKey, PrdTree } from '../../types/prdNode'
+import type { PrdNode, PrdNodeSectionKey, PrdTree, UpdateNodePatch } from '../../types/prdNode'
 import { DocumentPreview, type DocumentPreviewTab } from './DocumentPreview'
+import { FigmaPreviewManager } from './FigmaPreviewManager'
+import { FigmaStatePreviewModal, figmaPreviewImages } from './FigmaStatePreview'
 
 interface PreviewDrawerProps {
   node: PrdNode | null
@@ -10,9 +12,11 @@ interface PreviewDrawerProps {
   onClose: () => void
   onDelete?: (node: PrdNode) => void
   onOpenDoc?: (node: PrdNode) => void
+  onUpdateNode?: (nodeId: string, patch: UpdateNodePatch) => void
   onUpdateContent?: (nodeId: string, content: string) => void
   onOpenQa?: (node: PrdNode) => void
   onSelectNode?: (nodeId: string) => void
+  proxyBaseUrl: string
 }
 
 interface FlowRelation {
@@ -200,9 +204,11 @@ export function PreviewDrawer({
   onClose,
   onDelete,
   onOpenDoc,
+  onUpdateNode,
   onUpdateContent,
   onOpenQa,
   onSelectNode,
+  proxyBaseUrl,
 }: PreviewDrawerProps) {
   const [, navigate] = useLocation()
   const isOpen = node !== null
@@ -211,9 +217,13 @@ export function PreviewDrawer({
   const [draftContent, setDraftContent] = useState('')
   const [isCollapsed, setIsCollapsed] = useState(false)
   const [activeTab, setActiveTab] = useState<DocumentPreviewTab>('overview')
+  const [isStatePreviewOpen, setIsStatePreviewOpen] = useState(false)
+  const [isPreviewManagerOpen, setIsPreviewManagerOpen] = useState(false)
   const deliverySections = node ? buildDeliverySections(node, tree) : []
+  const figmaPreviewCount = node ? figmaPreviewImages(node).length : 0
   const visibleTabs = node
     ? previewTabs.filter((tab) => {
+      if (tab.id === 'view' && figmaPreviewCount > 0) return true
       if (isSectionTab(tab.id)) return deliverySections.some((section) => section.key === tab.id && section.status !== 'missing')
       return true
     })
@@ -225,6 +235,8 @@ export function PreviewDrawer({
     setDraftContent(node?.content ?? '')
     setIsCollapsed(false)
     setActiveTab('overview')
+    setIsStatePreviewOpen(false)
+    setIsPreviewManagerOpen(false)
   }, [node?.id, node?.content])
 
   useEffect(() => {
@@ -370,6 +382,28 @@ export function PreviewDrawer({
           </div>
 
           <div className="shrink-0 border-t border-outline-variant bg-surface-container-low p-md">
+            <button
+              type="button"
+              onClick={() => setIsPreviewManagerOpen(true)}
+              className="mb-sm flex min-h-[38px] w-full items-center justify-center gap-xs rounded-lg border border-outline-variant bg-surface-container px-md text-label-md font-medium text-on-surface-variant transition-colors hover:border-primary hover:bg-primary-container/10 hover:text-primary"
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: '17px' }}>photo_library</span>
+              管理画面
+              {figmaPreviewCount > 0 ? (
+                <span className="rounded border border-outline-variant px-xs font-code-sm text-code-sm">{figmaPreviewCount}</span>
+              ) : null}
+            </button>
+            {figmaPreviewCount > 0 ? (
+              <button
+                type="button"
+                onClick={() => setIsStatePreviewOpen(true)}
+                className="mb-sm flex min-h-[38px] w-full items-center justify-center gap-xs rounded-lg border border-tertiary bg-tertiary-container px-md text-label-md font-medium text-on-tertiary-container transition-opacity hover:opacity-90"
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '17px' }}>view_carousel</span>
+                界面状态预览
+                <span className="rounded border border-on-tertiary-container/25 px-xs font-code-sm text-code-sm">{figmaPreviewCount}</span>
+              </button>
+            ) : null}
             <div className="mb-sm grid grid-cols-4 gap-xs">
               <button
                 onClick={() => setIsEditing(true)}
@@ -406,6 +440,18 @@ export function PreviewDrawer({
               </button>
             )}
           </div>
+          {isStatePreviewOpen ? (
+            <FigmaStatePreviewModal node={node} onClose={() => setIsStatePreviewOpen(false)} />
+          ) : null}
+          {isPreviewManagerOpen && onUpdateNode ? (
+            <FigmaPreviewManager
+              node={node}
+              tree={tree}
+              proxyBaseUrl={proxyBaseUrl}
+              onClose={() => setIsPreviewManagerOpen(false)}
+              onUpdateNode={onUpdateNode}
+            />
+          ) : null}
         </>
       )}
     </aside>

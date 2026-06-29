@@ -133,6 +133,11 @@ function getCardSize(node: PrdNode, hasPrototypePreview = false) {
   }
 }
 
+function hasVisualPreview(node: PrdNode, previewHtmlByNodeId: Record<string, string>) {
+  return Boolean(previewHtmlByNodeId[node.id])
+    || Boolean(node.figmaPreviews?.some((preview) => preview.imageUrl))
+}
+
 function connectionDegree(node: PrdNode, tree: PrdTree) {
   const incomingReferences = Object.values(tree).reduce((count, source) => (
     count + (source.references ?? []).filter((reference) => reference.targetNodeId === node.id).length
@@ -716,8 +721,8 @@ export function TreeCanvas({
   const focusNodeId = connectionDraft?.nodeId ?? selectedNodeId
   const connectableNodeSet = useMemo(() => new Set(connectableNodeIds), [connectableNodeIds])
   const previewNodeIds = useMemo(() => (
-    new Set(Object.entries(previewHtmlByNodeId).filter(([, html]) => Boolean(html)).map(([nodeId]) => nodeId))
-  ), [previewHtmlByNodeId])
+    new Set(Object.values(tree).filter((node) => hasVisualPreview(node, previewHtmlByNodeId)).map((node) => node.id))
+  ), [previewHtmlByNodeId, tree])
   const generatedLayout = useMemo(() => (
     layoutMode === 'free'
       ? buildFreeLayout(tree, sourceTree, null, previewNodeIds)

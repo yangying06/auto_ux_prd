@@ -3,6 +3,7 @@ import { formatSpecLens, resolveNodeSpecLens } from '../../lib/prdNodeLens'
 import { buildDeliverySections, deliverySectionStatusLabel, isDeliveryNode, type DeliverySectionStatus, type DeliverySectionSummary } from '../../lib/prdNodeDelivery'
 import type { PrdNode, PrdNodeSectionKey, PrdNodeSpecLens, PrdTree } from '../../types/prdNode'
 import { DocumentMiniPreview } from './DocumentPreview'
+import { FigmaMiniPreview, figmaPreviewImages } from './FigmaStatePreview'
 import { PrototypePreviewSurface } from '../state/PrototypeSandboxPreview'
 
 interface NodeCardProps {
@@ -204,6 +205,7 @@ export function NodeCard({ node, tree, isSelected, previewHtml, onNodeClick, onN
   const canForge = canForgeNode(node, tree)
   const isDelivery = isDeliveryNode(node, tree)
   const deliverySections = isDelivery ? buildDeliverySections(node, tree) : []
+  const hasFigmaPreview = figmaPreviewImages(node).length > 0
 
   return (
     <div
@@ -246,7 +248,9 @@ export function NodeCard({ node, tree, isSelected, previewHtml, onNodeClick, onN
               )}
             />
           </div>
-        ) : isDelivery
+        ) : hasFigmaPreview
+          ? <FigmaMiniPreview node={node} />
+          : isDelivery
           ? <DeliveryMiniPreview sections={deliverySections} />
           : <DocumentMiniPreview node={node} tree={tree} maxLines={8} />}
       </div>

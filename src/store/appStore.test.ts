@@ -107,6 +107,33 @@ assertEqual(node?.content, 'original page body', 'performance-only update must n
 assertEqual(node?.sections?.view?.summary, 'old view summary', 'performance-only update must not clear sections')
 
 useAppStore.getState().updateNode('page-a', {
+  figmaPreviews: [
+    {
+      nodeId: '22:1774',
+      name: 'Main state',
+      sourceUrl: 'https://www.figma.com/design/example?node-id=22-1774',
+      imageUrl: '/assets/figma/main.png',
+      width: 375,
+      height: 812,
+      isPrimary: true,
+    },
+  ],
+})
+
+node = useAppStore.getState().prdTree?.['page-a']
+assertDeepEqual(node?.figmaPreviews, [
+  {
+    nodeId: '22:1774',
+    name: 'Main state',
+    sourceUrl: 'https://www.figma.com/design/example?node-id=22-1774',
+    imageUrl: '/assets/figma/main.png',
+    width: 375,
+    height: 812,
+    isPrimary: true,
+  },
+], 'figma preview update must persist through node patch sanitizer')
+
+useAppStore.getState().updateNode('page-a', {
   sections: {
     interaction: {
       summary: 'new flow summary',

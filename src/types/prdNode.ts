@@ -24,6 +24,20 @@ export interface PrdNodeEvidenceRef {
   quote?: string | null
 }
 
+export interface PrdNodeFigmaPreview {
+  nodeId: string
+  name: string
+  sourceUrl: string
+  imageUrl: string | null
+  width: number
+  height: number
+  originNodeId?: string | null
+  originNodeLabel?: string | null
+  isPrimary?: boolean
+  userAdded?: boolean
+  userNote?: string | null
+}
+
 export interface PrdNodeSection {
   title?: string | null
   summary?: string | null
@@ -145,6 +159,7 @@ export interface UpdateNodePatch {
   sourceKind?: PrdNodeSourceKind
   evidenceRefs?: PrdNodeEvidenceRef[]
   performanceSpec?: PrdPerformanceSpec | null
+  figmaPreviews?: PrdNodeFigmaPreview[]
 }
 
 export type PrdNodeOperationPatch = Partial<Pick<
@@ -235,6 +250,7 @@ export interface PrdNode {
   sourceKind?: PrdNodeSourceKind
   evidenceRefs?: PrdNodeEvidenceRef[]
   performanceSpec?: PrdPerformanceSpec | null
+  figmaPreviews?: PrdNodeFigmaPreview[]
 }
 
 export type PrdTree = Record<string, PrdNode>

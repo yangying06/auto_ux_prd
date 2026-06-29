@@ -3,6 +3,7 @@ import { formatPerformanceSpecMarkdown, resolveNodePerformanceSpec } from '../..
 import { formatSectionTitle, formatSpecLens, hasNodeSections, resolveNodeAudience, resolveNodeSpecLens } from '../../lib/prdNodeLens'
 import { buildDeliverySections, collectBackendContracts, collectDeliveryEvidence } from '../../lib/prdNodeDelivery'
 import type { PrdNode, PrdNodeDocumentSnapshot, PrdNodeEvidenceRef, PrdNodePolishRevision, PrdNodeSectionKey, PrdTree } from '../../types/prdNode'
+import { FigmaStatePreviewPanel, figmaPreviewImages } from './FigmaStatePreview'
 
 type DocumentPreviewVariant = 'drawer' | 'full'
 export type DocumentPreviewTab = 'overview' | PrdNodeSectionKey | 'contracts' | 'evidence'
@@ -618,6 +619,12 @@ function renderMarkdown(markdown: string, density: MarkdownDensity = 'full') {
   return blocks.filter(Boolean)
 }
 
+function hideFigmaPreviewLinks(markdown: string) {
+  return markdown
+    .replace(/[，,]\s*截图\s*[=:：]\s*(?:https?:\/\/|\/|data:image\/)[^）\s]+/gu, '')
+    .replace(/^\s*-\s*截图预览\s*[:：]\s*(?:https?:\/\/|\/|data:image\/)\S+\s*$/gmu, '')
+}
+
 function splitLines(markdown: string) {
   return markdown.split(/\r?\n/)
 }
@@ -1052,10 +1059,15 @@ export function DocumentComparePreview({ node, revision }: DocumentComparePrevie
 }
 
 export function DocumentPreview({ node, tree, variant = 'drawer', tab = 'overview' }: DocumentPreviewProps) {
-  const markdown = buildDocumentMarkdown(node, tree, tab)
+  const hasFigmaImages = tab === 'view' && figmaPreviewImages(node).length > 0
+  const baseMarkdown = buildDocumentMarkdown(node, tree, tab)
+  const markdown = figmaPreviewImages(node).length > 0
+    ? hideFigmaPreviewLinks(baseMarkdown)
+    : baseMarkdown
 
   return (
     <article className={variant === 'full' ? 'space-y-md pb-lg' : 'space-y-md'}>
+      {hasFigmaImages ? <FigmaStatePreviewPanel node={node} /> : null}
       {renderMarkdown(markdown, 'full')}
       {tab !== 'evidence' ? <SourceDetailsButton node={node} tree={tree} /> : null}
     </article>

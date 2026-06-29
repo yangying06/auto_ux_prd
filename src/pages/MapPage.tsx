@@ -1097,9 +1097,11 @@ export function MapPage() {
             onClose={() => setSelectedNodeId(null)}
             onDelete={handleDeleteNode}
             onOpenDoc={handleOpenDoc}
+            onUpdateNode={updateNode}
             onUpdateContent={updateNodeContent}
             onOpenQa={handleOpenQaForNode}
             onSelectNode={(id) => setSelectedNodeId(id)}
+            proxyBaseUrl={settings.proxyBaseUrl}
           />
         </main>
         {flowConnectionDraft?.isOpen ? (

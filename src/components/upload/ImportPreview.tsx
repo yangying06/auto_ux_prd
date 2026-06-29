@@ -104,7 +104,7 @@ export function ImportPreview({ preview, isLoading, error, projectWorkflow, onCo
             onClick={onConfirm}
           >
             <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>account_tree</span>
-            开始 AI 拆解
+            开始解析资料
           </button>
         </div>
       </header>

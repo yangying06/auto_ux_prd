@@ -295,6 +295,7 @@ function sanitizePatch(patch: UpdateNodePatch): UpdateNodePatch {
     sourceKind: patch.sourceKind,
     evidenceRefs: patch.evidenceRefs,
     performanceSpec: patch.performanceSpec === undefined ? undefined : normalizePerformanceSpec(patch.performanceSpec),
+    figmaPreviews: patch.figmaPreviews,
   }
 }
 
