@@ -11,7 +11,6 @@ const PADDING_BOTTOM = 96
 const X_STEP = 480
 const SIBLING_GAP = 28
 const ROOT_GAP = 64
-const REFERENCE_LANE_GAP = 28
 const FREE_NODE_Y_STEP = 350
 const FREE_COMPONENT_GAP_X = 92
 const FREE_COMPONENT_GAP_Y = 118
@@ -126,12 +125,19 @@ interface FlowEdge {
   kind: FlowEdgeKind
   fromId: string
   toId: string
+  fromLabel: string
+  toLabel: string
+  startX: number
+  startY: number
+  endX: number
+  endY: number
   d: string
   label: string
   labelX: number
   labelY: number
   selected: boolean
   note?: string | null
+  referenceCount?: number
 }
 
 interface DirectedReferenceEdge {
@@ -981,52 +987,84 @@ function connectorGeometry(parent: PositionedNode, child: PositionedNode) {
   const midX = sx + Math.max(56, (ex - sx) / 2)
   return {
     d: `M ${sx} ${sy} C ${midX} ${sy}, ${midX} ${ey}, ${ex} ${ey}`,
+    startX: sx,
+    startY: sy,
+    endX: ex,
+    endY: ey,
     labelX: midX - 62,
     labelY: (sy + ey) / 2 - 13,
   }
 }
 
-function laneOffset(index: number, count: number) {
-  return (index - (count - 1) / 2) * REFERENCE_LANE_GAP
-}
-
 function referenceGeometry(
   source: PositionedNode,
   target: PositionedNode,
-  lanes: { outgoingIndex: number; outgoingCount: number; incomingIndex: number; incomingCount: number },
+  laneOffset = 0,
 ) {
-  const outgoingOffset = laneOffset(lanes.outgoingIndex, lanes.outgoingCount)
-  const incomingOffset = laneOffset(lanes.incomingIndex, lanes.incomingCount)
   const sourceCenterX = source.x + source.width / 2
   const targetCenterX = target.x + target.width / 2
-  const direction = targetCenterX >= sourceCenterX ? 1 : -1
-  const sx = direction > 0 ? source.x + source.width : source.x
-  const sy = source.y + source.height / 2
-  const ex = direction > 0 ? target.x : target.x + target.width
-  const ey = target.y + target.height / 2
+  const sourceCenterY = source.y + source.height / 2
+  const targetCenterY = target.y + target.height / 2
+  const horizontalSpan = Math.abs(targetCenterX - sourceCenterX)
+  const verticalSpan = Math.abs(targetCenterY - sourceCenterY)
+  const isHorizontalDominant = horizontalSpan >= verticalSpan
 
-  if (direction < 0) {
-    const loopGap = Math.max(120, Math.abs(ex - sx) / 4)
-    const arcY = Math.max(24, Math.min(source.y, target.y) - 320 - Math.abs(outgoingOffset - incomingOffset))
-    const midX = (sx + ex) / 2
+  // Two directed edges between the same pair (A->B and B->A) are separated by a
+  // constant perpendicular offset on the node edges, producing two close parallel lines.
+  const laneGap = 10
+  const sourceAnchorOffset = laneOffset * laneGap
+  const targetAnchorOffset = laneOffset * laneGap
 
-    return {
-      d: `M ${sx} ${sy} C ${sx - loopGap} ${sy}, ${sx - loopGap} ${arcY}, ${midX} ${arcY} C ${ex + loopGap} ${arcY}, ${ex + loopGap} ${ey}, ${ex} ${ey}`,
-      labelX: midX - 62,
-      labelY: arcY - 13,
-    }
+  let sx: number
+  let sy: number
+  let ex: number
+  let ey: number
+
+  if (isHorizontalDominant) {
+    const direction = targetCenterX >= sourceCenterX ? 1 : -1
+    sx = direction > 0 ? source.x + source.width : source.x
+    sy = sourceCenterY + sourceAnchorOffset
+    ex = direction > 0 ? target.x : target.x + target.width
+    ey = targetCenterY + targetAnchorOffset
+  } else {
+    const direction = targetCenterY >= sourceCenterY ? 1 : -1
+    sx = sourceCenterX + sourceAnchorOffset
+    sy = direction > 0 ? source.y + source.height : source.y
+    ex = targetCenterX + targetAnchorOffset
+    ey = direction > 0 ? target.y : target.y + target.height
   }
 
-  const controlGap = Math.max(88, Math.abs(ex - sx) / 2)
-  const c1x = sx + direction * controlGap
-  const c2x = ex - direction * controlGap
-  const c1y = sy + outgoingOffset
-  const c2y = ey + incomingOffset
+  const spanX = Math.abs(ex - sx)
+  const spanY = Math.abs(ey - sy)
+  const controlGap = Math.max(72, (isHorizontalDominant ? spanX : spanY) / 2)
+
+  let c1x: number
+  let c1y: number
+  let c2x: number
+  let c2y: number
+
+  if (isHorizontalDominant) {
+    const sign = ex >= sx ? 1 : -1
+    c1x = sx + sign * controlGap
+    c2x = ex - sign * controlGap
+    c1y = sy
+    c2y = ey
+  } else {
+    const sign = ey >= sy ? 1 : -1
+    c1x = sx
+    c1y = sy + sign * controlGap
+    c2x = ex
+    c2y = ey - sign * controlGap
+  }
 
   return {
     d: `M ${sx} ${sy} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${ex} ${ey}`,
+    startX: sx,
+    startY: sy,
+    endX: ex,
+    endY: ey,
     labelX: (c1x + c2x) / 2 - 62,
-    labelY: (c1y + c2y) / 2 - 13,
+    labelY: (c1y + c2y) / 2 - 13 + (isHorizontalDominant ? laneOffset * 9 : 0),
   }
 }
 
@@ -1173,8 +1211,171 @@ function primaryEdgeLabel(parent: PrdNode, child: PrdNode) {
   return '查看细节'
 }
 
+const GENERIC_REFERENCE_LABELS = new Set([
+  '跨页面跳转',
+  '跨页面引用',
+  '引用到当前',
+  '跳转',
+  '关联',
+  '引用',
+])
+
+const REFERENCE_TRIGGER_VERBS = [
+  '点击', '跳转', '进入', '打开', '触发', '切换', '返回', '提交', '选择', '确认',
+  '关闭', '展开', '收起', '购买', '升级', '领取', '兑换', '挑战', '继续', '开始',
+  '完成', '结算', '领取奖励', '查看详情', '查看', '长按', '双击', '滑动', '拖动',
+]
+
+function cleanReferenceText(text: string | null | undefined) {
+  if (!text) return ''
+  const trimmed = String(text).replace(/\s+/g, ' ').trim()
+  if (!trimmed || trimmed.length < 2) return ''
+  return trimmed
+}
+
+function normalizeNodeSearchText(node: PrdNode) {
+  const parts: string[] = []
+  if (node.label) parts.push(node.label)
+  if (node.summary) parts.push(node.summary)
+  const content = cleanReferenceText(node.content)
+  if (content) parts.push(content)
+  const interaction = node.sections?.interaction
+  if (interaction?.summary) parts.push(interaction.summary)
+  if (interaction?.content) parts.push(interaction.content)
+  return parts.join('\n')
+}
+
+function extractTriggerPhrase(haystack: string, targetLabel: string) {
+  if (!haystack || !targetLabel) return ''
+  const label = targetLabel.trim()
+  if (label.length < 2) return ''
+  if (!haystack.includes(label)) return ''
+  const sentences = haystack.split(/[。！？\n；;]/).map((s) => s.trim()).filter(Boolean)
+  for (const sentence of sentences) {
+    if (!sentence.includes(label)) continue
+    for (const verb of REFERENCE_TRIGGER_VERBS) {
+      if (sentence.includes(verb)) return verb
+    }
+  }
+  return ''
+}
+
+const REFERENCE_LABEL_MAX = 10
+
+function briefLabel(text: string, max = REFERENCE_LABEL_MAX) {
+  const t = cleanReferenceText(text)
+  if (!t) return ''
+  if (t.length <= max) return t
+  return t.slice(0, max) + '…'
+}
+
+function deriveReferenceEdgeLabel(source: PrdNode, target: PrdNode, references: NonNullable<PrdNode['references']>) {
+  const targetLabel = cleanReferenceText(target.label) || '目标'
+  const referenceCount = references.length
+
+  const meaningfulLabels = references
+    .map((reference) => cleanReferenceText(reference.label))
+    .filter((label) => Boolean(label) && !GENERIC_REFERENCE_LABELS.has(label))
+  if (meaningfulLabels.length === 1) return briefLabel(meaningfulLabels[0])
+  if (meaningfulLabels.length > 1 && referenceCount > 1) {
+    return briefLabel(meaningfulLabels[0]) + ' 等' + referenceCount + '条'
+  }
+
+  const meaningfulReasons = references
+    .map((reference) => cleanReferenceText(reference.reason))
+    .filter(Boolean)
+  if (meaningfulReasons.length === 1) {
+    return briefLabel(meaningfulReasons[0])
+  }
+
+  const sourceText = normalizeNodeSearchText(source)
+  const trigger = extractTriggerPhrase(sourceText, targetLabel)
+  if (trigger) {
+    return referenceCount > 1 ? briefLabel(trigger) + ' 等' + referenceCount + '条' : briefLabel(trigger)
+  }
+
+  const fallback = '进入' + targetLabel
+  return referenceCount > 1 ? fallback + ' 等' + referenceCount + '条' : fallback
+}
+
+function deriveReferenceEdgeNote(references: NonNullable<PrdNode['references']>) {
+  if (references.length > 1) {
+    return '共 ' + references.length + ' 个跳转条件，点击编辑'
+  }
+  const reason = cleanReferenceText(references[0] && references[0].reason)
+  return reason || null
+}
+
 function isEdgeSelected(edge: Pick<FlowEdge, 'fromId' | 'toId'>, selectedNodeId: string | null) {
   return Boolean(selectedNodeId && (edge.fromId === selectedNodeId || edge.toId === selectedNodeId))
+}
+
+function normalizeEdgeEndpointLabel(value: string) {
+  return value.replace(/[\s_-]+/g, '').trim().toLowerCase()
+}
+
+function edgeSemanticPairKey(edge: FlowEdge) {
+  if (edge.fromId && edge.toId) return `id:${edge.fromId}->${edge.toId}`
+  const fromLabelKey = normalizeEdgeEndpointLabel(edge.fromLabel)
+  const toLabelKey = normalizeEdgeEndpointLabel(edge.toLabel)
+  if (fromLabelKey && toLabelKey) return `label:${fromLabelKey}->${toLabelKey}`
+  return null
+}
+
+function edgeGeometryPairKey(edge: FlowEdge) {
+  if (
+    Number.isFinite(edge.startX)
+    && Number.isFinite(edge.startY)
+    && Number.isFinite(edge.endX)
+    && Number.isFinite(edge.endY)
+  ) {
+    const snap = (value: number) => Math.round(value / 8) * 8
+    return `${snap(edge.startX)},${snap(edge.startY)}->${snap(edge.endX)},${snap(edge.endY)}`
+  }
+
+  return null
+}
+
+function edgeVisualPairKey(edge: FlowEdge) {
+  return edgeSemanticPairKey(edge) ?? edgeGeometryPairKey(edge) ?? edge.id
+}
+
+function collapseDuplicateFlowEdges(edges: FlowEdge[]) {
+  const byPair = new Map<string, FlowEdge>()
+
+  for (const edge of edges) {
+    const pairKey = edgeVisualPairKey(edge)
+    const existing = byPair.get(pairKey)
+    if (!existing) {
+      byPair.set(pairKey, edge)
+      continue
+    }
+
+    if (edge.kind === 'reference' && existing.kind !== 'reference') {
+      byPair.set(pairKey, {
+        ...edge,
+        selected: edge.selected || existing.selected,
+      })
+      continue
+    }
+
+    if (edge.kind === existing.kind) {
+      const referenceCount = (existing.referenceCount ?? 1) + (edge.referenceCount ?? 1)
+      byPair.set(pairKey, {
+        ...existing,
+        label: edge.kind === 'reference' && referenceCount > 1
+          ? `${existing.label.replace(/\s+等\s+\d+\s+条$/, '')} 等 ${referenceCount} 条`
+          : existing.label,
+        note: edge.kind === 'reference' && referenceCount > 1
+          ? `共 ${referenceCount} 个条件标题，点击编辑`
+          : existing.note,
+        referenceCount: edge.kind === 'reference' ? referenceCount : existing.referenceCount,
+        selected: existing.selected || edge.selected,
+      })
+    }
+  }
+
+  return [...byPair.values()]
 }
 
 function buildFlowEdges(layout: LayoutResult, tree: PrdTree, sourceTree: PrdTree | undefined, selectedNodeId: string | null): FlowEdge[] {
@@ -1202,6 +1403,8 @@ function buildFlowEdges(layout: LayoutResult, tree: PrdTree, sourceTree: PrdTree
       id: `primary-${parent.node.id}-${item.node.id}`,
       kind: 'primary',
       ...base,
+      fromLabel: parent.node.label,
+      toLabel: item.node.label,
       ...geometry,
       label: primaryEdgeLabel(parent.node, item.node),
       selected: isEdgeSelected(base, selectedNodeId),
@@ -1227,46 +1430,37 @@ function buildFlowEdges(layout: LayoutResult, tree: PrdTree, sourceTree: PrdTree
     }
   }
 
-  const outgoingCounts = new Map<string, number>()
-  const incomingCounts = new Map<string, number>()
-  for (const group of referenceGroups) {
-    outgoingCounts.set(group.source.id, (outgoingCounts.get(group.source.id) ?? 0) + 1)
-    incomingCounts.set(group.target.node.id, (incomingCounts.get(group.target.node.id) ?? 0) + 1)
-  }
+  // Detect bidirectional reference pairs so we can fan the two directed edges
+  // apart instead of letting them overlap on the same path.
+  const referencePairKeys = new Set(referenceGroups.map((group) => group.source.id + '->' + group.target.node.id))
 
-  const outgoingSeen = new Map<string, number>()
-  const incomingSeen = new Map<string, number>()
   for (const group of referenceGroups) {
-    const outgoingIndex = outgoingSeen.get(group.source.id) ?? 0
-    const incomingIndex = incomingSeen.get(group.target.node.id) ?? 0
-    outgoingSeen.set(group.source.id, outgoingIndex + 1)
-    incomingSeen.set(group.target.node.id, incomingIndex + 1)
-
-    const geometry = referenceGeometry(group.item, group.target, {
-      outgoingIndex,
-      outgoingCount: outgoingCounts.get(group.source.id) ?? 1,
-      incomingIndex,
-      incomingCount: incomingCounts.get(group.target.node.id) ?? 1,
-    })
+    const reverseKey = group.target.node.id + '->' + group.source.id
+    const isBidirectional = referencePairKeys.has(reverseKey)
+    // Assign a deterministic lane: the edge whose source id sorts first takes the
+    // negative lane (up/left), the other takes the positive lane (down/right).
+    const laneOffset = isBidirectional
+      ? (group.source.id < group.target.node.id ? -1 : 1)
+      : 0
+    const geometry = referenceGeometry(group.item, group.target, laneOffset)
     const base = { fromId: group.source.id, toId: group.target.node.id }
-    const firstReference = group.references[0]?.reference
-    const referenceCount = group.references.length
+    const references = group.references.map((entry) => entry.reference)
+    const referenceCount = references.length
     edges.push({
       id: `reference-${group.source.id}-${group.target.node.id}`,
       kind: 'reference',
       ...base,
+      fromLabel: group.source.label,
+      toLabel: group.target.node.label,
       ...geometry,
-      label: referenceCount > 1
-        ? `${firstReference?.label || '跨页面跳转'} 等 ${referenceCount} 条`
-        : firstReference?.label || '跨页面跳转',
-      note: referenceCount > 1
-        ? `共 ${referenceCount} 个条件标题，点击编辑`
-        : firstReference?.reason,
+      label: deriveReferenceEdgeLabel(group.source, group.target.node, references),
+      note: deriveReferenceEdgeNote(references),
+      referenceCount,
       selected: isEdgeSelected(base, selectedNodeId),
     })
   }
 
-  return avoidEdgeLabelOverlaps(edges, layout)
+  return avoidEdgeLabelOverlaps(collapseDuplicateFlowEdges(edges), layout)
 }
 
 function addNodeConnectorPath(root: PositionedNode, addSlot: { x: number; y: number; width: number; height: number }) {
@@ -1831,10 +2025,10 @@ export function TreeCanvas({
           style={{ width: contentWidth, height: contentHeight, overflow: 'visible', zIndex: 0 }}
         >
           <defs>
-            <marker id="flow-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <marker id="flow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="11" markerHeight="11" orient="auto-start-reverse">
               <path d="M 0 0 L 10 5 L 0 10 z" fill="#919095" />
             </marker>
-            <marker id="flow-arrow-selected" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <marker id="flow-arrow-selected" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="13" markerHeight="13" orient="auto-start-reverse">
               <path d="M 0 0 L 10 5 L 0 10 z" fill="#4edea3" />
             </marker>
           </defs>
@@ -1851,9 +2045,9 @@ export function TreeCanvas({
                 pathLength={1}
                 stroke={edge.selected ? '#4edea3' : edge.kind === 'reference' ? '#adc6ff' : '#919095'}
                 strokeOpacity={focusNodeId && !edge.selected ? 0.22 : 1}
-                strokeDasharray={edge.kind === 'reference' ? '8 8' : undefined}
+                strokeDasharray={edge.kind === 'reference' ? '9 7' : undefined}
                 strokeLinecap="round"
-                strokeWidth={edge.selected ? 3 : 2}
+                strokeWidth={edge.selected ? 3.2 : 2.4}
                 vectorEffect="non-scaling-stroke"
                 style={{ animationDelay: `${Math.min(index * 45, 420)}ms` }}
               />
@@ -1873,17 +2067,17 @@ export function TreeCanvas({
 
         {flowEdges.map((edge) => {
           const className = [
-            'absolute z-20 flex max-w-[164px] flex-col items-center justify-center rounded border px-xs py-[3px] text-center font-label-md text-[10px] leading-tight shadow-sm backdrop-blur',
+            'absolute z-20 flex max-w-[176px] flex-col items-center justify-center rounded-md border px-sm py-[4px] text-center font-label-md text-[11px] font-semibold leading-tight shadow-md backdrop-blur',
             edge.selected
-              ? 'border-tertiary bg-tertiary-container/90 text-tertiary'
+              ? 'border-tertiary bg-tertiary-container text-tertiary'
               : edge.kind === 'reference'
-                ? 'border-secondary/50 bg-secondary-container/30 text-secondary'
-                : 'border-outline-variant bg-surface-container-high/90 text-on-surface-variant',
+                ? 'border-secondary/70 bg-secondary-container text-secondary'
+                : 'border-outline-variant bg-surface-container-high text-on-surface-variant',
           ].join(' ')
           const style = {
             left: edge.labelX - 20 + renderOffsetX,
-            top: edge.labelY - (edge.note ? 8 : 0) + renderOffsetY,
-            width: 164,
+            top: edge.labelY - 13 + renderOffsetY,
+            width: 176,
           }
 
           if (edge.kind === 'reference') {
@@ -1898,7 +2092,6 @@ export function TreeCanvas({
                 title={[edge.label, edge.note].filter(Boolean).join('\n')}
               >
                 <span className="line-clamp-1 max-w-full">{edge.label}</span>
-                {edge.note ? <span className="line-clamp-1 max-w-full opacity-75">{edge.note}</span> : null}
               </button>
             )
           }

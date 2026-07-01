@@ -109,14 +109,29 @@ function nodeInteractionHint(node: PrdNode) {
   )
 }
 
+const TRIGGER_VERBS = ['点击并', '点击', '按下', '选择', '勾选', '切换', '触发', '提交', '确认', '登录', '注册', '支付', '购买', '删除', '新增', '编辑', '返回', '退出', '长按', '双击', '拖拽', '滑动']
+
+// 从源界面的交互描述里抠出一个短动作短语（如“点击登录按钮”），用来当画布上的跳转标题。
+function extractTriggerAction(sourceNode: PrdNode): string {
+  const hint = nodeInteractionHint(sourceNode)
+  if (!hint) return ''
+  const matched = TRIGGER_VERBS.find((v) => hint.includes(v))
+  const start = matched ? hint.indexOf(matched) : 0
+  const rest = hint.slice(start)
+  const stop = rest.search(/[，。；,.;:：、\n\r（）()【】\[\]「」""'']/)
+  const phrase = stop > 0 ? rest.slice(0, stop) : rest
+  return compactText(phrase, 14)
+}
+
 function buildSmartReference(sourceNode: PrdNode, targetNode: PrdNode): PrdNodeReference {
   const sourceHint = nodeInteractionHint(sourceNode)
   const targetHint = nodeInteractionHint(targetNode)
-  const label = `${sourceNode.label} → ${targetNode.label}`
+  const trigger = extractTriggerAction(sourceNode)
+  const label = defaultFlowConnectionLabel(sourceNode, targetNode, trigger)
   const reasonParts = [
-    `${sourceNode.label} 触发后进入 ${targetNode.label}。`,
-    sourceHint ? `源界面线索：${sourceHint}` : '',
-    targetHint ? `目标界面线索：${targetHint}` : '',
+    `从「${sourceNode.label}」跳转到「${targetNode.label}」。`,
+    trigger ? `触发动作：${trigger}` : (sourceHint ? `触发线索：${sourceHint}` : ''),
+    targetHint ? `目标作用：${targetHint}` : '',
   ].filter(Boolean)
 
   return {
@@ -127,8 +142,9 @@ function buildSmartReference(sourceNode: PrdNode, targetNode: PrdNode): PrdNodeR
   }
 }
 
-function defaultFlowConnectionLabel(sourceNode: PrdNode, targetNode: PrdNode) {
-  return `${sourceNode.label} → ${targetNode.label}`
+function defaultFlowConnectionLabel(_sourceNode: PrdNode, targetNode: PrdNode, trigger?: string) {
+  if (trigger) return trigger
+  return `进入「${targetNode.label}」`
 }
 
 function buildFlowConnectionDraftItems(sourceNode: PrdNode, targetNode: PrdNode): FlowConnectionDraftItem[] {
