@@ -27,6 +27,15 @@ export interface DocumentBlock {
 
 export type ContentBlock = TextBlock | ImageBlock | DocumentBlock
 
+export interface SourceImageInput {
+  name: string
+  mediaType: ImageBlock['source']['media_type']
+  data: string
+  sourceUrl?: string | null
+  token?: string | null
+  size?: number
+}
+
 export type ReferenceImageRole =
   | 'layout_reference'
   | 'asset_reuse'
@@ -96,6 +105,12 @@ export interface AiEnvironmentConfig {
     CLAUDE_MODEL: string
     MOCK_DECOMPOSE: boolean
     FIGMA_TOKEN_PRESENT: boolean
+    LARK_CLI_BIN: string
+    LARK_IDENTITY: string
+    LARK_APP_ID_PRESENT: boolean
+    LARK_APP_SECRET_PRESENT: boolean
+    LARK_TENANT_ACCESS_TOKEN_PRESENT: boolean
+    LARK_USER_ACCESS_TOKEN_PRESENT: boolean
   }
 }
 
@@ -105,6 +120,12 @@ export interface AiEnvironmentUpdate {
   CLAUDE_MODEL: string
   MOCK_DECOMPOSE: boolean
   FIGMA_TOKEN?: string
+  LARK_CLI_BIN: string
+  LARK_IDENTITY: string
+  LARK_APP_ID?: string
+  LARK_APP_SECRET?: string
+  LARK_TENANT_ACCESS_TOKEN?: string
+  LARK_USER_ACCESS_TOKEN?: string
 }
 
 export interface AppSettings {

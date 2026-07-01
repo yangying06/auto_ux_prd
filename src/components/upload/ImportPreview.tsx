@@ -26,6 +26,24 @@ function confidenceTone(candidate: PrdImportCandidateNode) {
   return 'text-on-surface-variant'
 }
 
+function candidateSourceBadge(candidate: PrdImportCandidateNode) {
+  if (candidate.sectionId.startsWith('figma-')) return 'Figma 主界面'
+  if (candidate.sectionId.startsWith('prd-supplement-')) return 'PRD 补充'
+  return 'PRD 候选'
+}
+
+function candidateSourceTone(candidate: PrdImportCandidateNode) {
+  if (candidate.sectionId.startsWith('figma-')) return 'border-tertiary/40 bg-tertiary/10 text-tertiary'
+  if (candidate.sectionId.startsWith('prd-supplement-')) return 'border-secondary/40 bg-secondary/10 text-secondary'
+  return 'border-outline-variant bg-surface-container-high text-on-surface-variant'
+}
+
+function uxMapScreenStateSummary(preview: PrdImportPreview, screenId: string) {
+  const states = (preview.figmaUxMap?.states ?? []).filter((state) => state.screenId === screenId)
+  if (!states.length) return '未识别独立状态'
+  return states.map((state) => `${state.label} · ${state.role}`).join(' / ')
+}
+
 export function ImportPreview({ preview, isLoading, error, projectWorkflow, onConfirm, onReset }: ImportPreviewProps) {
   if (isLoading) {
     return (
@@ -59,6 +77,9 @@ export function ImportPreview({ preview, isLoading, error, projectWorkflow, onCo
   }
 
   const { sourceIndex, candidateNodes } = preview
+  const figmaUxMap = preview.figmaUxMap ?? null
+  const prdSource = preview.prdSource ?? null
+  const relationSummary = preview.relationSummary ?? null
   const visibleSections = sourceIndex.sections.slice(0, 10)
   const visibleSignals = sourceIndex.keywordSignals.slice(0, 8)
   const iteration = projectWorkflow?.mode === 'existing_project_iteration' ? projectWorkflow.iteration : null
@@ -124,10 +145,118 @@ export function ImportPreview({ preview, isLoading, error, projectWorkflow, onCo
         ))}
       </section>
 
+      {prdSource ? (
+        <section className="grid gap-sm rounded-lg border border-secondary/30 bg-secondary/5 p-md xl:grid-cols-[minmax(0,0.75fr)_minmax(0,1.25fr)]">
+          <div className="min-w-0">
+            <div className="flex items-center gap-xs text-secondary">
+              <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>article</span>
+              <h2 className="text-label-lg font-semibold text-on-surface">PRD 补充已载入</h2>
+            </div>
+            <div className="mt-sm grid grid-cols-3 gap-xs">
+              {[
+                ['字符', prdSource.totalChars],
+                ['片段', prdSource.sectionCount],
+                ['对齐界面', prdSource.matchedFigmaGroups],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded border border-secondary/25 bg-surface-container px-sm py-xs">
+                  <p className="text-code-sm text-on-surface-variant">{label}</p>
+                  <p className="text-label-lg text-on-surface">{formatNumber(Number(value))}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="custom-scrollbar flex max-h-40 flex-col gap-xs overflow-y-auto pr-xs">
+            {prdSource.excerpts.map((section) => (
+              <article key={`${section.titlePath}-${section.startLine}`} className="rounded border border-outline-variant/70 bg-surface-container px-sm py-xs">
+                <div className="flex items-center justify-between gap-sm">
+                  <p className="truncate text-label-md text-on-surface">{section.titlePath}</p>
+                  <span className="shrink-0 text-code-sm text-secondary">第 {section.startLine}-{section.endLine} 行</span>
+                </div>
+                {section.excerpt ? (
+                  <p className="mt-[2px] line-clamp-2 text-body-sm text-on-surface-variant">{section.excerpt}</p>
+                ) : null}
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : figmaUxMap ? (
+        <section className="rounded-lg border border-tertiary/40 bg-tertiary/5 px-md py-sm text-body-md text-on-surface-variant">
+          当前预览只收到 Figma 设计稿，未收到 PRD 正文；请确认飞书 PRD 已读取进素材池。
+        </section>
+      ) : null}
+
+      {figmaUxMap ? (
+        <section className="grid gap-sm rounded-lg border border-tertiary/30 bg-tertiary/5 p-md xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
+          <div className="min-w-0">
+            <div className="flex items-center gap-xs text-tertiary">
+              <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>schema</span>
+              <h2 className="text-label-lg font-semibold text-on-surface">Figma UX Map 语义审阅</h2>
+            </div>
+            <div className="mt-sm grid grid-cols-4 gap-xs">
+              {[
+                ['界面', figmaUxMap.screens.length],
+                ['状态', figmaUxMap.states.length],
+                ['流转', figmaUxMap.transitions.length],
+                ['待确认', figmaUxMap.ambiguities.length],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded border border-tertiary/25 bg-surface-container px-sm py-xs">
+                  <p className="text-code-sm text-on-surface-variant">{label}</p>
+                  <p className="text-label-lg text-on-surface">{value}</p>
+                </div>
+              ))}
+            </div>
+            <p className="mt-sm text-body-sm text-on-surface-variant">
+              {figmaUxMap.review.source === 'ai_review' ? 'AI 已审阅' : figmaUxMap.review.source === 'ai_review_fallback' ? '使用规则兜底' : '规则识别'} · 置信度 {figmaUxMap.review.confidence}%
+            </p>
+            {figmaUxMap.review.notes.length ? (
+              <p className="mt-xs line-clamp-2 text-body-sm text-on-surface-variant">{figmaUxMap.review.notes.join('；')}</p>
+            ) : null}
+            {relationSummary ? (
+              <p className="mt-xs text-body-sm text-on-surface-variant">
+                PRD 推断流转 {relationSummary.prdRelationCount} 条 · Figma 流转 {relationSummary.figmaTransitionCount} 条
+              </p>
+            ) : null}
+          </div>
+          <div className="min-h-0 space-y-xs overflow-hidden">
+            <div className="custom-scrollbar flex max-h-40 flex-col gap-xs overflow-y-auto pr-xs">
+              {figmaUxMap.screens.slice(0, 8).map((screen) => (
+                <article key={screen.id} className="rounded border border-outline-variant/70 bg-surface-container px-sm py-xs">
+                  <div className="flex items-center justify-between gap-sm">
+                    <p className="truncate text-label-md text-on-surface">{screen.label}</p>
+                    <span className="shrink-0 text-code-sm text-tertiary">{screen.confidence}%</span>
+                  </div>
+                  <p className="mt-[2px] line-clamp-1 text-body-sm text-on-surface-variant">
+                    {uxMapScreenStateSummary(preview, screen.id)}
+                  </p>
+                </article>
+              ))}
+            </div>
+            {figmaUxMap.ambiguities.length ? (
+              <div className="rounded border border-tertiary/40 bg-surface-container px-sm py-xs text-body-sm text-on-surface-variant">
+                {figmaUxMap.ambiguities.slice(0, 2).map((ambiguity) => ambiguity.message).join('；')}
+              </div>
+            ) : null}
+            {relationSummary?.prdRelations.length ? (
+              <div className="custom-scrollbar flex max-h-32 flex-col gap-xs overflow-y-auto pr-xs">
+                {relationSummary.prdRelations.slice(0, 4).map((relation) => (
+                  <article key={`${relation.sourceLabel}-${relation.targetLabel}-${relation.label}`} className="rounded border border-secondary/30 bg-surface-container px-sm py-xs">
+                    <div className="flex items-center justify-between gap-sm">
+                      <p className="truncate text-label-md text-on-surface">{relation.sourceLabel} → {relation.targetLabel}</p>
+                      <span className="shrink-0 text-code-sm text-secondary">{relation.confidence}%</span>
+                    </div>
+                    <p className="mt-[2px] line-clamp-1 text-body-sm text-on-surface-variant">{relation.label} · {relation.reason}</p>
+                  </article>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
+
       <main className="grid min-h-0 flex-1 grid-cols-[minmax(0,1.1fr)_minmax(360px,0.9fr)] gap-lg overflow-hidden">
         <section className="min-h-0 rounded-lg border border-outline-variant bg-surface-container-low p-md">
           <div className="mb-sm flex items-center justify-between">
-            <h2 className="text-label-lg font-semibold text-on-surface">原文索引</h2>
+            <h2 className="text-label-lg font-semibold text-on-surface">{prdSource ? 'PRD 原文索引' : '导入证据索引'}</h2>
             <span className="text-code-sm text-on-surface-variant">显示前 {visibleSections.length} / {sourceIndex.sectionCount}</span>
           </div>
           <div className="flex max-h-full flex-col gap-sm overflow-y-auto pr-xs">
@@ -170,8 +299,13 @@ export function ImportPreview({ preview, isLoading, error, projectWorkflow, onCo
                 <article key={`${candidate.sectionId}-${candidate.title}`} className="rounded-lg border border-outline-variant/70 bg-surface-container px-md py-sm">
                   <div className="flex items-start justify-between gap-sm">
                     <div className="min-w-0">
-                      <p className="truncate text-body-lg text-on-surface">{candidate.title}</p>
-                      <p className="mt-xs text-code-sm text-on-surface-variant">{candidate.sourceLabel}</p>
+                      <div className="flex min-w-0 items-center gap-xs">
+                        <span className={`shrink-0 rounded border px-xs py-[2px] text-code-sm ${candidateSourceTone(candidate)}`}>
+                          {candidateSourceBadge(candidate)}
+                        </span>
+                        <p className="truncate text-body-lg text-on-surface">{candidate.title}</p>
+                      </div>
+                      <p className="mt-xs line-clamp-2 text-code-sm text-on-surface-variant">{candidate.sourceLabel}</p>
                     </div>
                     <span className={`shrink-0 text-code-sm ${confidenceTone(candidate)}`}>{candidate.confidence}%</span>
                   </div>
@@ -179,6 +313,11 @@ export function ImportPreview({ preview, isLoading, error, projectWorkflow, onCo
                     <div className="h-full rounded-full bg-secondary-container" style={{ width: `${candidate.confidence}%` }} />
                   </div>
                   <p className="mt-sm text-body-md text-on-surface-variant">{candidate.reason}</p>
+                  {candidate.excerpt ? (
+                    <p className="mt-sm line-clamp-3 rounded border border-outline-variant/70 bg-surface-container-high px-sm py-xs text-body-sm text-on-surface-variant">
+                      {candidate.excerpt}
+                    </p>
+                  ) : null}
                 </article>
               )) : (
                 <div className="rounded-lg border border-outline-variant/70 bg-surface-container px-md py-lg text-body-md text-on-surface-variant">

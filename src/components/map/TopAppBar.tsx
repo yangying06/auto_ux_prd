@@ -18,6 +18,13 @@ interface TopAppBarProps {
   canValidatePrototype?: boolean
   isValidatingPrototype?: boolean
   prototypeValidationRiskCount?: number
+  onSmartArrange?: () => void
+  canSmartArrange?: boolean
+  onBatchGenerateFigmaDrafts?: () => void
+  canBatchGenerateFigmaDrafts?: boolean
+  isBatchGeneratingFigmaDrafts?: boolean
+  figmaDraftReadyCount?: number
+  figmaDraftTotalCount?: number
   onOpenAssets?: () => void
   onOpenQa?: () => void
   qaOpenIssueCount?: number
@@ -47,6 +54,13 @@ export function TopAppBar({
   canValidatePrototype = true,
   isValidatingPrototype = false,
   prototypeValidationRiskCount = 0,
+  onSmartArrange,
+  canSmartArrange = true,
+  onBatchGenerateFigmaDrafts,
+  canBatchGenerateFigmaDrafts = false,
+  isBatchGeneratingFigmaDrafts = false,
+  figmaDraftReadyCount = 0,
+  figmaDraftTotalCount = 0,
   onOpenAssets,
   onOpenQa,
   qaOpenIssueCount = 0,
@@ -159,6 +173,54 @@ export function TopAppBar({
             </div>
           ) : null}
         </div>
+
+        {onSmartArrange && (
+          <button
+            data-smart-arrange="true"
+            onClick={onSmartArrange}
+            disabled={!canSmartArrange}
+            title="智能整理节点位置，减少连线交叉"
+            className={[
+              'flex items-center gap-sm rounded-lg border px-md py-sm font-label-md text-label-md transition-colors',
+              canSmartArrange
+                ? 'border-tertiary/50 bg-tertiary-container/70 text-on-tertiary-container hover:bg-tertiary-container'
+                : 'border-outline-variant bg-surface-container-high text-on-surface opacity-40 cursor-not-allowed',
+            ].join(' ')}
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>auto_fix_high</span>
+            智能整理
+          </button>
+        )}
+
+        {onBatchGenerateFigmaDrafts && figmaDraftTotalCount > 0 ? (
+          <button
+            data-figma-draft-batch="true"
+            onClick={onBatchGenerateFigmaDrafts}
+            disabled={!canBatchGenerateFigmaDrafts || isBatchGeneratingFigmaDrafts}
+            title={
+              figmaDraftReadyCount > 0
+                ? `Generate first draft prototypes for ${figmaDraftReadyCount} Figma-bound node(s)`
+                : 'All Figma-bound nodes already have draft prototypes'
+            }
+            className={[
+              'flex items-center gap-sm rounded-lg border px-md py-sm font-label-md text-label-md transition-colors',
+              canBatchGenerateFigmaDrafts && !isBatchGeneratingFigmaDrafts
+                ? 'border-primary/50 bg-primary-container/70 text-on-primary-container hover:bg-primary-container'
+                : 'border-outline-variant bg-surface-container-high text-on-surface opacity-40 cursor-not-allowed',
+            ].join(' ')}
+          >
+            <span
+              className={['material-symbols-outlined', isBatchGeneratingFigmaDrafts ? 'animate-spin' : ''].join(' ').trim()}
+              style={{ fontSize: '18px' }}
+            >
+              {isBatchGeneratingFigmaDrafts ? 'sync' : 'auto_awesome_motion'}
+            </span>
+            Figma 首稿
+            {figmaDraftReadyCount > 0 ? (
+              <span className="rounded bg-primary px-xs py-[1px] text-[10px] leading-4 text-on-primary">{figmaDraftReadyCount}</span>
+            ) : null}
+          </button>
+        ) : null}
 
         {onOpenAssets && (
           <button

@@ -38,6 +38,33 @@ export interface PrdNodeFigmaPreview {
   userNote?: string | null
 }
 
+export type PrdUiStateKind =
+  | 'default'
+  | 'overlay'
+  | 'loading'
+  | 'success'
+  | 'error'
+  | 'empty'
+  | 'disabled'
+  | 'expanded'
+  | 'collapsed'
+  | 'localized'
+  | 'mirror'
+  | 'selected'
+  | 'variant'
+
+export interface PrdUiState {
+  id: string
+  label: string
+  kind: PrdUiStateKind
+  figmaNodeId: string
+  sourceUrl?: string | null
+  previewImageUrl?: string | null
+  visibleTexts: string[]
+  annotations: string[]
+  confidence: number
+}
+
 export interface PrdNodeSection {
   title?: string | null
   summary?: string | null
@@ -53,6 +80,115 @@ export interface PrdNodeReference {
   label: string
   reason?: string | null
   sourceNodeId?: string | null
+}
+
+export interface PrdStateTransition {
+  id: string
+  sourceNodeId: string
+  sourceStateId?: string | null
+  targetNodeId: string
+  targetStateId?: string | null
+  trigger?: string | null
+  condition?: string | null
+  effect?: string | null
+  evidence: string[]
+  confidence: number
+  source?: FigmaUxMapTransitionSource | null
+}
+
+export type FigmaUxMapReviewSource = 'heuristic' | 'ai_review' | 'ai_review_fallback'
+export type FigmaUxMapStateRole = 'base' | 'variant' | 'overlay' | 'feedback' | 'localized'
+export type FigmaUxMapTransitionSource =
+  | 'figma_connector'
+  | 'figma_prototype'
+  | 'frame_title'
+  | 'annotation'
+  | 'prd_text'
+  | 'canvas_order'
+  | 'text_entry'
+  | 'ai_review'
+export type FigmaUxMapAmbiguityKind =
+  | 'screen_grouping'
+  | 'state_role'
+  | 'transition_target'
+  | 'missing_trigger'
+  | 'prd_conflict'
+  | 'low_confidence'
+
+export interface FigmaUxMapState {
+  id: string
+  screenId: string
+  label: string
+  role: FigmaUxMapStateRole
+  kind: PrdUiStateKind
+  figmaNodeId: string
+  sourceUrl?: string | null
+  previewImageUrl?: string | null
+  visibleTexts: string[]
+  annotations: string[]
+  triggerHints: string[]
+  confidence: number
+}
+
+export interface FigmaUxMapScreen {
+  id: string
+  groupKey: string
+  label: string
+  sourceFrameIds: string[]
+  primaryFigmaNodeId?: string | null
+  stateIds: string[]
+  evidence: string[]
+  confidence: number
+}
+
+export interface FigmaUxMapTransition {
+  id: string
+  sourceScreenId: string
+  sourceStateId?: string | null
+  targetScreenId: string
+  targetStateId?: string | null
+  trigger?: string | null
+  condition?: string | null
+  effect?: string | null
+  evidence: string[]
+  confidence: number
+  source: FigmaUxMapTransitionSource
+}
+
+export interface FigmaUxMapAmbiguity {
+  id: string
+  kind: FigmaUxMapAmbiguityKind
+  message: string
+  screenId?: string | null
+  stateId?: string | null
+  transitionId?: string | null
+  evidence: string[]
+  severity: 'info' | 'warning' | 'critical'
+}
+
+export interface FigmaUxMap {
+  version: 'figma-ux-map.v1'
+  review: {
+    source: FigmaUxMapReviewSource
+    confidence: number
+    notes: string[]
+  }
+  screens: FigmaUxMapScreen[]
+  states: FigmaUxMapState[]
+  transitions: FigmaUxMapTransition[]
+  ambiguities: FigmaUxMapAmbiguity[]
+}
+
+export interface PrdNodeFigmaUxMapSlice {
+  screenId: string
+  screenLabel: string
+  sourceFrameIds: string[]
+  stateIds: string[]
+  transitionIds: string[]
+  ambiguityIds: string[]
+  reviewSource: FigmaUxMapReviewSource
+  reviewConfidence: number
+  notes: string[]
 }
 
 export type PrdNodeBackendContractKind = 'api' | 'config' | 'server' | 'data'
@@ -160,6 +296,9 @@ export interface UpdateNodePatch {
   evidenceRefs?: PrdNodeEvidenceRef[]
   performanceSpec?: PrdPerformanceSpec | null
   figmaPreviews?: PrdNodeFigmaPreview[]
+  uiStates?: PrdUiState[]
+  stateTransitions?: PrdStateTransition[]
+  figmaUxMap?: PrdNodeFigmaUxMapSlice | null
 }
 
 export type PrdNodeOperationPatch = Partial<Pick<
@@ -180,6 +319,9 @@ export type PrdNodeOperationPatch = Partial<Pick<
   | 'sourceKind'
   | 'evidenceRefs'
   | 'performanceSpec'
+  | 'uiStates'
+  | 'stateTransitions'
+  | 'figmaUxMap'
 >>
 
 export interface PrdNodeOperationSuggestion {
@@ -251,6 +393,9 @@ export interface PrdNode {
   evidenceRefs?: PrdNodeEvidenceRef[]
   performanceSpec?: PrdPerformanceSpec | null
   figmaPreviews?: PrdNodeFigmaPreview[]
+  uiStates?: PrdUiState[]
+  stateTransitions?: PrdStateTransition[]
+  figmaUxMap?: PrdNodeFigmaUxMapSlice | null
 }
 
 export type PrdTree = Record<string, PrdNode>
@@ -346,7 +491,37 @@ export interface PrdImportCandidateNode {
   excerpt: string
 }
 
+export interface PrdImportPrdSourceSummary {
+  totalChars: number
+  headingCount: number
+  sectionCount: number
+  matchedFigmaGroups: number
+  excerpts: Array<{
+    titlePath: string
+    excerpt: string
+    startLine: number
+    endLine: number
+  }>
+}
+
+export interface PrdImportRelationPreview {
+  sourceLabel: string
+  targetLabel: string
+  label: string
+  reason: string
+  confidence: number
+}
+
+export interface PrdImportRelationSummary {
+  figmaTransitionCount: number
+  prdRelationCount: number
+  prdRelations: PrdImportRelationPreview[]
+}
+
 export interface PrdImportPreview {
   sourceIndex: DocumentSourceIndex
   candidateNodes: PrdImportCandidateNode[]
+  figmaUxMap?: FigmaUxMap | null
+  prdSource?: PrdImportPrdSourceSummary | null
+  relationSummary?: PrdImportRelationSummary | null
 }

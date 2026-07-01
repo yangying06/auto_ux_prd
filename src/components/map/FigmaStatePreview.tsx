@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { PrdNode } from '../../types/prdNode'
+import type { PrdNode, PrdUiStateKind } from '../../types/prdNode'
 
 export type FigmaPreviewWithImage = NonNullable<PrdNode['figmaPreviews']>[number] & { imageUrl: string }
 
@@ -17,6 +17,30 @@ function largestPreview(previews: FigmaPreviewWithImage[]) {
 
 function previewKey(preview: FigmaPreviewWithImage, index: number) {
   return `${preview.nodeId}|${preview.imageUrl}|${preview.sourceUrl}|${index}`
+}
+
+const FIGMA_STATE_KIND_LABELS: Record<PrdUiStateKind, string> = {
+  default: '默认',
+  overlay: '浮层',
+  loading: '加载',
+  success: '成功',
+  error: '错误',
+  empty: '空态',
+  disabled: '禁用',
+  expanded: '展开',
+  collapsed: '收起',
+  localized: '语言',
+  mirror: '镜像',
+  selected: '选中',
+  variant: '变体',
+}
+
+function stateKindLabel(kind: PrdUiStateKind) {
+  return FIGMA_STATE_KIND_LABELS[kind] ?? FIGMA_STATE_KIND_LABELS.variant
+}
+
+function stateForPreview(node: PrdNode, preview: FigmaPreviewWithImage) {
+  return node.uiStates?.find((state) => state.figmaNodeId === preview.nodeId) ?? null
 }
 
 export function FigmaMiniPreview({ node }: { node: PrdNode }) {
@@ -78,23 +102,49 @@ export function FigmaStatePreviewPanel({ node }: { node: PrdNode }) {
           {previews.length} 张
         </span>
       </div>
+      {node.figmaUxMap ? (
+        <div className="mb-sm rounded border border-tertiary/30 bg-tertiary/10 px-sm py-xs text-body-sm text-on-surface-variant">
+          UX Map：{node.figmaUxMap.screenLabel} · {node.figmaUxMap.reviewSource} · {node.figmaUxMap.reviewConfidence}%
+        </div>
+      ) : null}
       <div className="grid gap-sm md:grid-cols-2">
-        {previews.map((preview, index) => (
-          <figure key={previewKey(preview, index)} className="min-w-0 overflow-hidden rounded border border-outline-variant/70 bg-black">
-            <div className="flex h-[320px] items-center justify-center overflow-hidden">
-              <img
-                src={preview.imageUrl}
-                alt={preview.name}
-                draggable={false}
-                className="h-full w-full object-contain"
-              />
-            </div>
-            <figcaption className="flex min-h-[36px] items-center justify-between gap-sm border-t border-outline-variant/70 bg-surface-container px-sm text-label-md text-on-surface-variant">
-              <span className="truncate">{index + 1}. {preview.name}</span>
-              <span className="shrink-0 font-code-sm text-code-sm">{Math.round(preview.width)}x{Math.round(preview.height)}</span>
-            </figcaption>
-          </figure>
-        ))}
+        {previews.map((preview, index) => {
+          const state = stateForPreview(node, preview)
+          return (
+            <figure key={previewKey(preview, index)} className="min-w-0 overflow-hidden rounded border border-outline-variant/70 bg-black">
+              <div className="flex h-[320px] items-center justify-center overflow-hidden">
+                <img
+                  src={preview.imageUrl}
+                  alt={preview.name}
+                  draggable={false}
+                  className="h-full w-full object-contain"
+                />
+              </div>
+              <figcaption className="space-y-xs border-t border-outline-variant/70 bg-surface-container px-sm py-xs text-label-md text-on-surface-variant">
+                <div className="flex min-h-[24px] items-center justify-between gap-sm">
+                  <span className="truncate text-on-surface">{index + 1}. {state?.label ?? preview.name}</span>
+                  <span className="shrink-0 rounded border border-tertiary/40 bg-tertiary/10 px-xs font-code-sm text-code-sm text-tertiary">
+                    {state ? stateKindLabel(state.kind) : '截图'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-sm font-code-sm text-code-sm">
+                  <span className="truncate">{preview.name}</span>
+                  <span className="shrink-0">{Math.round(preview.width)}x{Math.round(preview.height)}</span>
+                </div>
+                {state?.annotations.length ? (
+                  <div className="max-h-10 overflow-hidden text-body-sm leading-snug text-on-surface-variant">
+                    注释：{state.annotations.join(' / ')}
+                  </div>
+                ) : null}
+                {state?.visibleTexts.length ? (
+                  <div className="truncate text-body-sm text-on-surface-variant">
+                    文案：{state.visibleTexts.slice(0, 4).join(' / ')}
+                  </div>
+                ) : null}
+              </figcaption>
+            </figure>
+          )
+        })}
       </div>
     </section>
   )
@@ -120,6 +170,7 @@ export function FigmaStatePreviewModal({ node, onClose }: { node: PrdNode; onClo
 
   if (!previews.length) return null
   const active = previews[Math.min(activeIndex, previews.length - 1)]!
+  const activeState = stateForPreview(node, active)
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-md py-lg" role="dialog" aria-modal="true" aria-label={`${node.label} 界面状态预览`}>
@@ -154,8 +205,18 @@ export function FigmaStatePreviewModal({ node, onClose }: { node: PrdNode; onClo
             </div>
             <div className="flex shrink-0 flex-wrap items-center justify-between gap-sm border-t border-outline-variant/60 bg-surface-container-low px-md py-sm">
               <div className="min-w-0">
-                <div className="truncate text-label-lg font-medium text-on-surface">{activeIndex + 1}. {active.name}</div>
-                <div className="font-code-sm text-code-sm text-on-surface-variant">{Math.round(active.width)}x{Math.round(active.height)}</div>
+                <div className="flex min-w-0 items-center gap-xs">
+                  <div className="truncate text-label-lg font-medium text-on-surface">{activeIndex + 1}. {activeState?.label ?? active.name}</div>
+                  {activeState ? (
+                    <span className="shrink-0 rounded border border-tertiary/40 bg-tertiary/10 px-xs font-code-sm text-code-sm text-tertiary">
+                      {stateKindLabel(activeState.kind)}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="font-code-sm text-code-sm text-on-surface-variant">{active.name} · {Math.round(active.width)}x{Math.round(active.height)}</div>
+                {activeState?.annotations.length ? (
+                  <div className="mt-xs max-w-[760px] text-body-sm text-on-surface-variant">注释：{activeState.annotations.join(' / ')}</div>
+                ) : null}
               </div>
               <a
                 href={active.sourceUrl}
@@ -170,32 +231,38 @@ export function FigmaStatePreviewModal({ node, onClose }: { node: PrdNode; onClo
           </div>
           <aside className="custom-scrollbar min-h-0 overflow-y-auto rounded-lg border border-outline-variant/50 bg-surface-container-low p-sm">
             <div className="grid grid-cols-2 gap-sm lg:grid-cols-1">
-              {previews.map((preview, index) => (
-                <button
-                  key={previewKey(preview, index)}
-                  type="button"
-                  onClick={() => setActiveIndex(index)}
-                  className={[
-                    'min-w-0 overflow-hidden rounded border text-left transition-colors',
-                    index === activeIndex
-                      ? 'border-tertiary bg-tertiary/10 text-on-surface'
-                      : 'border-outline-variant bg-surface-container hover:border-primary',
-                  ].join(' ')}
-                >
-                  <div className="flex h-36 items-center justify-center overflow-hidden bg-black">
-                    <img
-                      src={preview.imageUrl}
-                      alt={preview.name}
-                      draggable={false}
-                      className="h-full w-full object-contain"
-                    />
-                  </div>
-                  <div className="border-t border-outline-variant/60 px-sm py-xs">
-                    <div className="truncate text-label-md">{index + 1}. {preview.name}</div>
-                    <div className="font-code-sm text-code-sm text-on-surface-variant">{Math.round(preview.width)}x{Math.round(preview.height)}</div>
-                  </div>
-                </button>
-              ))}
+              {previews.map((preview, index) => {
+                const state = stateForPreview(node, preview)
+                return (
+                  <button
+                    key={previewKey(preview, index)}
+                    type="button"
+                    onClick={() => setActiveIndex(index)}
+                    className={[
+                      'min-w-0 overflow-hidden rounded border text-left transition-colors',
+                      index === activeIndex
+                        ? 'border-tertiary bg-tertiary/10 text-on-surface'
+                        : 'border-outline-variant bg-surface-container hover:border-primary',
+                    ].join(' ')}
+                  >
+                    <div className="flex h-36 items-center justify-center overflow-hidden bg-black">
+                      <img
+                        src={preview.imageUrl}
+                        alt={preview.name}
+                        draggable={false}
+                        className="h-full w-full object-contain"
+                      />
+                    </div>
+                    <div className="space-y-xs border-t border-outline-variant/60 px-sm py-xs">
+                      <div className="flex items-center justify-between gap-xs">
+                        <div className="truncate text-label-md">{index + 1}. {state?.label ?? preview.name}</div>
+                        {state ? <span className="shrink-0 text-code-sm text-tertiary">{stateKindLabel(state.kind)}</span> : null}
+                      </div>
+                      <div className="truncate font-code-sm text-code-sm text-on-surface-variant">{Math.round(preview.width)}x{Math.round(preview.height)} · {preview.name}</div>
+                    </div>
+                  </button>
+                )
+              })}
             </div>
           </aside>
         </main>

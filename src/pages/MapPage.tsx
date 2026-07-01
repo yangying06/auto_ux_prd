@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'wouter'
-import { getAiEnvironmentConfig, previewDecomposition, startDecomposition, pollDecomposition, exportSpecFolder, exportNodeMarkdown, suggestPrdNodeOperations, scanProjectBaseline } from '../lib/api'
+import { getAiEnvironmentConfig, previewDecomposition, startDecomposition, pollDecomposition, exportSpecFolder, exportNodeMarkdown, suggestPrdNodeOperations, scanProjectBaseline, importFigmaFrame, generatePrototype } from '../lib/api'
 import type { DecompositionSourcePayload } from '../lib/api'
 import { MapAdjustmentPanel } from '../components/map/MapAdjustmentPanel'
 import type { PrdImportPreview, PrdNode, PrdNodeOperationSuggestion, PrdNodeReference, PrdTree } from '../types/prdNode'
@@ -19,6 +19,7 @@ import { formatProjectArchiveError, openProjectArchiveFile, saveProjectArchiveBy
 import { createProjectWorkspaceSnapshot } from '../lib/archiveSnapshot'
 import { AddNodeModal, type AddNodePayload } from '../components/map/AddNodeModal'
 import { collectDeliveryNodes, isDeliveryNode } from '../lib/prdNodeDelivery'
+import { buildFigmaDraftPrototypeInstruction, buildFigmaDraftRequirement, figmaImportToPrototypeImages, getNodeFigmaDraftSource, nodeHasGeneratedPrototype, nodeHasPrototypeInFlight } from '../lib/figmaDraftPrototype'
 import { EnvironmentConfigModal } from '../components/map/EnvironmentConfigModal'
 import { AssetWorkbenchModal } from '../components/map/AssetWorkbenchModal'
 import type { AssetWorkbenchState } from '../types/assetWorkbench'
@@ -30,18 +31,26 @@ const INITIAL_STEP = '正在建立原文索引'
 const POLL_INTERVAL_MS = 700
 const EMPTY_NODE_SUGGESTIONS: PrdNodeOperationSuggestion[] = []
 
+function getImportedSourceText(sources: DecompositionSourcePayload) {
+  return sources.sourceText?.trim() || sources.mdText?.trim() || ''
+}
+
+function getImportedSourceFilename(sources: DecompositionSourcePayload) {
+  return sources.sourceFilename?.trim() || sources.mdFilename?.trim() || 'source-corpus.md'
+}
+
 function buildImportSourceDocumentText(sources: DecompositionSourcePayload) {
   const figmaUrl = sources.figmaUrl?.trim()
-  const mdText = sources.mdText?.trim()
+  const sourceText = getImportedSourceText(sources)
   const parts: string[] = []
 
   if (figmaUrl) {
     parts.push(`# Figma 设计稿链接\n\n${figmaUrl}`)
   }
 
-  if (mdText) {
-    const filename = sources.mdFilename?.trim() || 'Markdown PRD'
-    parts.push(`# Markdown PRD：${filename}\n\n${mdText}`)
+  if (sourceText) {
+    const filename = getImportedSourceFilename(sources)
+    parts.push(`# 导入素材：${filename}\n\n${sourceText}`)
   }
 
   return parts.join('\n\n---\n\n')
@@ -49,17 +58,24 @@ function buildImportSourceDocumentText(sources: DecompositionSourcePayload) {
 
 function buildImportSourceFilename(sources: DecompositionSourcePayload) {
   const hasFigma = Boolean(sources.figmaUrl?.trim())
-  const mdFilename = sources.mdFilename?.trim()
-  if (hasFigma && mdFilename) return `figma+${mdFilename}`
+  const sourceFilename = getImportedSourceText(sources) ? getImportedSourceFilename(sources) : ''
+  if (hasFigma && sourceFilename) return `figma+${sourceFilename}`
   if (hasFigma) return 'figma-design.md'
-  return mdFilename || 'prd.md'
+  return sourceFilename || 'source-corpus.md'
 }
 
 function buildIterationSourceText(sources: DecompositionSourcePayload) {
+  const sourceText = getImportedSourceText(sources)
   return [
     sources.figmaUrl?.trim() ? `Figma 设计稿：${sources.figmaUrl.trim()}` : null,
-    sources.mdText?.trim() ? sources.mdText.trim() : null,
+    sourceText || null,
   ].filter(Boolean).join('\n\n')
+}
+
+interface FlowConnectionDraftItem {
+  originalIndex: number | null
+  label: string
+  reason: string
 }
 
 interface FlowConnectionDraft {
@@ -69,8 +85,7 @@ interface FlowConnectionDraft {
   targetNodeId: string
   originalSourceNodeId: string | null
   originalTargetNodeId: string | null
-  label: string
-  reason: string
+  items: FlowConnectionDraftItem[]
 }
 
 interface CanvasConnectionDraft {
@@ -110,6 +125,27 @@ function buildSmartReference(sourceNode: PrdNode, targetNode: PrdNode): PrdNodeR
     reason: reasonParts.join(' '),
     sourceNodeId: sourceNode.id,
   }
+}
+
+function defaultFlowConnectionLabel(sourceNode: PrdNode, targetNode: PrdNode) {
+  return `${sourceNode.label} → ${targetNode.label}`
+}
+
+function buildFlowConnectionDraftItems(sourceNode: PrdNode, targetNode: PrdNode): FlowConnectionDraftItem[] {
+  const fallbackLabel = defaultFlowConnectionLabel(sourceNode, targetNode)
+  const matches = (sourceNode.references ?? [])
+    .map((reference, index) => ({ reference, index }))
+    .filter(({ reference }) => reference.targetNodeId === targetNode.id)
+
+  if (!matches.length) {
+    return [{ originalIndex: null, label: fallbackLabel, reason: '' }]
+  }
+
+  return matches.map(({ reference, index }) => ({
+    originalIndex: index,
+    label: reference.label?.trim() || fallbackLabel,
+    reason: reference.reason ?? '',
+  }))
 }
 
 function buildInterfaceFlowDisplayTree(tree: PrdTree): PrdTree {
@@ -225,6 +261,21 @@ function buildNodePreviewHtmlMap(nodePrototypeStates: ReturnType<typeof useAppSt
   )
 }
 
+function collectPendingFigmaDraftTargets(
+  tree: PrdTree,
+  nodePrototypeStates: ReturnType<typeof useAppStore.getState>['nodePrototypeStates'],
+) {
+  return collectDeliveryNodes(tree).filter((node) => {
+    if (!getNodeFigmaDraftSource(node)) return false
+    const state = nodePrototypeStates[node.id]
+    return !nodeHasGeneratedPrototype(state) && !nodeHasPrototypeInFlight(state)
+  })
+}
+
+function countFigmaBoundDeliveryNodes(tree: PrdTree) {
+  return collectDeliveryNodes(tree).filter((node) => Boolean(getNodeFigmaDraftSource(node))).length
+}
+
 function countExportableAssetRows(assetWorkbench: AssetWorkbenchState) {
   const uiCount = assetWorkbench.uiRows.filter((row) => row.status === 'ready' && row.result).length
   const effectCount = assetWorkbench.effectRows.filter((row) =>
@@ -286,10 +337,13 @@ export function MapPage() {
   const [selectedPrototypeNodeId, setSelectedPrototypeNodeId] = useState<string | null>(null)
   const [environmentConfigOpen, setEnvironmentConfigOpen] = useState(false)
   const [assetWorkbenchOpen, setAssetWorkbenchOpen] = useState(false)
+  const [isGeneratingFigmaDrafts, setIsGeneratingFigmaDrafts] = useState(false)
+  const [figmaDraftBatchStatus, setFigmaDraftBatchStatus] = useState<string | null>(null)
   const [environmentStatus, setEnvironmentStatus] = useState<AiEnvironmentConfig | null>(null)
   const [flowConnectionDraft, setFlowConnectionDraft] = useState<FlowConnectionDraft | null>(null)
   const [canvasConnectionDraft, setCanvasConnectionDraft] = useState<CanvasConnectionDraft | null>(null)
   const [canvasFocusNodeId, setCanvasFocusNodeId] = useState<string | null>(null)
+  const [smartArrangeFitRequest, setSmartArrangeFitRequest] = useState(0)
   const sessionIdRef = useRef<string | null>(null)
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const pollInFlightRef = useRef(false)
@@ -304,6 +358,9 @@ export function MapPage() {
   const currentArchivePath = useAppStore((s) => s.currentArchivePath)
   const archiveDirty = useAppStore((s) => s.archiveDirty)
   const nodePrototypeStates = useAppStore((s) => s.nodePrototypeStates)
+  const appendNodeMessage = useAppStore((s) => s.appendNodeMessage)
+  const setNodePrototypeVariants = useAppStore((s) => s.setNodePrototypeVariants)
+  const selectNodePrototypeVariant = useAppStore((s) => s.selectNodePrototypeVariant)
   const assetWorkbench = useAppStore((s) => s.assetWorkbench)
   const qaIssues = useAppStore((s) => s.qaIssues)
   const decompositionSteps = useAppStore((s) => s.decompositionSteps)
@@ -331,6 +388,7 @@ export function MapPage() {
   const setSelectedNodeId = useAppStore((s) => s.setSelectedNodeId)
   const canvasNodePositions = useAppStore((s) => s.canvasNodePositions)
   const setCanvasNodePosition = useAppStore((s) => s.setCanvasNodePosition)
+  const clearCanvasNodePositions = useAppStore((s) => s.clearCanvasNodePositions)
   const selectedNodeId = useAppStore((s) => s.selectedNodeId)
   const addNodeSuggestions = useAppStore((s) => (
     createdAddNodeId ? s.nodeOperationSuggestions[createdAddNodeId] ?? EMPTY_NODE_SUGGESTIONS : EMPTY_NODE_SUGGESTIONS
@@ -354,6 +412,69 @@ export function MapPage() {
     setPendingImportSources(null)
     setIsPreviewLoading(false)
     setNodeCount(0)
+  }
+
+  const generateFigmaDraftForNode = async (node: PrdNode, tree: PrdTree, batchLabel?: string) => {
+    const source = getNodeFigmaDraftSource(node)
+    if (!source) throw new Error(`Node ${node.id} has no Figma source.`)
+
+    setNodePrototypeVariants(node.id, [{
+      index: 0,
+      html: null,
+      status: 'streaming' as const,
+      focus: 'Figma first draft',
+    }])
+    appendNodeMessage(node.id, {
+      role: 'assistant',
+      content: `${batchLabel ? `${batchLabel}\n` : ''}Generating a first draft prototype from bound Figma source: ${source.label}`,
+    })
+
+    try {
+      const result = await importFigmaFrame(settings.proxyBaseUrl, { url: source.url })
+      const latestState = useAppStore.getState().nodePrototypeStates[node.id]
+      const hasExistingPrototype = nodeHasGeneratedPrototype(latestState)
+      const requirementState = buildFigmaDraftRequirement(node, tree, result, source)
+      const instruction = buildFigmaDraftPrototypeInstruction(node, result, source, hasExistingPrototype)
+      const response = await generatePrototype(settings.proxyBaseUrl, requirementState, {
+        instruction,
+        images: figmaImportToPrototypeImages(result),
+        numVariants: 1,
+      })
+
+      setNodePrototypeVariants(node.id, response.variants.map((variant) => ({
+        index: variant.index,
+        html: variant.html,
+        status: variant.status,
+        focus: variant.focus,
+        history: variant.history,
+        error: variant.error,
+        assetAudit: variant.assetAudit,
+      })))
+      const chosen = response.variants.find((variant) => variant.status === 'complete' && variant.html)
+      if (!chosen?.html) {
+        const message = response.variants.find((variant) => variant.error)?.error ?? 'No complete HTML prototype was returned.'
+        throw new Error(message)
+      }
+      selectNodePrototypeVariant(node.id, chosen.index)
+      appendNodeMessage(node.id, {
+        role: 'assistant',
+        content: `First draft prototype generated from Figma: ${result.panelName}`,
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Figma draft generation failed.'
+      setNodePrototypeVariants(node.id, [{
+        index: 0,
+        html: null,
+        status: 'error' as const,
+        focus: 'Figma first draft',
+        error: message,
+      }])
+      appendNodeMessage(node.id, {
+        role: 'assistant',
+        content: `Figma first draft generation failed: ${message}`,
+      })
+      throw err
+    }
   }
 
   const confirmProjectClose = (actionLabel: string) => {
@@ -561,6 +682,7 @@ export function MapPage() {
       filename: buildImportSourceFilename(sources),
       text: sourceText,
       importedAt: new Date().toISOString(),
+      files: sources.sourceFiles ?? [],
     })
     setPendingImportSources(sources)
     setImportPreview(null)
@@ -685,6 +807,8 @@ export function MapPage() {
 
   if (stage === 'map' && prdTree) {
     const nodePreviewHtmlMap = buildNodePreviewHtmlMap(nodePrototypeStates)
+    const figmaBoundNodeCount = countFigmaBoundDeliveryNodes(prdTree)
+    const pendingFigmaDraftTargets = collectPendingFigmaDraftTargets(prdTree, nodePrototypeStates)
     const displayTree = buildInterfaceFlowDisplayTree(prdTree)
     const selectedNode = selectedNodeId && displayTree[selectedNodeId] ? (prdTree[selectedNodeId] ?? null) : null
 
@@ -730,16 +854,10 @@ export function MapPage() {
       if (!sourceNode || !targetNode || sourceNode.id === targetNode.id) return
 
       const smartReference = buildSmartReference(sourceNode, targetNode)
-      const existing = (sourceNode.references ?? []).find((reference) => reference.targetNodeId === targetNode.id)
-      const references = (sourceNode.references ?? []).filter((reference) => reference.targetNodeId !== targetNode.id)
       updateNode(sourceNode.id, {
         references: [
-          ...references,
-          {
-            ...smartReference,
-            label: existing?.label?.trim() || smartReference.label,
-            reason: existing?.reason?.trim() || smartReference.reason,
-          },
+          ...(sourceNode.references ?? []),
+          smartReference,
         ],
       })
       setCanvasFocusNodeId(canvasConnectionDraft.nodeId)
@@ -755,17 +873,17 @@ export function MapPage() {
       const sourceNode = prdTree[sourceNodeId]
       const targetNode = prdTree[targetNodeId]
       if (!sourceNode || !targetNode || sourceNodeId === targetNodeId) return
-      const existing = (sourceNode.references ?? []).find((reference) => reference.targetNodeId === targetNodeId)
+      const items = buildFlowConnectionDraftItems(sourceNode, targetNode)
+      const hasExistingItems = items.some((item) => item.originalIndex !== null)
 
       setFlowConnectionDraft({
         isOpen: true,
         mode: direction,
         sourceNodeId,
         targetNodeId,
-        originalSourceNodeId: existing ? sourceNodeId : null,
-        originalTargetNodeId: existing?.targetNodeId ?? null,
-        label: existing?.label ?? `${sourceNode.label} → ${targetNode.label}`,
-        reason: existing?.reason ?? '',
+        originalSourceNodeId: hasExistingItems ? sourceNodeId : null,
+        originalTargetNodeId: hasExistingItems ? targetNodeId : null,
+        items,
       })
     }
 
@@ -773,7 +891,6 @@ export function MapPage() {
       const sourceNode = prdTree[sourceNodeId]
       const targetNode = prdTree[targetNodeId]
       if (!sourceNode || !targetNode) return
-      const existing = (sourceNode.references ?? []).find((reference) => reference.targetNodeId === targetNodeId)
 
       setFlowConnectionDraft({
         isOpen: true,
@@ -782,13 +899,30 @@ export function MapPage() {
         targetNodeId,
         originalSourceNodeId: sourceNodeId,
         originalTargetNodeId: targetNodeId,
-        label: existing?.label ?? `${sourceNode.label} → ${targetNode.label}`,
-        reason: existing?.reason ?? '',
+        items: buildFlowConnectionDraftItems(sourceNode, targetNode),
       })
     }
 
     const closeFlowConnectionDraft = () => {
       setFlowConnectionDraft(null)
+    }
+
+    const updateFlowConnectionDraftItem = (itemIndex: number, patch: Partial<Pick<FlowConnectionDraftItem, 'label' | 'reason'>>) => {
+      if (!flowConnectionDraft) return
+      setFlowConnectionDraft({
+        ...flowConnectionDraft,
+        items: flowConnectionDraft.items.map((item, index) => (
+          index === itemIndex ? { ...item, ...patch } : item
+        )),
+      })
+    }
+
+    const deleteFlowConnectionDraftItem = (itemIndex: number) => {
+      if (!flowConnectionDraft || flowConnectionDraft.items.length <= 1) return
+      setFlowConnectionDraft({
+        ...flowConnectionDraft,
+        items: flowConnectionDraft.items.filter((_, index) => index !== itemIndex),
+      })
     }
 
     const saveFlowConnectionDraft = () => {
@@ -797,12 +931,16 @@ export function MapPage() {
       const targetNode = prdTree[flowConnectionDraft.targetNodeId]
       if (!sourceNode || !targetNode || sourceNode.id === targetNode.id) return
 
-      const nextReference: PrdNodeReference = {
+      const fallbackLabel = defaultFlowConnectionLabel(sourceNode, targetNode)
+      const draftItems = flowConnectionDraft.items.length
+        ? flowConnectionDraft.items
+        : [{ originalIndex: null, label: fallbackLabel, reason: '' }]
+      const nextReferences: PrdNodeReference[] = draftItems.map((item) => ({
         targetNodeId: targetNode.id,
-        label: flowConnectionDraft.label.trim() || `${sourceNode.label} → ${targetNode.label}`,
-        reason: flowConnectionDraft.reason.trim() || null,
+        label: item.label.trim() || fallbackLabel,
+        reason: item.reason.trim() || null,
         sourceNodeId: sourceNode.id,
-      }
+      }))
 
       if (flowConnectionDraft.originalSourceNodeId && flowConnectionDraft.originalSourceNodeId !== sourceNode.id) {
         const originalSource = prdTree[flowConnectionDraft.originalSourceNodeId]
@@ -819,7 +957,7 @@ export function MapPage() {
         reference.targetNodeId !== targetNode.id
         && !(flowConnectionDraft.originalSourceNodeId === sourceNode.id && reference.targetNodeId === flowConnectionDraft.originalTargetNodeId)
       ))
-      updateNode(sourceNode.id, { references: [...references, nextReference] })
+      updateNode(sourceNode.id, { references: [...references, ...nextReferences] })
       setCanvasFocusNodeId(sourceNode.id)
       setSelectedNodeId(null)
       closeFlowConnectionDraft()
@@ -1009,6 +1147,54 @@ export function MapPage() {
       navigate('/qa')
     }
 
+    const handleSmartArrange = () => {
+      clearCanvasNodePositions()
+      setCanvasConnectionDraft(null)
+      setSmartArrangeFitRequest((value) => value + 1)
+    }
+
+    const handleBatchGenerateFigmaDrafts = async () => {
+      const latest = useAppStore.getState()
+      const latestTree = latest.prdTree ?? prdTree
+      const targets = collectPendingFigmaDraftTargets(latestTree, latest.nodePrototypeStates)
+      if (!targets.length || isGeneratingFigmaDrafts) return
+
+      const confirmed = window.confirm(
+        `Will generate first draft prototypes for ${targets.length} Figma-bound node(s). Existing prototypes will be skipped. Continue?`,
+      )
+      if (!confirmed) return
+
+      setIsGeneratingFigmaDrafts(true)
+      setFigmaDraftBatchStatus(`Preparing ${targets.length} Figma draft prototype(s)...`)
+      setProjectError(null)
+      let generated = 0
+      let failed = 0
+
+      for (let index = 0; index < targets.length; index += 1) {
+        const current = useAppStore.getState()
+        const currentTree = current.prdTree ?? latestTree
+        const currentNode = currentTree[targets[index].id]
+        if (!currentNode) continue
+        const currentState = current.nodePrototypeStates[currentNode.id]
+        const currentSource = getNodeFigmaDraftSource(currentNode)
+        if (!currentSource || nodeHasGeneratedPrototype(currentState) || nodeHasPrototypeInFlight(currentState)) continue
+
+        setFigmaDraftBatchStatus(`Generating ${index + 1}/${targets.length}: ${currentNode.label}`)
+        try {
+          await generateFigmaDraftForNode(currentNode, currentTree, `Batch Figma draft ${index + 1}/${targets.length}`)
+          generated += 1
+        } catch {
+          failed += 1
+        }
+      }
+
+      setIsGeneratingFigmaDrafts(false)
+      setFigmaDraftBatchStatus(`Figma draft batch complete: ${generated} generated, ${failed} failed.`)
+      if (failed > 0) {
+        setProjectError(`Figma draft batch finished with ${failed} failed node(s). Check node chat messages for details, then retry after fixing token/link/API issues.`)
+      }
+    }
+
     return (
       <div className="w-full h-screen flex flex-col bg-background animate-fade-in overflow-hidden">
         <TopAppBar
@@ -1028,10 +1214,29 @@ export function MapPage() {
           onValidatePrototype={() => { void handleOpenProjectPrototype() }}
           canValidatePrototype={canValidatePrototype}
           prototypeValidationRiskCount={incompleteCompletionTargets.length}
+          onSmartArrange={handleSmartArrange}
+          canSmartArrange={Object.keys(displayTree).length > 1}
+          onBatchGenerateFigmaDrafts={() => { void handleBatchGenerateFigmaDrafts() }}
+          canBatchGenerateFigmaDrafts={pendingFigmaDraftTargets.length > 0 && !isGeneratingFigmaDrafts}
+          isBatchGeneratingFigmaDrafts={isGeneratingFigmaDrafts}
+          figmaDraftReadyCount={pendingFigmaDraftTargets.length}
+          figmaDraftTotalCount={figmaBoundNodeCount}
           onOpenAssets={() => setAssetWorkbenchOpen(true)}
           onOpenQa={handleOpenQaFromToolbar}
           qaOpenIssueCount={qaOpenIssueCount}
         />
+        {figmaDraftBatchStatus ? (
+          <div className="flex shrink-0 items-center gap-sm border-b border-tertiary/30 bg-tertiary/10 px-lg py-sm text-label-md text-on-surface-variant">
+            <span
+              className={['material-symbols-outlined text-tertiary', isGeneratingFigmaDrafts ? 'animate-spin' : ''].join(' ').trim()}
+              style={{ fontSize: '18px' }}
+            >
+              {isGeneratingFigmaDrafts ? 'sync' : 'auto_awesome'}
+            </span>
+            <span className="font-medium text-tertiary">Figma first drafts</span>
+            <span className="truncate">{figmaDraftBatchStatus}</span>
+          </div>
+        ) : null}
         {iterationInfo ? (
           <div className="flex shrink-0 flex-wrap items-center gap-sm border-b border-secondary/30 bg-secondary/10 px-lg py-sm text-label-md text-on-surface-variant">
             <span className="material-symbols-outlined text-secondary" style={{ fontSize: '18px' }}>difference</span>
@@ -1072,6 +1277,7 @@ export function MapPage() {
               selectedNodeId={canvasFocusNodeId}
               canvasNodePositions={canvasNodePositions}
               previewHtmlByNodeId={nodePreviewHtmlMap}
+              fitRequest={smartArrangeFitRequest}
               connectableNodeIds={connectableNodeIds}
               connectionDraft={canvasConnectionDraft}
               onNodeClick={(id) => {
@@ -1140,7 +1346,9 @@ export function MapPage() {
                       setFlowConnectionDraft({
                         ...flowConnectionDraft,
                         sourceNodeId,
-                        label: sourceNode && targetNode ? `${sourceNode.label} → ${targetNode.label}` : flowConnectionDraft.label,
+                        items: sourceNode && targetNode
+                          ? buildFlowConnectionDraftItems(sourceNode, targetNode)
+                          : flowConnectionDraft.items,
                       })
                     }}
                     className="h-10 rounded border border-outline-variant bg-surface-container-low px-sm text-body-sm text-on-surface outline-none focus:border-primary"
@@ -1162,7 +1370,9 @@ export function MapPage() {
                       setFlowConnectionDraft({
                         ...flowConnectionDraft,
                         targetNodeId,
-                        label: sourceNode && targetNode ? `${sourceNode.label} → ${targetNode.label}` : flowConnectionDraft.label,
+                        items: sourceNode && targetNode
+                          ? buildFlowConnectionDraftItems(sourceNode, targetNode)
+                          : flowConnectionDraft.items,
                       })
                     }}
                     className="h-10 rounded border border-outline-variant bg-surface-container-low px-sm text-body-sm text-on-surface outline-none focus:border-primary"
@@ -1175,25 +1385,59 @@ export function MapPage() {
               </div>
 
               <div className="space-y-md px-lg pb-lg">
-                <label className="flex min-w-0 flex-col gap-xs">
-                  <span className="font-label-md text-label-md text-on-surface-variant">线条标题</span>
-                  <input
-                    value={flowConnectionDraft.label}
-                    onChange={(event) => setFlowConnectionDraft({ ...flowConnectionDraft, label: event.target.value })}
-                    placeholder="例如：点击列表按钮打开帮助界面"
-                    className="h-10 rounded border border-outline-variant bg-surface-container-low px-sm text-body-sm text-on-surface outline-none focus:border-primary"
-                  />
-                </label>
+                <div className="flex items-center justify-between gap-sm">
+                  <span className="font-label-md text-label-md text-on-surface-variant">条件标题</span>
+                  {flowConnectionDraft.items.length > 1 ? (
+                    <span className="rounded border border-secondary/40 bg-secondary-container/20 px-xs py-[2px] text-code-sm text-secondary">
+                      {flowConnectionDraft.items.length} 条
+                    </span>
+                  ) : null}
+                </div>
 
-                <label className="flex min-w-0 flex-col gap-xs">
-                  <span className="font-label-md text-label-md text-on-surface-variant">条件 / 过程 / 备注</span>
-                  <textarea
-                    value={flowConnectionDraft.reason}
-                    onChange={(event) => setFlowConnectionDraft({ ...flowConnectionDraft, reason: event.target.value })}
-                    placeholder="例如：主界面点击“列表”先打开列表弹窗；列表中点击“帮助”选项后进入帮助界面。需要保留列表滚动位置。"
-                    className="min-h-[120px] rounded border border-outline-variant bg-surface-container-low p-sm text-body-sm leading-relaxed text-on-surface outline-none focus:border-primary"
-                  />
-                </label>
+                <div className="space-y-sm">
+                  {flowConnectionDraft.items.map((item, itemIndex) => (
+                    <div
+                      key={`${item.originalIndex ?? 'new'}-${itemIndex}`}
+                      className="space-y-sm rounded-lg border border-outline-variant bg-surface-container-low p-sm"
+                    >
+                      <div className="flex items-center justify-between gap-sm">
+                        <span className="font-label-md text-label-md text-on-surface">条件 {itemIndex + 1}</span>
+                        {flowConnectionDraft.items.length > 1 ? (
+                          <button
+                            type="button"
+                            onClick={() => deleteFlowConnectionDraftItem(itemIndex)}
+                            className="inline-flex h-8 items-center gap-xs rounded border border-error/40 px-sm text-label-md text-error transition-colors hover:bg-error/10"
+                            title="删除这个条件标题"
+                            aria-label={`删除条件 ${itemIndex + 1}`}
+                          >
+                            <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>delete</span>
+                            删除
+                          </button>
+                        ) : null}
+                      </div>
+
+                      <label className="flex min-w-0 flex-col gap-xs">
+                        <span className="font-label-md text-label-md text-on-surface-variant">线条标题</span>
+                        <input
+                          value={item.label}
+                          onChange={(event) => updateFlowConnectionDraftItem(itemIndex, { label: event.target.value })}
+                          placeholder="例如：点击列表按钮打开帮助界面"
+                          className="h-10 rounded border border-outline-variant bg-surface px-sm text-body-sm text-on-surface outline-none focus:border-primary"
+                        />
+                      </label>
+
+                      <label className="flex min-w-0 flex-col gap-xs">
+                        <span className="font-label-md text-label-md text-on-surface-variant">条件 / 过程 / 备注</span>
+                        <textarea
+                          value={item.reason}
+                          onChange={(event) => updateFlowConnectionDraftItem(itemIndex, { reason: event.target.value })}
+                          placeholder="例如：主界面点击“列表”先打开列表弹窗；列表中点击“帮助”选项后进入帮助界面。需要保留列表滚动位置。"
+                          className="min-h-[104px] rounded border border-outline-variant bg-surface p-sm text-body-sm leading-relaxed text-on-surface outline-none focus:border-primary"
+                        />
+                      </label>
+                    </div>
+                  ))}
+                </div>
 
                 {flowConnectionDraft.sourceNodeId === flowConnectionDraft.targetNodeId ? (
                   <div className="rounded border border-error/40 bg-error/10 px-sm py-xs text-body-sm text-error">
@@ -1204,7 +1448,9 @@ export function MapPage() {
 
               <footer className="flex flex-wrap items-center justify-between gap-sm border-t border-outline-variant bg-surface-container-low px-lg py-md">
                 <div>
-                  {flowConnectionDraft.originalSourceNodeId && flowConnectionDraft.originalTargetNodeId ? (
+                  {flowConnectionDraft.originalSourceNodeId
+                    && flowConnectionDraft.originalTargetNodeId
+                    && flowConnectionDraft.items.length === 1 ? (
                     <button
                       type="button"
                       onClick={deleteFlowConnectionDraft}
@@ -1370,12 +1616,14 @@ export function MapPage() {
 
   return (
     <div className="w-full h-screen flex items-center justify-center bg-background blueprint-grid overflow-hidden">
-      <div className="max-w-[480px] w-full mx-auto bg-surface-container-low border border-outline-variant rounded-xl p-12 shadow-2xl flex flex-col items-center gap-6">
+      <div className="max-w-[560px] w-full mx-auto bg-surface-container-low border border-outline-variant rounded-xl p-8 shadow-2xl flex flex-col items-center gap-6">
         <div className="w-full transition-opacity duration-300">
           {stage === 'upload' ? (
             <UploadCard
               onImportSources={handleImportSources}
               onOpenArchive={() => { void handleOpenArchive() }}
+              onConfigureEnvironment={() => setEnvironmentConfigOpen(true)}
+              proxyBaseUrl={settings.proxyBaseUrl}
               error={uploadError ?? projectError}
               workflowMode={projectWorkflow.mode}
               iterationCodebasePath={projectWorkflow.iteration?.codebasePath ?? ''}

@@ -74,6 +74,19 @@ function relationKey(source: string, target: string, label: string) {
   return `${source}->${target}:${label}`
 }
 
+function transitionLabel(transition: NonNullable<PrdNode['stateTransitions']>[number]) {
+  return transition.trigger ?? transition.effect ?? '状态流转'
+}
+
+function transitionNote(transition: NonNullable<PrdNode['stateTransitions']>[number]) {
+  return [
+    transition.effect,
+    transition.condition ? `条件：${transition.condition}` : null,
+    transition.source ? `来源：${transition.source}` : null,
+    transition.evidence.length ? `证据：${transition.evidence.join(' / ')}` : null,
+  ].filter(Boolean).join('\n') || null
+}
+
 function uniqueRelations(relations: FlowRelation[]) {
   const seen = new Set<string>()
   return relations.filter((relation) => {
@@ -126,6 +139,21 @@ function buildFlowRelations(node: PrdNode, tree?: PrdTree | null) {
     })
   }
 
+  for (const transition of node.stateTransitions ?? []) {
+    if (!transition.targetNodeId || transition.targetNodeId === node.id) continue
+    const target = tree[transition.targetNodeId]
+    if (!target) continue
+    const label = transitionLabel(transition)
+    downstream.push({
+      id: relationKey(node.id, target.id, `state:${transition.id}`),
+      node: target,
+      label,
+      note: transitionNote(transition),
+      icon: 'alt_route',
+      tone: 'secondary',
+    })
+  }
+
   for (const source of Object.values(tree)) {
     for (const reference of source.references ?? []) {
       if (reference.targetNodeId !== node.id) continue
@@ -135,6 +163,18 @@ function buildFlowRelations(node: PrdNode, tree?: PrdTree | null) {
         label: reference.label || '引用到当前',
         note: reference.reason,
         icon: 'call_received',
+        tone: 'secondary',
+      })
+    }
+    for (const transition of source.stateTransitions ?? []) {
+      if (source.id === node.id || transition.targetNodeId !== node.id) continue
+      const label = transitionLabel(transition)
+      upstream.push({
+        id: relationKey(source.id, node.id, `state:${transition.id}`),
+        node: source,
+        label,
+        note: transitionNote(transition),
+        icon: 'alt_route',
         tone: 'secondary',
       })
     }

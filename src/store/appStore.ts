@@ -7,7 +7,7 @@ import { normalizePerformanceSpec } from '../lib/performanceOrchestration'
 import { defaultAudienceForSpecLens, normalizeLegacyAudience, normalizeNodeLensFields, specLensFromLegacyAudience } from '../lib/prdNodeLens'
 import type { AppSettings, ChatMessage, RagSearchResult } from '../types/chat'
 import type { UXRequirementState } from '../types/uxRequirement'
-import type { CreatePageNodeInput, DecompositionStatus, DecompositionStep, MapAdjustmentOperation, PrdNode, PrdNodeBackendContractRef, PrdNodeDocumentField, PrdNodeDocumentSnapshot, PrdNodeEvidenceRef, PrdNodeOperationSuggestion, PrdNodePolishRevision, PrdNodeReference, PrdNodeSectionKey, PrdPerformanceSpec, PrdTree, UpdateNodePatch } from '../types/prdNode'
+import type { CreatePageNodeInput, DecompositionStatus, DecompositionStep, FigmaUxMapReviewSource, MapAdjustmentOperation, PrdNode, PrdNodeBackendContractRef, PrdNodeDocumentField, PrdNodeDocumentSnapshot, PrdNodeEvidenceRef, PrdNodeFigmaUxMapSlice, PrdNodeOperationSuggestion, PrdNodePolishRevision, PrdNodeReference, PrdNodeSectionKey, PrdPerformanceSpec, PrdStateTransition, PrdTree, PrdUiState, UpdateNodePatch } from '../types/prdNode'
 import type { PrototypeVariant } from '../types/prototypeVariant'
 import type { PrototypeSpec, PrototypeSpecMode } from '../types/prototypeSpec'
 import type { ProjectSourceDocument, ProjectWorkspaceSnapshot } from '../types/archive'
@@ -136,6 +136,130 @@ function normalizeReferences(value: PrdNodeReference[] | null | undefined): PrdN
       sourceNodeId: normalizeOptionalText(reference.sourceNodeId),
     }))
     .filter((reference) => reference.targetNodeId || reference.label)
+}
+
+const UI_STATE_KINDS = new Set<PrdUiState['kind']>([
+  'default',
+  'overlay',
+  'loading',
+  'success',
+  'error',
+  'empty',
+  'disabled',
+  'expanded',
+  'collapsed',
+  'localized',
+  'mirror',
+  'selected',
+  'variant',
+])
+
+function normalizeUiStateKind(value: unknown): PrdUiState['kind'] {
+  return typeof value === 'string' && UI_STATE_KINDS.has(value as PrdUiState['kind'])
+    ? value as PrdUiState['kind']
+    : 'variant'
+}
+
+function normalizeTextList(value: unknown, limit = 12) {
+  if (!Array.isArray(value)) return []
+  return Array.from(new Set(
+    value
+      .map((item) => normalizeOptionalText(item))
+      .filter((item): item is string => Boolean(item)),
+  )).slice(0, limit)
+}
+
+function normalizeConfidencePercent(value: unknown, fallback = 70) {
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, Math.min(100, Math.round(value)))
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number.parseInt(value, 10)
+    if (Number.isFinite(parsed)) return Math.max(0, Math.min(100, parsed))
+  }
+  return fallback
+}
+
+function normalizeUiStates(value: PrdUiState[] | null | undefined): PrdUiState[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const states = value
+    .map((state, index): PrdUiState | null => {
+      if (!state || typeof state !== 'object') return null
+      const candidate = state as unknown as Record<string, unknown>
+      const figmaNodeId = normalizeOptionalText(candidate.figmaNodeId ?? candidate.nodeId ?? candidate.node_id)
+      const label = normalizeOptionalText(candidate.label ?? candidate.name)
+      if (!figmaNodeId || !label) return null
+      return {
+        id: normalizeOptionalText(candidate.id) ?? `state-${index + 1}`,
+        label,
+        kind: normalizeUiStateKind(candidate.kind),
+        figmaNodeId,
+        sourceUrl: normalizeOptionalText(candidate.sourceUrl ?? candidate.source_url),
+        previewImageUrl: normalizeOptionalText(candidate.previewImageUrl ?? candidate.preview_image_url ?? candidate.imageUrl ?? candidate.image_url),
+        visibleTexts: normalizeTextList(candidate.visibleTexts ?? candidate.visible_texts),
+        annotations: normalizeTextList(candidate.annotations),
+        confidence: normalizeConfidencePercent(candidate.confidence),
+      }
+    })
+    .filter((state): state is PrdUiState => Boolean(state))
+  return states.length ? states : undefined
+}
+
+function normalizeStateTransitions(value: PrdStateTransition[] | null | undefined): PrdStateTransition[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const transitions = value
+    .map((transition, index): PrdStateTransition | null => {
+      if (!transition || typeof transition !== 'object') return null
+      const candidate = transition as unknown as Record<string, unknown>
+      const sourceNodeId = normalizeOptionalText(candidate.sourceNodeId ?? candidate.source_node_id)
+      const targetNodeId = normalizeOptionalText(candidate.targetNodeId ?? candidate.target_node_id)
+      if (!sourceNodeId || !targetNodeId) return null
+      return {
+        id: normalizeOptionalText(candidate.id) ?? `transition-${index + 1}`,
+        sourceNodeId,
+        sourceStateId: normalizeOptionalText(candidate.sourceStateId ?? candidate.source_state_id),
+        targetNodeId,
+        targetStateId: normalizeOptionalText(candidate.targetStateId ?? candidate.target_state_id),
+        trigger: normalizeOptionalText(candidate.trigger),
+        condition: normalizeOptionalText(candidate.condition),
+        effect: normalizeOptionalText(candidate.effect),
+        evidence: normalizeTextList(candidate.evidence, 8),
+        confidence: normalizeConfidencePercent(candidate.confidence, 65),
+        source: normalizeOptionalText(candidate.source) as PrdStateTransition['source'],
+      }
+    })
+    .filter((transition): transition is PrdStateTransition => Boolean(transition))
+  return transitions.length ? transitions : undefined
+}
+
+const FIGMA_UX_MAP_REVIEW_SOURCES = new Set<FigmaUxMapReviewSource>([
+  'heuristic',
+  'ai_review',
+  'ai_review_fallback',
+])
+
+function normalizeFigmaUxMapReviewSource(value: unknown): FigmaUxMapReviewSource {
+  return typeof value === 'string' && FIGMA_UX_MAP_REVIEW_SOURCES.has(value as FigmaUxMapReviewSource)
+    ? value as FigmaUxMapReviewSource
+    : 'heuristic'
+}
+
+function normalizeNodeFigmaUxMap(value: PrdNodeFigmaUxMapSlice | null | undefined): PrdNodeFigmaUxMapSlice | null | undefined {
+  if (value === null) return null
+  if (!value || typeof value !== 'object') return undefined
+  const candidate = value as unknown as Record<string, unknown>
+  const screenId = normalizeOptionalText(candidate.screenId ?? candidate.screen_id)
+  const screenLabel = normalizeOptionalText(candidate.screenLabel ?? candidate.screen_label)
+  if (!screenId || !screenLabel) return undefined
+  return {
+    screenId,
+    screenLabel,
+    sourceFrameIds: normalizeTextList(candidate.sourceFrameIds ?? candidate.source_frame_ids, 12),
+    stateIds: normalizeTextList(candidate.stateIds ?? candidate.state_ids, 24),
+    transitionIds: normalizeTextList(candidate.transitionIds ?? candidate.transition_ids, 24),
+    ambiguityIds: normalizeTextList(candidate.ambiguityIds ?? candidate.ambiguity_ids, 24),
+    reviewSource: normalizeFigmaUxMapReviewSource(candidate.reviewSource ?? candidate.review_source),
+    reviewConfidence: normalizeConfidencePercent(candidate.reviewConfidence ?? candidate.review_confidence, 70),
+    notes: normalizeTextList(candidate.notes, 8),
+  }
 }
 
 function normalizeBackendContracts(value: PrdNodeBackendContractRef[] | null | undefined): PrdNodeBackendContractRef[] | undefined {
@@ -296,6 +420,9 @@ function sanitizePatch(patch: UpdateNodePatch): UpdateNodePatch {
     evidenceRefs: patch.evidenceRefs,
     performanceSpec: patch.performanceSpec === undefined ? undefined : normalizePerformanceSpec(patch.performanceSpec),
     figmaPreviews: patch.figmaPreviews,
+    uiStates: patch.uiStates === undefined ? undefined : normalizeUiStates(patch.uiStates),
+    stateTransitions: patch.stateTransitions === undefined ? undefined : normalizeStateTransitions(patch.stateTransitions),
+    figmaUxMap: patch.figmaUxMap === undefined ? undefined : normalizeNodeFigmaUxMap(patch.figmaUxMap),
   }
 }
 
@@ -370,6 +497,10 @@ function mergeMapAdjustmentPatch(node: PrdNode, patch: UpdateNodePatch): PrdNode
       ? [...(node.evidenceRefs ?? []), ...sanitized.evidenceRefs]
       : node.evidenceRefs,
     performanceSpec: sanitized.performanceSpec ?? node.performanceSpec,
+    figmaPreviews: sanitized.figmaPreviews ?? node.figmaPreviews,
+    uiStates: sanitized.uiStates ?? node.uiStates,
+    stateTransitions: sanitized.stateTransitions ?? node.stateTransitions,
+    figmaUxMap: sanitized.figmaUxMap === undefined ? node.figmaUxMap : sanitized.figmaUxMap,
   })
 }
 
@@ -481,6 +612,9 @@ function normalizePrdTreeNode(node: PrdNode): PrdNode {
     sections: node.sections ?? {},
     backendContracts: normalizeBackendContracts(node.backendContracts),
     performanceSpec: normalizePerformanceSpec(node.performanceSpec),
+    uiStates: normalizeUiStates(node.uiStates),
+    stateTransitions: normalizeStateTransitions(node.stateTransitions),
+    figmaUxMap: normalizeNodeFigmaUxMap(node.figmaUxMap),
   })
 }
 
@@ -1160,6 +1294,7 @@ export interface AppStoreState {
   setPrdTree: (tree: PrdTree) => void
   setSelectedNodeId: (id: string | null) => void
   setCanvasNodePosition: (nodeId: string, position: CanvasNodePosition) => void
+  clearCanvasNodePositions: () => void
   setDecompositionStatus: (s: DecompositionStatus) => void
   appendDecompositionStep: (step: DecompositionStep) => void
   updateDecompositionStep: (index: number, update: Partial<DecompositionStep>) => void
@@ -2170,7 +2305,7 @@ export const useAppStore = create<AppStoreState>()(
       updateSettings: (settings) => set({ settings, archiveDirty: true }),
       resetSession: () => set({ messages: initialMessages, latestRag: null, prototypeHtml: null, prototypeHistory: [], prototypeVariants: [], selectedVariantIndex: -1, archiveDirty: true }),
       resetRequirement: () => set({ requirement: emptyRequirement, latestRag: null, prototypeHtml: null, prototypeHistory: [], prototypeVariants: [], selectedVariantIndex: -1, archiveDirty: true }),
-      setPrdTree: (prdTree) => set({ prdTree: normalizePrdTree(prdTree), archiveDirty: true }),
+      setPrdTree: (prdTree) => set({ prdTree: normalizePrdTree(prdTree), canvasNodePositions: {}, archiveDirty: true }),
       setSelectedNodeId: (selectedNodeId) => set({ selectedNodeId }),
       setCanvasNodePosition: (nodeId, position) =>
         set((state) => {
@@ -2183,6 +2318,12 @@ export const useAppStore = create<AppStoreState>()(
             archiveDirty: true,
           }
         }),
+      clearCanvasNodePositions: () =>
+        set((state) => (
+          Object.keys(state.canvasNodePositions).length === 0
+            ? state
+            : { canvasNodePositions: {}, archiveDirty: true }
+        )),
       setDecompositionStatus: (decompositionStatus) => set({ decompositionStatus }),
       appendDecompositionStep: (step) =>
         set((state) => ({ decompositionSteps: [...state.decompositionSteps, step] })),

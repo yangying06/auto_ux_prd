@@ -11,10 +11,20 @@ export const PROJECT_ARCHIVE_SCHEMA_VERSION = 1
 export const PROJECT_ARCHIVE_EXTENSION = 'gpf'
 export const PROJECT_ARCHIVE_MIME = 'application/vnd.gameux.promptforge+zip'
 
+export interface ProjectSourceFile {
+  path: string
+  name: string
+  size: number
+  chars: number
+  kind: 'document' | 'code' | 'config' | 'text'
+  truncated: boolean
+}
+
 export interface ProjectSourceDocument {
   filename: string
   text: string
   importedAt: string
+  files?: ProjectSourceFile[]
 }
 
 export interface ArchivedPrototypeVersion {

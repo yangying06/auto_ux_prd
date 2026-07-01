@@ -134,6 +134,88 @@ assertDeepEqual(node?.figmaPreviews, [
 ], 'figma preview update must persist through node patch sanitizer')
 
 useAppStore.getState().updateNode('page-a', {
+  uiStates: [
+    {
+      id: 'page-a-state-1',
+      label: '半屏浮层',
+      kind: 'overlay',
+      figmaNodeId: '22:1774',
+      sourceUrl: 'https://www.figma.com/design/example?node-id=22-1774',
+      previewImageUrl: '/assets/figma/main.png',
+      visibleTexts: ['赠送', 'AI定制'],
+      annotations: ['长按礼物图标打开AI礼物预览'],
+      confidence: 92,
+    },
+  ],
+  stateTransitions: [
+    {
+      id: 'transition-1',
+      sourceNodeId: 'page-a',
+      targetNodeId: 'page-a',
+      targetStateId: 'page-a-state-1',
+      trigger: '长按礼物图标',
+      condition: null,
+      effect: '打开AI礼物预览',
+      evidence: ['长按礼物图标打开AI礼物预览'],
+      confidence: 86,
+      source: 'frame_title',
+    },
+  ],
+  figmaUxMap: {
+    screenId: 'UX-SCREEN-01',
+    screenLabel: 'AI礼物预览',
+    sourceFrameIds: ['22:1774'],
+    stateIds: ['UX-SCREEN-01-STATE-01'],
+    transitionIds: ['UX-TRANSITION-01'],
+    ambiguityIds: ['UX-AMBIGUITY-01'],
+    reviewSource: 'ai_review',
+    reviewConfidence: 84,
+    notes: ['AI review preserved half-screen overlay as same-screen state.'],
+  },
+})
+
+node = useAppStore.getState().prdTree?.['page-a']
+assertDeepEqual(node?.uiStates, [
+  {
+    id: 'page-a-state-1',
+    label: '半屏浮层',
+    kind: 'overlay',
+    figmaNodeId: '22:1774',
+    sourceUrl: 'https://www.figma.com/design/example?node-id=22-1774',
+    previewImageUrl: '/assets/figma/main.png',
+    visibleTexts: ['赠送', 'AI定制'],
+    annotations: ['长按礼物图标打开AI礼物预览'],
+    confidence: 92,
+  },
+], 'ui state update must persist through node patch sanitizer')
+assertDeepEqual(node?.stateTransitions, [
+  {
+    id: 'transition-1',
+    sourceNodeId: 'page-a',
+    sourceStateId: null,
+    targetNodeId: 'page-a',
+    targetStateId: 'page-a-state-1',
+    trigger: '长按礼物图标',
+    condition: null,
+    effect: '打开AI礼物预览',
+    evidence: ['长按礼物图标打开AI礼物预览'],
+    confidence: 86,
+    source: 'frame_title',
+  },
+], 'state transition update must persist through node patch sanitizer')
+assertDeepEqual(node?.figmaUxMap, {
+  screenId: 'UX-SCREEN-01',
+  screenLabel: 'AI礼物预览',
+  sourceFrameIds: ['22:1774'],
+  stateIds: ['UX-SCREEN-01-STATE-01'],
+  transitionIds: ['UX-TRANSITION-01'],
+  ambiguityIds: ['UX-AMBIGUITY-01'],
+  reviewSource: 'ai_review',
+  reviewConfidence: 84,
+  notes: ['AI review preserved half-screen overlay as same-screen state.'],
+}, 'figma ux map slice update must persist through node patch sanitizer')
+
+useAppStore.getState().updateNode('page-a', {
   sections: {
     interaction: {
       summary: 'new flow summary',

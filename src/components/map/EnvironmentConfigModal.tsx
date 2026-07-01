@@ -26,6 +26,16 @@ export function EnvironmentConfigModal({
   const [mockDecompose, setMockDecompose] = useState(false)
   const [figmaToken, setFigmaToken] = useState('')
   const [figmaTokenTouched, setFigmaTokenTouched] = useState(false)
+  const [larkCliBin, setLarkCliBin] = useState('lark-cli')
+  const [larkIdentity, setLarkIdentity] = useState('user')
+  const [larkAppId, setLarkAppId] = useState('')
+  const [larkAppIdTouched, setLarkAppIdTouched] = useState(false)
+  const [larkAppSecret, setLarkAppSecret] = useState('')
+  const [larkAppSecretTouched, setLarkAppSecretTouched] = useState(false)
+  const [larkTenantAccessToken, setLarkTenantAccessToken] = useState('')
+  const [larkTenantAccessTokenTouched, setLarkTenantAccessTokenTouched] = useState(false)
+  const [larkUserAccessToken, setLarkUserAccessToken] = useState('')
+  const [larkUserAccessTokenTouched, setLarkUserAccessTokenTouched] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [isSaving, setIsSaving] = useState(false)
 
@@ -38,6 +48,16 @@ export function EnvironmentConfigModal({
     setMockDecompose(status?.values.MOCK_DECOMPOSE ?? false)
     setFigmaToken('')
     setFigmaTokenTouched(false)
+    setLarkCliBin(status?.values.LARK_CLI_BIN || 'lark-cli')
+    setLarkIdentity(status?.values.LARK_IDENTITY || 'user')
+    setLarkAppId('')
+    setLarkAppIdTouched(false)
+    setLarkAppSecret('')
+    setLarkAppSecretTouched(false)
+    setLarkTenantAccessToken('')
+    setLarkTenantAccessTokenTouched(false)
+    setLarkUserAccessToken('')
+    setLarkUserAccessTokenTouched(false)
     setError(null)
   }, [open, status])
 
@@ -45,6 +65,10 @@ export function EnvironmentConfigModal({
 
   const apiKeyMissing = !status?.values.ANTHROPIC_API_KEY_PRESENT
   const figmaMissing = !status?.values.FIGMA_TOKEN_PRESENT
+  const larkAppIdMissing = !status?.values.LARK_APP_ID_PRESENT
+  const larkAppSecretMissing = !status?.values.LARK_APP_SECRET_PRESENT
+  const larkTenantTokenMissing = !status?.values.LARK_TENANT_ACCESS_TOKEN_PRESENT
+  const larkUserTokenMissing = !status?.values.LARK_USER_ACCESS_TOKEN_PRESENT
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -55,8 +79,14 @@ export function EnvironmentConfigModal({
         ANTHROPIC_BASE_URL: anthropicBaseUrl,
         CLAUDE_MODEL: claudeModel,
         MOCK_DECOMPOSE: mockDecompose,
+        LARK_CLI_BIN: larkCliBin,
+        LARK_IDENTITY: larkIdentity,
         ...(anthropicApiKeyTouched || apiKeyMissing ? { ANTHROPIC_API_KEY: anthropicApiKey } : {}),
         ...(figmaTokenTouched || figmaMissing ? { FIGMA_TOKEN: figmaToken } : {}),
+        ...(larkAppIdTouched || larkAppIdMissing ? { LARK_APP_ID: larkAppId } : {}),
+        ...(larkAppSecretTouched || larkAppSecretMissing ? { LARK_APP_SECRET: larkAppSecret } : {}),
+        ...(larkTenantAccessTokenTouched || larkTenantTokenMissing ? { LARK_TENANT_ACCESS_TOKEN: larkTenantAccessToken } : {}),
+        ...(larkUserAccessTokenTouched || larkUserTokenMissing ? { LARK_USER_ACCESS_TOKEN: larkUserAccessToken } : {}),
       }
       const nextStatus = await saveAiEnvironmentConfig(baseUrl, payload)
       onSaved(nextStatus)
@@ -128,6 +158,54 @@ export function EnvironmentConfigModal({
               onChange={(value) => {
                 setFigmaToken(value)
                 setFigmaTokenTouched(true)
+              }}
+            />
+            <div className="rounded-lg border border-outline-variant bg-surface-container px-md py-sm">
+              <div className="font-mono text-code-sm uppercase text-secondary">LARK / FEISHU</div>
+              <p className="mt-xs text-body-sm text-on-surface-variant">
+                飞书文档导入优先复用本机 lark-cli；需要用户态文档权限时，请先完成 lark-cli 授权或填入可用 token。
+              </p>
+            </div>
+            <TextField label="LARK_CLI_BIN" value={larkCliBin} onChange={setLarkCliBin} />
+            <TextField label="LARK_IDENTITY" value={larkIdentity} onChange={setLarkIdentity} />
+            <SecretField
+              label="LARK_APP_ID"
+              value={larkAppId}
+              present={!larkAppIdMissing}
+              required={false}
+              onChange={(value) => {
+                setLarkAppId(value)
+                setLarkAppIdTouched(true)
+              }}
+            />
+            <SecretField
+              label="LARK_APP_SECRET"
+              value={larkAppSecret}
+              present={!larkAppSecretMissing}
+              required={false}
+              onChange={(value) => {
+                setLarkAppSecret(value)
+                setLarkAppSecretTouched(true)
+              }}
+            />
+            <SecretField
+              label="LARK_TENANT_ACCESS_TOKEN"
+              value={larkTenantAccessToken}
+              present={!larkTenantTokenMissing}
+              required={false}
+              onChange={(value) => {
+                setLarkTenantAccessToken(value)
+                setLarkTenantAccessTokenTouched(true)
+              }}
+            />
+            <SecretField
+              label="LARK_USER_ACCESS_TOKEN"
+              value={larkUserAccessToken}
+              present={!larkUserTokenMissing}
+              required={false}
+              onChange={(value) => {
+                setLarkUserAccessToken(value)
+                setLarkUserAccessTokenTouched(true)
               }}
             />
           </div>

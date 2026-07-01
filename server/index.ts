@@ -15,11 +15,13 @@ import { applyPrototypeEdit, normalizeGeneratedPrototypeHtml, normalizePrototype
 import type { UXRequirementState } from '../src/types/uxRequirement'
 import type { ProjectSourceDocument } from '../src/types/archive'
 import type { PrototypeAssetAuditIssue, PrototypeAssetManifest, PrototypeInterfaceBlueprint, PrototypeInterfaceBlueprintNode, PrototypeInterfaceRect, PrototypeSpineAsset } from '../src/types/prototypeAssets'
-import type { DocumentKeywordSignal, DocumentSourceIndex, DocumentSourceIssue, DocumentSourceSection, MapAdjustmentOperation, PrdImportCandidateNode, PrdImportPreview, PrdNode, PrdNodeAudience, PrdNodeBackendContractKind, PrdNodeBackendContractRef, PrdNodeEvidenceRef, PrdNodeFigmaPreview, PrdNodeOperationPatch, PrdNodeOperationSuggestion, PrdNodeReference, PrdNodeSectionKey, PrdNodeSourceKind, PrdNodeStatus } from '../src/types/prdNode'
+import type { DocumentKeywordSignal, DocumentSourceIndex, DocumentSourceIssue, DocumentSourceSection, FigmaUxMap, FigmaUxMapScreen, FigmaUxMapState, FigmaUxMapTransition, FigmaUxMapTransitionSource, MapAdjustmentOperation, PrdImportCandidateNode, PrdImportPreview, PrdNode, PrdNodeAudience, PrdNodeBackendContractKind, PrdNodeBackendContractRef, PrdNodeEvidenceRef, PrdNodeFigmaPreview, PrdNodeFigmaUxMapSlice, PrdNodeOperationPatch, PrdNodeOperationSuggestion, PrdNodeReference, PrdNodeSectionKey, PrdNodeSourceKind, PrdNodeStatus, PrdStateTransition } from '../src/types/prdNode'
 import type { ChatMessage as AppChatMessage, ReferenceImageClassificationRequest, ReferenceImageClassificationResponse, ReferenceImageRole } from '../src/types/chat'
 import type { QaAttachment, QaChatRequest, QaChatResponse, QaIssuePatch, QaIssuePriority, QaIssueSeverity } from '../src/types/qa'
 import { contentDispositionHeader } from './exportHeaders'
+import { buildFigmaPrdAlignment, type FigmaPrdAlignmentGroup, type FigmaPrdAlignmentMatch, type FigmaPrdAlignmentSection } from './figmaPrdAlignment'
 import { collectFigmaNumericTextSlots, redactNumericTextFromPng } from './figmaNumericText'
+import { buildFigmaUiStatesForFrames, buildHeuristicFigmaUxMap, chooseFigmaMetaTargetEndpointIndex, chooseStableFigmaLineMergeCandidate, classifyFigmaUiState, collectNearbyFigmaAnnotations, createFigmaStateTransition, extractFigmaStateTransitionCue, figmaUiStateKindLabel, isStrictFigmaInterfaceFrameSize, normalizeFigmaScreenFamilyLabel, normalizeFigmaUxMap, uniqueFigmaStateTransitions, type FigmaAnnotationCandidate } from './figmaSemantics'
 import { extractNodeChatSuffix } from './nodeChatResponse'
 import { auditPrototypeAssets, buildPrototypeAssetManifestSection, normalizePrototypeAssetManifest } from './prototypeAssetAudit'
 import { buildVariantConfigs, clampVariantCount, DEFAULT_CREATE_VARIANTS, DEFAULT_UPDATE_VARIANTS } from './prototypePrompts'
@@ -41,6 +43,12 @@ const DEFAULT_ENV_CONFIG = {
   CLAUDE_MODEL: 'gpt-5.5',
   MOCK_DECOMPOSE: 'false',
   FIGMA_TOKEN: '',
+  LARK_CLI_BIN: 'lark-cli',
+  LARK_IDENTITY: 'user',
+  LARK_APP_ID: '',
+  LARK_APP_SECRET: '',
+  LARK_TENANT_ACCESS_TOKEN: '',
+  LARK_USER_ACCESS_TOKEN: '',
 } as const
 let model = process.env.CLAUDE_MODEL ?? 'claude-sonnet-4-6'
 const SESSION_CLEANUP_DELAY_MS = 5 * 60 * 1000
@@ -54,6 +62,7 @@ const SPEC_EXPORT_ROOT = path.resolve(process.cwd(), 'generated', 'specs')
 const ASSET_WORKBENCH_CACHE_ROOT = path.resolve(process.cwd(), '.cache')
 const FIGMA_ASSET_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'figma-assets')
 const FIGMA_INTERMEDIATE_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'figma-intermediates')
+const LARK_MEDIA_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'lark-media')
 const EFFECT_ASSET_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'effect-assets')
 const AUDIO_ASSET_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'audio-assets')
 const SPINE_PLAYER_RUNTIME_ROOT = path.resolve(process.cwd(), 'node_modules', '@esotericsoftware', 'spine-player', 'dist')
@@ -72,6 +81,9 @@ const FIGMA_IMAGE_SCALE = Math.min(3, Math.max(0.5, Number.parseFloat(process.en
 const FIGMA_MAX_IMAGE_BYTES = Math.max(512 * 1024, Number.parseInt(process.env.FIGMA_MAX_IMAGE_BYTES ?? `${4 * 1024 * 1024}`, 10))
 const FIGMA_IMAGE_EXPORT_RETRY_ATTEMPTS = Math.min(3, Math.max(1, Number.parseInt(process.env.FIGMA_IMAGE_EXPORT_RETRY_ATTEMPTS ?? '2', 10)))
 const FIGMA_IMAGE_EXPORT_RETRY_DELAY_MS = Math.max(100, Number.parseInt(process.env.FIGMA_IMAGE_EXPORT_RETRY_DELAY_MS ?? '700', 10))
+const LARK_IMPORT_MAX_IMAGES = Math.min(6, Math.max(0, Number.parseInt(process.env.LARK_IMPORT_MAX_IMAGES ?? '4', 10)))
+const LARK_IMPORT_MAX_IMAGE_BYTES = Math.max(128 * 1024, Number.parseInt(process.env.LARK_IMPORT_MAX_IMAGE_BYTES ?? `${1200 * 1024}`, 10))
+const LARK_CLI_TIMEOUT_MS = Math.max(5000, Number.parseInt(process.env.LARK_CLI_TIMEOUT_MS ?? '45000', 10))
 const EFFECT_SCAN_MAX_DEPTH = Math.max(1, Number.parseInt(process.env.EFFECT_SCAN_MAX_DEPTH ?? '5', 10))
 const EFFECT_SCAN_MAX_FILES = Math.max(20, Number.parseInt(process.env.EFFECT_SCAN_MAX_FILES ?? '1200', 10))
 
@@ -1731,12 +1743,26 @@ function buildPrdImportPreview(mdText: string): PrdImportPreview {
 interface DecompositionSourceRequest {
   mdText?: unknown
   mdFilename?: unknown
+  sourceText?: unknown
+  sourceFilename?: unknown
+  sourceImages?: unknown
   figmaUrl?: unknown
+}
+
+type SupportedSourceImageMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
+
+interface NormalizedSourceImage {
+  name: string
+  mediaType: SupportedSourceImageMediaType
+  data: string
+  sourceUrl: string | null
+  token: string | null
 }
 
 interface NormalizedDecompositionSources {
   mdText: string | null
   mdFilename: string | null
+  sourceImages: NormalizedSourceImage[]
   figmaUrl: string | null
 }
 
@@ -1753,6 +1779,11 @@ interface FigmaDesignEvidenceFrame {
   height: number
   childNames: string[]
   visibleTexts: string[]
+  annotations: string[]
+  interactionTips: string[]
+  stateKind: ReturnType<typeof classifyFigmaUiState>['kind']
+  stateLabel: string
+  stateConfidence: number
   sourceUrl: string
   assetUrl?: string | null
 }
@@ -1769,7 +1800,7 @@ interface FigmaDesignEvidenceRelation {
   label: string
   reason: string
   confidence: number
-  source: 'figma_connector' | 'prd_text' | 'canvas_order'
+  source: FigmaUxMapTransitionSource
 }
 
 interface FigmaDesignEvidence {
@@ -1781,11 +1812,14 @@ interface FigmaDesignEvidence {
   rootBounds: string
   groups: FigmaDesignEvidenceGroup[]
   relations: FigmaDesignEvidenceRelation[]
+  figmaUxMap: FigmaUxMap | null
 }
 
 interface CombinedDecompositionInput {
   text: string
+  rawPrdText: string | null
   figmaEvidence: FigmaDesignEvidence | null
+  imageBlocks: Anthropic.ImageBlockParam[]
 }
 
 const FIGMA_EVIDENCE_MAX_FRAMES = 120
@@ -1793,21 +1827,92 @@ const FIGMA_EVIDENCE_MAX_TEXTS_PER_FRAME = 10
 const FIGMA_EVIDENCE_MAX_CHILD_NAMES = 10
 const FIGMA_PREVIEW_EXPORT_CONCURRENCY = 3
 const FIGMA_PREVIEW_EXPORT_TIMEOUT_MS = Math.max(500, Number.parseInt(process.env.FIGMA_PREVIEW_EXPORT_TIMEOUT_MS ?? '8000', 10))
+const FIGMA_UX_MAP_REVIEW_TIMEOUT_MS = Math.max(1000, Number.parseInt(process.env.FIGMA_UX_MAP_REVIEW_TIMEOUT_MS ?? '25000', 10))
 
 function normalizeOptionalSourceText(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 
+const SUPPORTED_SOURCE_IMAGE_MEDIA_TYPES = new Set<SupportedSourceImageMediaType>([
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+])
+
+function normalizeSourceImageMediaType(value: unknown): SupportedSourceImageMediaType | null {
+  return typeof value === 'string' && SUPPORTED_SOURCE_IMAGE_MEDIA_TYPES.has(value as SupportedSourceImageMediaType)
+    ? value as SupportedSourceImageMediaType
+    : null
+}
+
+function normalizeBase64ImageData(value: unknown) {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!trimmed || !/^[A-Za-z0-9+/]+={0,2}$/u.test(trimmed)) return null
+  return trimmed
+}
+
+function normalizeDecompositionSourceImages(value: unknown): NormalizedSourceImage[] {
+  if (!Array.isArray(value)) return []
+
+  return value
+    .slice(0, LARK_IMPORT_MAX_IMAGES)
+    .map((item, index): NormalizedSourceImage | null => {
+      if (!item || typeof item !== 'object') return null
+      const candidate = item as Record<string, unknown>
+      const mediaType = normalizeSourceImageMediaType(candidate.mediaType ?? candidate.media_type)
+      const data = normalizeBase64ImageData(candidate.data)
+      if (!mediaType || !data) return null
+      return {
+        name: normalizeOptionalSourceText(candidate.name) ?? `source-image-${index + 1}`,
+        mediaType,
+        data,
+        sourceUrl: normalizeOptionalSourceText(candidate.sourceUrl ?? candidate.source_url),
+        token: normalizeOptionalSourceText(candidate.token),
+      }
+    })
+    .filter((image): image is NormalizedSourceImage => Boolean(image))
+}
+
+function sourceImagesToAnthropicBlocks(images: NormalizedSourceImage[]): Anthropic.ImageBlockParam[] {
+  return images.map((image) => ({
+    type: 'image',
+    source: {
+      type: 'base64',
+      media_type: image.mediaType,
+      data: image.data,
+    },
+  }))
+}
+
+function buildSourceImageEvidenceMarkdown(images: NormalizedSourceImage[]) {
+  if (!images.length) return ''
+  return [
+    '# 导入图片资料',
+    '',
+    '以下图片来自导入来源，已随本次拆解请求作为视觉证据提供给模型。图片主要用于补充页面结构、布局状态、视觉反馈、图示规则和素材依赖判断。',
+    '',
+    ...images.map((image, index) => [
+      `## 图片 ${index + 1}：${image.name}`,
+      image.sourceUrl ? `- 来源 URL：${image.sourceUrl}` : null,
+      image.token ? `- 飞书素材 token：${image.token}` : null,
+      `- 类型：${image.mediaType}`,
+    ].filter(Boolean).join('\n')),
+  ].join('\n\n')
+}
+
 function normalizeDecompositionSources(body: DecompositionSourceRequest): NormalizedDecompositionSources {
-  const mdText = normalizeOptionalSourceText(body.mdText)
-  const mdFilename = normalizeOptionalSourceText(body.mdFilename)
+  const mdText = normalizeOptionalSourceText(body.sourceText) ?? normalizeOptionalSourceText(body.mdText)
+  const mdFilename = normalizeOptionalSourceText(body.sourceFilename) ?? normalizeOptionalSourceText(body.mdFilename)
+  const sourceImages = normalizeDecompositionSourceImages(body.sourceImages)
   const figmaUrl = normalizeOptionalSourceText(body.figmaUrl)
 
-  if (!mdText && !figmaUrl) {
-    throw new Error('请至少提供 Figma 设计稿链接或 Markdown PRD 文档。')
+  if (!mdText && !figmaUrl && sourceImages.length === 0) {
+    throw new Error('请至少提供 Figma 设计稿链接或可分析的导入素材。')
   }
 
-  return { mdText, mdFilename, figmaUrl }
+  return { mdText, mdFilename, sourceImages, figmaUrl }
 }
 
 function getConfiguredFigmaToken() {
@@ -1862,6 +1967,84 @@ function collectFigmaVisibleTexts(root: FigmaApiNode, maxItems = FIGMA_EVIDENCE_
   return texts
 }
 
+function figmaTextList(values: Array<string | null | undefined>, maxItems: number) {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const value of values) {
+    const text = compactFigmaText(value, 220)
+    const key = text.toLocaleLowerCase()
+    if (!text || seen.has(key)) continue
+    seen.add(key)
+    result.push(text)
+    if (result.length >= maxItems) break
+  }
+  return result
+}
+
+function isFigmaInteractionTipText(text: string, name: string, path: string) {
+  const haystack = `${name} ${text} ${path}`.toLocaleLowerCase()
+  if (haystack.includes('interaction') || haystack.includes('tips') || haystack.includes('/ tip') || haystack.includes(' / tip')) return true
+  if (!haystack.includes('tip')) return false
+  return /tap|click|press|long\s*press|open|show|preview|jump|navigate|return|close|confirm|cancel/i.test(haystack)
+}
+
+function formatFigmaInteractionTip(text: string) {
+  const compacted = compactFigmaText(text, 180)
+  return compacted ? `Interaction tip: ${compacted}` : ''
+}
+
+function collectFigmaAnnotationCandidates(root: FigmaApiNode) {
+  const candidates: FigmaAnnotationCandidate[] = []
+  const seen = new Set<string>()
+
+  function walk(node: FigmaApiNode, path: string[]) {
+    if (node.visible === false) return
+    const currentPath = [...path, node.name]
+    if (node.type === 'TEXT') {
+      const text = compactFigmaText(node.characters, 180)
+      const bounds = figmaNodeBounds(node)
+      const key = bounds ? `${text}:${Math.round(bounds.x)}:${Math.round(bounds.y)}` : text
+      if (text && bounds && !seen.has(key)) {
+        seen.add(key)
+        const sourcePath = currentPath.join(' / ')
+        candidates.push({
+          id: node.id,
+          text,
+          x: bounds.x,
+          y: bounds.y,
+          width: bounds.width,
+          height: bounds.height,
+          kind: isFigmaInteractionTipText(text, node.name, sourcePath) ? 'interaction_tip' : 'annotation',
+          path: sourcePath,
+        })
+      }
+    }
+    for (const child of node.children ?? []) walk(child, currentPath)
+  }
+
+  walk(root, [])
+  return candidates
+}
+
+function annotationCenterInsideFrame(candidate: FigmaAnnotationCandidate, frame: FigmaDesignEvidenceFrame) {
+  const cx = candidate.x + candidate.width / 2
+  const cy = candidate.y + candidate.height / 2
+  return cx >= frame.x && cx <= frame.x + frame.width && cy >= frame.y && cy <= frame.y + frame.height
+}
+
+function collectFigmaInteractionTipsForFrame(
+  frame: FigmaDesignEvidenceFrame,
+  candidates: FigmaAnnotationCandidate[],
+  maxItems = 8,
+) {
+  return figmaTextList(
+    candidates
+      .filter((candidate) => candidate.kind === 'interaction_tip' && annotationCenterInsideFrame(candidate, frame))
+      .map((candidate) => formatFigmaInteractionTip(candidate.text)),
+    maxItems,
+  )
+}
+
 function isGenericFigmaFrameName(name: string) {
   return /^(Container|Frame\s+\d+|Group\s+\d+|Group\s+\d+备份.*|Section\s+\d+|Vector\s+\d+|icon\d*|image\s+\d+)$/iu.test(name)
     || /^编组(?:\s*\d+)?(?:备份.*)?$/u.test(name)
@@ -1886,35 +2069,15 @@ function hasMeaningfulInterfaceName(name: string) {
 
 type FigmaInterfaceCandidateContext = 'selected' | 'canvas-child' | 'section-child' | 'frame-child'
 
-function isScreenSizedFigmaFrame(bounds: { width: number; height: number }) {
-  return (bounds.width >= 560 && bounds.height >= 900)
-    || (bounds.width >= 900 && bounds.height >= 560)
-}
-
-function isMobileViewportLikeFigmaFrame(bounds: { width: number; height: number }) {
-  return bounds.width >= 320 && bounds.height >= 560 && bounds.height / bounds.width >= 1.1
-}
-
-function isOverlaySizedFigmaFrame(bounds: { width: number; height: number }) {
-  return bounds.width >= 320 && bounds.height >= 180 && bounds.width * bounds.height >= 60000
-}
-
-function isLikelyInterfaceFrame(node: FigmaApiNode, context: FigmaInterfaceCandidateContext = 'canvas-child') {
+function isLikelyInterfaceFrame(node: FigmaApiNode, _context: FigmaInterfaceCandidateContext = 'canvas-child') {
   if (node.visible === false || node.type !== 'FRAME') return false
   const name = node.name.trim()
   if (!hasMeaningfulInterfaceName(name)) return false
 
   const bounds = figmaNodeBounds(node)
   if (!bounds) return false
-  const interfaceKeywordHit = /AI|礼物|生成|预览|输入|选择|规则|案例|背包|横幅|通知|空状态|道具库|标签|步骤|管理|页面|界面|主页|首页|房间|大厅|榜单|列表|详情|加载/iu.test(name)
-  const overlayKeywordHit = /弹窗|浮层|弹层|面板|下拉|提示|确认|结算|历史|详情|规则/iu.test(name)
-  if (isGenericViewportVariantName(name) && isMobileViewportLikeFigmaFrame(bounds)) return true
-  if (isScreenSizedFigmaFrame(bounds)) return true
-  if (interfaceKeywordHit && (isMobileViewportLikeFigmaFrame(bounds) || bounds.width >= 520 && bounds.height >= 360)) return true
-  if (overlayKeywordHit && isOverlaySizedFigmaFrame(bounds)) return true
-  return context === 'selected' && interfaceKeywordHit && isOverlaySizedFigmaFrame(bounds)
+  return isStrictFigmaInterfaceFrameSize(bounds.width, bounds.height)
 }
-
 function normalizedFigmaInterfaceLabel(name: string) {
   const variantTerms = [
     '默认',
@@ -1967,48 +2130,14 @@ function normalizedFigmaInterfaceLabel(name: string) {
     .trim()
 }
 
-function isGenericViewportVariantName(name: string) {
-  return /^(短屏示意|长屏示意)(?:[\s_\-—–].*)?$/u.test(name.trim())
-}
-
-function findSameRowHostFigmaFrame(frame: FigmaDesignEvidenceFrame, frames: FigmaDesignEvidenceFrame[]) {
-  if (!isGenericViewportVariantName(frame.name)) return null
-  const frameCenterY = frame.y + frame.height / 2
-  const frameCenterX = frame.x + frame.width / 2
-  return frames
-    .filter((candidate) => candidate.id !== frame.id && candidate.width >= 560 && candidate.height >= 900)
-    .filter((candidate) => !isGenericViewportVariantName(candidate.name))
-    .map((candidate) => {
-      const candidateCenterY = candidate.y + candidate.height / 2
-      const candidateCenterX = candidate.x + candidate.width / 2
-      return {
-        candidate,
-        dx: Math.abs(candidateCenterX - frameCenterX),
-        dy: Math.abs(candidateCenterY - frameCenterY),
-      }
-    })
-    .filter((item) => item.dy <= 220 && item.dx <= 1500)
-    .sort((a, b) => a.dx - b.dx || a.dy - b.dy)[0]?.candidate ?? null
-}
-
-function findNearestLargeFigmaFrame(frame: FigmaDesignEvidenceFrame, frames: FigmaDesignEvidenceFrame[]) {
-  if (frame.height >= 360) return null
-  const frameCenterX = frame.x + frame.width / 2
-  return frames
-    .filter((candidate) => candidate.id !== frame.id && candidate.width >= 700 && candidate.height >= 700)
-    .map((candidate) => {
-      const candidateCenterX = candidate.x + candidate.width / 2
-      const dx = Math.abs(frameCenterX - candidateCenterX)
-      const dy = frame.y - (candidate.y + candidate.height)
-      return { candidate, dx, dy }
-    })
-    .filter((item) => item.dx <= 180 && item.dy >= -120 && item.dy <= 1000)
-    .sort((a, b) => a.dy - b.dy || a.dx - b.dx)[0]?.candidate ?? null
-}
-
 function buildFigmaEvidenceFrame(node: FigmaApiNode, rootName: string, sourceUrl: string): FigmaDesignEvidenceFrame | null {
   const bounds = figmaNodeBounds(node)
   if (!bounds) return null
+  const visibleTexts = collectFigmaVisibleTexts(node)
+  const annotations = collectFigmaAnnotationCandidates(node)
+    .map((candidate) => candidate.text)
+    .slice(0, 6)
+  const classification = classifyFigmaUiState(node.name, null, [...visibleTexts, ...annotations])
   const childNames = sortFigmaChildrenByCanvasOrder(node.children ?? [])
     .filter((child) => child.visible !== false && isFigmaContainerType(child.type))
     .slice(0, FIGMA_EVIDENCE_MAX_CHILD_NAMES)
@@ -2026,7 +2155,12 @@ function buildFigmaEvidenceFrame(node: FigmaApiNode, rootName: string, sourceUrl
     width: bounds.width,
     height: bounds.height,
     childNames,
-    visibleTexts: collectFigmaVisibleTexts(node),
+    visibleTexts,
+    annotations,
+    interactionTips: [],
+    stateKind: classification.kind,
+    stateLabel: classification.label,
+    stateConfidence: classification.confidence,
     sourceUrl: figmaNodeSourceUrl(sourceUrl, node.id),
     assetUrl: null,
   }
@@ -2069,6 +2203,7 @@ function collectFigmaCandidateInterfaceNodes(root: FigmaApiNode) {
 }
 
 function collectFigmaInterfaceGroups(root: FigmaApiNode, sourceUrl: string) {
+  const annotationCandidates = collectFigmaAnnotationCandidates(root)
   const topLevelFrames = collectFigmaCandidateInterfaceNodes(root)
     .map((node) => buildFigmaEvidenceFrame(node, root.name, sourceUrl))
     .filter((frame): frame is FigmaDesignEvidenceFrame => Boolean(frame))
@@ -2076,22 +2211,38 @@ function collectFigmaInterfaceGroups(root: FigmaApiNode, sourceUrl: string) {
 
   const groups = new Map<string, FigmaDesignEvidenceGroup>()
   for (const frame of topLevelFrames) {
-    const nearestLargeFrame = findNearestLargeFigmaFrame(frame, topLevelFrames)
-    const sameRowHostFrame = findSameRowHostFigmaFrame(frame, topLevelFrames)
-    const groupLabel = normalizedFigmaInterfaceLabel(sameRowHostFrame?.name ?? nearestLargeFrame?.name ?? frame.name) || frame.name
+    const groupLabel = normalizeFigmaScreenFamilyLabel(frame.name)
+      || normalizedFigmaInterfaceLabel(frame.name)
+      || frame.name
     const key = groupLabel.toLocaleLowerCase()
     const existing = groups.get(key)
     if (existing) {
       existing.frames.push(frame)
-    } else {
-      groups.set(key, { key, label: groupLabel, frames: [frame] })
+      continue
     }
+
+    groups.set(key, { key, label: groupLabel, frames: [frame] })
   }
 
   return [...groups.values()]
     .map((group) => ({
       ...group,
-      frames: [...group.frames].sort((a, b) => a.y - b.y || a.x - b.x || a.name.localeCompare(b.name)),
+      frames: [...group.frames]
+        .sort((a, b) => a.y - b.y || a.x - b.x || a.name.localeCompare(b.name))
+        .map((frame) => {
+          const interactionTips = collectFigmaInteractionTipsForFrame(frame, annotationCandidates)
+          const nearbyAnnotations = collectNearbyFigmaAnnotations(frame, annotationCandidates)
+          const annotations = figmaTextList([...interactionTips, ...nearbyAnnotations], 10)
+          const classification = classifyFigmaUiState(frame.name, group.label, [...frame.visibleTexts, ...annotations])
+          return {
+            ...frame,
+            annotations,
+            interactionTips,
+            stateKind: classification.kind,
+            stateLabel: classification.label,
+            stateConfidence: classification.confidence,
+          }
+        }),
     }))
     .sort((a, b) => a.frames[0].y - b.frames[0].y || a.frames[0].x - b.frames[0].x || a.label.localeCompare(b.label))
 }
@@ -2107,6 +2258,8 @@ interface FigmaConnectorEndpoint extends FigmaPoint {
   meta?: number
 }
 
+type FigmaConnectorDirection = 'endpoint_meta' | 'arrow_cap' | 'visual_order' | 'line_merge'
+
 interface FigmaConnectorCandidate {
   id: string
   name: string
@@ -2115,6 +2268,18 @@ interface FigmaConnectorCandidate {
   sourceUrl: string
   strokeCap: string | null
   endpoints: [FigmaConnectorEndpoint, FigmaConnectorEndpoint]
+  allEndpoints: FigmaConnectorEndpoint[]
+  segments: Array<[FigmaConnectorEndpoint, FigmaConnectorEndpoint]>
+  direction: FigmaConnectorDirection
+}
+
+interface FigmaDirectedConnectorMatch {
+  connector: FigmaConnectorCandidate
+  source: FigmaDesignEvidenceGroup
+  target: FigmaDesignEvidenceGroup
+  sourcePoint: FigmaConnectorEndpoint
+  targetPoint: FigmaConnectorEndpoint
+  direction: Exclude<FigmaConnectorDirection, 'visual_order' | 'line_merge'>
 }
 
 function figmaFrameRect(frame: FigmaDesignEvidenceFrame) {
@@ -2162,13 +2327,99 @@ function isFigmaConnectorStroke(node: FigmaApiNode) {
   return hasArrowCap || hasFlowColor
 }
 
+function openFigmaVectorEndpoints(node: FigmaApiNode): FigmaConnectorEndpoint[] {
+  const bounds = figmaNodeBounds(node)
+  const vertices = node.vectorNetwork?.vertices ?? []
+  if (!bounds || vertices.length < 2) return []
+
+  const degree = new Map<number, number>()
+  for (const segment of node.vectorNetwork?.segments ?? []) {
+    if (typeof segment.start !== 'number' || typeof segment.end !== 'number') continue
+    degree.set(segment.start, (degree.get(segment.start) ?? 0) + 1)
+    degree.set(segment.end, (degree.get(segment.end) ?? 0) + 1)
+  }
+
+  return vertices
+    .map((vertex, index): FigmaConnectorEndpoint | null => {
+      const x = vertex.position?.x
+      const y = vertex.position?.y
+      if (typeof x !== 'number' || typeof y !== 'number') return null
+      return {
+        x: bounds.x + x,
+        y: bounds.y + y,
+        index,
+        degree: degree.get(index) ?? 0,
+        meta: vertex.meta,
+      }
+    })
+    .filter((endpoint): endpoint is FigmaConnectorEndpoint => Boolean(endpoint))
+    .filter((endpoint) => endpoint.degree <= 1)
+}
+
+function figmaVectorNetworkPoints(node: FigmaApiNode): FigmaConnectorEndpoint[] {
+  const bounds = figmaNodeBounds(node)
+  const vertices = node.vectorNetwork?.vertices ?? []
+  if (!bounds || vertices.length < 2) return []
+
+  const degree = new Map<number, number>()
+  for (const segment of node.vectorNetwork?.segments ?? []) {
+    if (typeof segment.start !== 'number' || typeof segment.end !== 'number') continue
+    degree.set(segment.start, (degree.get(segment.start) ?? 0) + 1)
+    degree.set(segment.end, (degree.get(segment.end) ?? 0) + 1)
+  }
+
+  return vertices
+    .map((vertex, index): FigmaConnectorEndpoint | null => {
+      const x = vertex.position?.x
+      const y = vertex.position?.y
+      if (typeof x !== 'number' || typeof y !== 'number') return null
+      return {
+        x: bounds.x + x,
+        y: bounds.y + y,
+        index,
+        degree: degree.get(index) ?? 0,
+        meta: vertex.meta,
+      }
+    })
+    .filter((point): point is FigmaConnectorEndpoint => Boolean(point))
+}
+
+function figmaVectorNetworkSegments(node: FigmaApiNode): Array<[FigmaConnectorEndpoint, FigmaConnectorEndpoint]> {
+  const points = figmaVectorNetworkPoints(node)
+  if (!points.length) return []
+  const byIndex = new Map(points.map((point) => [point.index, point]))
+  return (node.vectorNetwork?.segments ?? [])
+    .map((segment): [FigmaConnectorEndpoint, FigmaConnectorEndpoint] | null => {
+      if (typeof segment.start !== 'number' || typeof segment.end !== 'number') return null
+      const start = byIndex.get(segment.start)
+      const end = byIndex.get(segment.end)
+      return start && end ? [start, end] : null
+    })
+    .filter((segment): segment is [FigmaConnectorEndpoint, FigmaConnectorEndpoint] => Boolean(segment))
+}
+
+function endpointDistance(a: FigmaPoint, b: FigmaPoint) {
+  return Math.hypot(a.x - b.x, a.y - b.y)
+}
+
+function hasMeaningfulFigmaConnectorEndpoints(node: FigmaApiNode) {
+  if (node.type === 'VECTOR') {
+    const endpoints = openFigmaVectorEndpoints(node)
+    const pair = farthestFigmaEndpointPair(endpoints)
+    return Boolean(pair && endpointDistance(pair[0], pair[1]) >= 56)
+  }
+  return Boolean(fallbackFigmaConnectorEndpoints(node))
+}
+
 function isLikelyFigmaConnectorNode(node: FigmaApiNode, depth: number) {
   if (node.visible === false || !['VECTOR', 'LINE', 'CONNECTOR'].includes(node.type)) return false
-  if (depth > 2) return false
+  if (depth > 3) return false
   const bounds = figmaNodeBounds(node)
   if (!bounds) return false
-  const largeEnough = bounds.width >= 140 && bounds.height >= 80 && bounds.width * bounds.height >= 40000
-  return largeEnough && isFigmaConnectorStroke(node)
+  const lengthEnough = Math.max(bounds.width, bounds.height) >= 90
+  const visibleSpan = Math.min(bounds.width, bounds.height) >= 2
+  const areaEnough = bounds.width * bounds.height >= 400
+  return lengthEnough && visibleSpan && areaEnough && isFigmaConnectorStroke(node) && hasMeaningfulFigmaConnectorEndpoints(node)
 }
 
 function farthestFigmaEndpointPair(points: FigmaConnectorEndpoint[]): [FigmaConnectorEndpoint, FigmaConnectorEndpoint] | null {
@@ -2188,34 +2439,12 @@ function farthestFigmaEndpointPair(points: FigmaConnectorEndpoint[]): [FigmaConn
 }
 
 function endpointsFromFigmaVectorNetwork(node: FigmaApiNode): [FigmaConnectorEndpoint, FigmaConnectorEndpoint] | null {
-  const bounds = figmaNodeBounds(node)
-  const vertices = node.vectorNetwork?.vertices ?? []
-  if (!bounds || vertices.length < 2) return null
+  return farthestFigmaEndpointPair(openFigmaVectorEndpoints(node))
+}
 
-  const degree = new Map<number, number>()
-  for (const segment of node.vectorNetwork?.segments ?? []) {
-    if (typeof segment.start !== 'number' || typeof segment.end !== 'number') continue
-    degree.set(segment.start, (degree.get(segment.start) ?? 0) + 1)
-    degree.set(segment.end, (degree.get(segment.end) ?? 0) + 1)
-  }
-
-  const endpoints = vertices
-    .map((vertex, index): FigmaConnectorEndpoint | null => {
-      const x = vertex.position?.x
-      const y = vertex.position?.y
-      if (typeof x !== 'number' || typeof y !== 'number') return null
-      return {
-        x: bounds.x + x,
-        y: bounds.y + y,
-        index,
-        degree: degree.get(index) ?? 0,
-        meta: vertex.meta,
-      }
-    })
-    .filter((endpoint): endpoint is FigmaConnectorEndpoint => Boolean(endpoint))
-    .filter((endpoint) => endpoint.degree <= 1)
-
-  return farthestFigmaEndpointPair(endpoints)
+function connectorEndpointsForNode(node: FigmaApiNode): [FigmaConnectorEndpoint, FigmaConnectorEndpoint] | null {
+  if (node.type === 'VECTOR') return endpointsFromFigmaVectorNetwork(node)
+  return endpointsFromFigmaVectorNetwork(node) ?? fallbackFigmaConnectorEndpoints(node)
 }
 
 function fallbackFigmaConnectorEndpoints(node: FigmaApiNode): [FigmaConnectorEndpoint, FigmaConnectorEndpoint] | null {
@@ -2239,8 +2468,11 @@ function collectFigmaConnectorCandidates(root: FigmaApiNode, sourceUrl: string) 
 
   function walk(node: FigmaApiNode, depth: number) {
     if (isLikelyFigmaConnectorNode(node, depth)) {
-      const endpoints = endpointsFromFigmaVectorNetwork(node) ?? fallbackFigmaConnectorEndpoints(node)
+      const endpoints = connectorEndpointsForNode(node)
       if (endpoints) {
+        const allEndpoints = node.type === 'VECTOR' ? openFigmaVectorEndpoints(node) : endpoints
+        const vectorSegments = node.type === 'VECTOR' ? figmaVectorNetworkSegments(node) : []
+        const segments = vectorSegments.length ? vectorSegments : [endpoints]
         connectors.push({
           id: node.id,
           name: node.name,
@@ -2249,10 +2481,13 @@ function collectFigmaConnectorCandidates(root: FigmaApiNode, sourceUrl: string) 
           sourceUrl: figmaNodeSourceUrl(sourceUrl, node.id),
           strokeCap: node.strokeCap ?? null,
           endpoints,
+          allEndpoints: allEndpoints.length >= 2 ? allEndpoints : endpoints,
+          segments,
+          direction: 'visual_order',
         })
       }
     }
-    if (depth >= 2) return
+    if (depth >= 3) return
     for (const child of node.children ?? []) walk(child, depth + 1)
   }
 
@@ -2266,6 +2501,28 @@ function nearestFigmaGroup(point: FigmaPoint, groups: FigmaDesignEvidenceGroup[]
     .sort((a, b) => a.distance - b.distance || compareFigmaGroupVisualOrder(a.group, b.group))[0] ?? null
 }
 
+function pointToSegmentDistance(point: FigmaPoint, start: FigmaPoint, end: FigmaPoint) {
+  const dx = end.x - start.x
+  const dy = end.y - start.y
+  const lengthSquared = dx * dx + dy * dy
+  if (lengthSquared <= 0) return endpointDistance(point, start)
+  const t = Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared))
+  return endpointDistance(point, { x: start.x + t * dx, y: start.y + t * dy })
+}
+
+function connectorDistanceToPoint(connector: FigmaConnectorCandidate, point: FigmaPoint) {
+  const segmentDistances = connector.segments.map(([start, end]) => pointToSegmentDistance(point, start, end))
+  const endpointDistances = connector.allEndpoints.map((endpoint) => endpointDistance(point, endpoint))
+  return Math.min(...segmentDistances, ...endpointDistances)
+}
+
+function targetEndpointFromMeta(connector: FigmaConnectorCandidate) {
+  const targetIndex = chooseFigmaMetaTargetEndpointIndex(connector.allEndpoints)
+  return targetIndex === null
+    ? null
+    : connector.allEndpoints.find((endpoint) => endpoint.index === targetIndex) ?? null
+}
+
 function relationLabelFromConnector(connector: FigmaConnectorCandidate) {
   return /ARROW/i.test(connector.strokeCap ?? '') ? 'Figma 箭头连接' : 'Figma 连接线'
 }
@@ -2274,8 +2531,65 @@ function relationReasonFromConnector(connector: FigmaConnectorCandidate, source:
   return `Figma connector ${connector.name} (${connector.id}) connects “${source.label}” to “${target.label}”; ${connector.bounds}.`
 }
 
-function buildRelationKey(relation: Pick<FigmaDesignEvidenceRelation, 'sourceGroupKey' | 'targetGroupKey' | 'label'>) {
-  return `${relation.sourceGroupKey}->${relation.targetGroupKey}:${relation.label}`
+function relationLabelFromVectorConnector(connector: FigmaConnectorCandidate) {
+  return `${relationLabelFromConnector(connector)}: ${connector.name}`
+}
+
+function connectorPointLabel(point: FigmaConnectorEndpoint) {
+  const meta = typeof point.meta === 'number' ? `,m=${point.meta}` : ''
+  return `(${Math.round(point.x)},${Math.round(point.y)}${meta})`
+}
+
+function nearestFigmaFrameInGroup(group: FigmaDesignEvidenceGroup, point: FigmaPoint) {
+  return group.frames
+    .map((frame) => ({ frame, distance: pointToRectDistance(point, figmaFrameRect(frame)) }))
+    .sort((a, b) => a.distance - b.distance || a.frame.name.localeCompare(b.frame.name))[0]?.frame ?? null
+}
+
+function relationReasonFromVectorConnector(
+  connector: FigmaConnectorCandidate,
+  source: FigmaDesignEvidenceGroup,
+  target: FigmaDesignEvidenceGroup,
+  sourcePoint: FigmaConnectorEndpoint,
+  targetPoint: FigmaConnectorEndpoint,
+  direction: FigmaConnectorDirection,
+) {
+  const sourceFrame = nearestFigmaFrameInGroup(source, sourcePoint)
+  const targetFrame = nearestFigmaFrameInGroup(target, targetPoint)
+  const summary = [
+    `${connector.name} (${connector.id}): ${source.label} -> ${target.label}.`,
+    `direction=${direction}; source=${connectorPointLabel(sourcePoint)}; target=${connectorPointLabel(targetPoint)}.`,
+    sourceFrame ? `sourceFrame=${sourceFrame.name} (${sourceFrame.id}).` : null,
+    targetFrame ? `targetFrame=${targetFrame.name} (${targetFrame.id}).` : null,
+  ].join(' ')
+  return [
+    summary,
+    relationReasonFromConnector(connector, source, target),
+  ].join(' ')
+}
+
+function relationReasonFromMergedConnector(
+  connector: FigmaConnectorCandidate,
+  primary: FigmaDirectedConnectorMatch,
+  source: FigmaDesignEvidenceGroup,
+  sourcePoint: FigmaConnectorEndpoint,
+  joinPoint: FigmaConnectorEndpoint,
+  mergeDistance: number,
+) {
+  const sourceFrame = nearestFigmaFrameInGroup(source, sourcePoint)
+  const targetFrame = nearestFigmaFrameInGroup(primary.target, primary.targetPoint)
+  return [
+    `${connector.name} (${connector.id}): ${source.label} joins ${primary.connector.name} (${primary.connector.id}) near ${connectorPointLabel(joinPoint)} and inherits target ${primary.target.label}.`,
+    `direction=line_merge; mergeDistance=${Math.round(mergeDistance)}; source=${connectorPointLabel(sourcePoint)}; primaryTarget=${connectorPointLabel(primary.targetPoint)}.`,
+    sourceFrame ? `sourceFrame=${sourceFrame.name} (${sourceFrame.id}).` : null,
+    targetFrame ? `targetFrame=${targetFrame.name} (${targetFrame.id}).` : null,
+    relationReasonFromVectorConnector(primary.connector, primary.source, primary.target, primary.sourcePoint, primary.targetPoint, primary.direction),
+  ].filter(Boolean).join(' ')
+}
+
+function buildRelationKey(relation: Pick<FigmaDesignEvidenceRelation, 'sourceGroupKey' | 'targetGroupKey' | 'label' | 'source'>) {
+  const labelKey = relation.source === 'figma_connector' ? 'figma_connector' : relation.label
+  return `${relation.sourceGroupKey}->${relation.targetGroupKey}:${labelKey}`
 }
 
 function dedupeFigmaRelations(relations: FigmaDesignEvidenceRelation[]) {
@@ -2294,34 +2608,144 @@ function chooseConnectorDirection(
   first: FigmaDesignEvidenceGroup,
   second: FigmaDesignEvidenceGroup,
 ) {
-  if (/ARROW/i.test(connector.strokeCap ?? '')) return [first, second] as const
+  const [firstPoint, secondPoint] = connector.endpoints
+  const firstMeta = typeof firstPoint.meta === 'number' ? firstPoint.meta : 0
+  const secondMeta = typeof secondPoint.meta === 'number' ? secondPoint.meta : 0
+  if (Math.abs(firstMeta - secondMeta) >= 1) {
+    return firstMeta > secondMeta
+      ? [first, second, firstPoint, secondPoint, 'endpoint_meta'] as const
+      : [second, first, secondPoint, firstPoint, 'endpoint_meta'] as const
+  }
+  if (/ARROW/i.test(connector.strokeCap ?? '')) return [first, second, firstPoint, secondPoint, 'arrow_cap'] as const
   return compareFigmaGroupVisualOrder(first, second) <= 0
-    ? [first, second] as const
-    : [second, first] as const
+    ? [first, second, firstPoint, secondPoint, 'visual_order'] as const
+    : [second, first, secondPoint, firstPoint, 'visual_order'] as const
 }
 
 function inferFigmaConnectorRelations(root: FigmaApiNode, groups: FigmaDesignEvidenceGroup[], sourceUrl: string) {
   const connectors = collectFigmaConnectorCandidates(root, sourceUrl)
   const relations: FigmaDesignEvidenceRelation[] = []
-  const maxEndpointDistance = 320
+  const maxEndpointDistance = 420
+  const maxLineMergeDistance = 48
+  const directedConnectors: FigmaDirectedConnectorMatch[] = []
 
-  for (const connector of connectors) {
-    const [startPoint, endPoint] = connector.endpoints
-    const start = nearestFigmaGroup(startPoint, groups)
-    const end = nearestFigmaGroup(endPoint, groups)
-    if (!start || !end) continue
-    if (start.distance > maxEndpointDistance || end.distance > maxEndpointDistance) continue
-    if (start.group.key === end.group.key) continue
+  const nearestGroupForEndpoint = (endpoint: FigmaConnectorEndpoint) => {
+    const nearest = nearestFigmaGroup(endpoint, groups)
+    return nearest && nearest.distance <= maxEndpointDistance ? nearest : null
+  }
 
-    const [source, target] = chooseConnectorDirection(connector, start.group, end.group)
+  const pushRelation = (
+    connector: FigmaConnectorCandidate,
+    source: FigmaDesignEvidenceGroup,
+    target: FigmaDesignEvidenceGroup,
+    sourcePoint: FigmaConnectorEndpoint,
+    targetPoint: FigmaConnectorEndpoint,
+    direction: FigmaConnectorDirection,
+    distanceSum: number,
+    reason = relationReasonFromVectorConnector(connector, source, target, sourcePoint, targetPoint, direction),
+  ) => {
+    if (source.key === target.key) return
     relations.push({
       sourceGroupKey: source.key,
       targetGroupKey: target.key,
-      label: relationLabelFromConnector(connector),
-      reason: relationReasonFromConnector(connector, source, target),
-      confidence: Math.max(65, 96 - Math.round(start.distance + end.distance)),
+      label: relationLabelFromVectorConnector(connector),
+      reason,
+      confidence: Math.max(65, 96 - Math.round(distanceSum)),
       source: 'figma_connector',
     })
+  }
+
+  for (const connector of connectors) {
+    const targetEndpoint = connector.allEndpoints.length >= 3 ? targetEndpointFromMeta(connector) : null
+    const targetEndpointGroup = targetEndpoint ? nearestGroupForEndpoint(targetEndpoint) : null
+    let branchRelations = 0
+    if (targetEndpoint && targetEndpointGroup) {
+      for (const sourcePoint of connector.allEndpoints) {
+        if (sourcePoint.index === targetEndpoint.index) continue
+        const source = nearestGroupForEndpoint(sourcePoint)
+        if (!source || source.group.key === targetEndpointGroup.group.key) continue
+        pushRelation(
+          connector,
+          source.group,
+          targetEndpointGroup.group,
+          sourcePoint,
+          targetEndpoint,
+          'endpoint_meta',
+          source.distance + targetEndpointGroup.distance,
+        )
+        branchRelations += 1
+        directedConnectors.push({
+          connector,
+          source: source.group,
+          target: targetEndpointGroup.group,
+          sourcePoint,
+          targetPoint: targetEndpoint,
+          direction: 'endpoint_meta',
+        })
+      }
+      if (branchRelations > 0) continue
+    }
+
+    const [startPoint, endPoint] = connector.endpoints
+    const start = nearestGroupForEndpoint(startPoint)
+    const end = nearestGroupForEndpoint(endPoint)
+    if (!start || !end) continue
+    if (start.group.key === end.group.key) continue
+
+    const [source, target, sourcePoint, targetPoint, direction] = chooseConnectorDirection(connector, start.group, end.group)
+    if (direction === 'visual_order') continue
+    pushRelation(connector, source, target, sourcePoint, targetPoint, direction, start.distance + end.distance)
+    directedConnectors.push({
+      connector,
+      source,
+      target,
+      sourcePoint,
+      targetPoint,
+      direction,
+    })
+  }
+
+  for (const connector of connectors) {
+    for (const sourcePoint of connector.allEndpoints) {
+      const source = nearestGroupForEndpoint(sourcePoint)
+      if (!source) continue
+
+      for (const joinPoint of connector.allEndpoints) {
+        if (joinPoint.index === sourcePoint.index) continue
+        const joinGroup = nearestGroupForEndpoint(joinPoint)
+        if (joinGroup) continue
+
+        const candidates = directedConnectors
+          .filter((primary) => primary.connector.id !== connector.id && primary.target.key !== source.group.key)
+          .map((primary) => ({
+            primary,
+            distance: connectorDistanceToPoint(primary.connector, joinPoint),
+          }))
+        const stable = chooseStableFigmaLineMergeCandidate(
+          candidates.map((candidate) => ({
+            targetGroupKey: candidate.primary.target.key,
+            distance: candidate.distance,
+          })),
+          maxLineMergeDistance,
+        )
+        if (!stable) continue
+        const match = candidates
+          .filter((candidate) => candidate.primary.target.key === stable.targetGroupKey)
+          .sort((a, b) => a.distance - b.distance)[0]
+        if (!match) continue
+
+        pushRelation(
+          connector,
+          source.group,
+          match.primary.target,
+          sourcePoint,
+          match.primary.targetPoint,
+          'line_merge',
+          source.distance + match.distance,
+          relationReasonFromMergedConnector(connector, match.primary, source.group, sourcePoint, joinPoint, match.distance),
+        )
+      }
+    }
   }
 
   return dedupeFigmaRelations(relations)
@@ -2339,12 +2763,17 @@ function aliasesForFigmaGroup(group: FigmaDesignEvidenceGroup) {
   const aliases = new Set<string>()
   const add = (value: string) => {
     const normalized = normalizeInterfaceMatchText(value)
-    if (normalized.length >= 2) aliases.add(normalized)
+    const minLength = /[\u4e00-\u9fa5]/u.test(normalized) ? 2 : 3
+    if (normalized.length >= minLength && normalized.length <= 80 && !/^\d+$/u.test(normalized)) aliases.add(normalized)
   }
   add(group.label)
   for (const frame of group.frames) {
     add(frame.name)
     add(normalizedFigmaInterfaceLabel(frame.name))
+    frame.visibleTexts.forEach(add)
+    frame.childNames.forEach(add)
+    frame.annotations.forEach(add)
+    frame.interactionTips.forEach(add)
   }
   return [...aliases].sort((a, b) => b.length - a.length)
 }
@@ -2380,6 +2809,17 @@ function splitPrdRelationFragments(line: string) {
     .split(/[。；;，,]/u)
     .map((fragment) => fragment.trim())
     .filter(Boolean)
+}
+
+const PRD_FLOW_CONNECTOR_PATTERN = /\s*(?:→|->|=>|＞|然后|随后|接着|再|之后|完成后|成功后)\s*/u
+
+function splitPrdFlowSteps(fragment: string) {
+  const text = fragment.replace(/<[^>]+>/gu, ' ')
+  if (!PRD_FLOW_CONNECTOR_PATTERN.test(text)) return []
+  return text
+    .split(PRD_FLOW_CONNECTOR_PATTERN)
+    .map((step) => step.replace(/^用户流程[:：]?/u, '').trim())
+    .filter((step) => step.length > 0)
 }
 
 function matchFigmaGroupsInText(line: string, groups: FigmaDesignEvidenceGroup[], aliasMap: Map<string, string[]>) {
@@ -2419,8 +2859,34 @@ function extractPrdInterfaceRelations(rawPrdText: string, groups: FigmaDesignEvi
 
     for (const fragment of splitPrdRelationFragments(line)) {
       const keyword = relationKeywordInLine(fragment)
-      if (!keyword) continue
       const fragmentMatches = matchFigmaGroupsInText(fragment, groups, aliasMap)
+      const flowSteps = splitPrdFlowSteps(fragment)
+
+      if (flowSteps.length >= 2) {
+        const flowGroups = flowSteps
+          .map((step) => matchFigmaGroupsInText(step, groups, aliasMap)[0]?.group ?? null)
+          .filter((group): group is FigmaDesignEvidenceGroup => Boolean(group))
+          .reduce<FigmaDesignEvidenceGroup[]>((ordered, group) => {
+            if (ordered[ordered.length - 1]?.key !== group.key) ordered.push(group)
+            return ordered
+          }, [])
+
+        for (let index = 0; index < flowGroups.length - 1; index += 1) {
+          const sourceGroup = flowGroups[index]
+          const targetGroup = flowGroups[index + 1]
+          if (!sourceGroup || !targetGroup || sourceGroup.key === targetGroup.key) continue
+          relations.push({
+            sourceGroupKey: sourceGroup.key,
+            targetGroupKey: targetGroup.key,
+            label: `PRD流程：${keyword ?? '流程'}`,
+            reason: `PRD 第 ${lineNumber} 行流程：“${compactFigmaText(fragment, 160)}”`,
+            confidence: 84,
+            source: 'prd_text',
+          })
+        }
+      }
+
+      if (!keyword) continue
 
       if (currentGroup) {
         const sourceGroup = currentGroup
@@ -2476,6 +2942,8 @@ interface FigmaPrdSupplement {
   sourceLabels: string[]
   content: string
   evidenceRefs: PrdNodeEvidenceRef[]
+  confidence: number
+  matchedTerms: string[]
 }
 
 function prdSupplementExcerpt(text: string) {
@@ -2489,6 +2957,7 @@ function prdSectionsForSupplement(mdText: string) {
   if (headings.length) {
     const headingMap = new Map(headings.map((heading) => [heading.id, heading]))
     return headings.map((heading) => ({
+      id: heading.id,
       label: `${markdownHeadingTitlePath(heading, headingMap) || heading.title}（第 ${heading.line} 行）`,
       matchText: markdownHeadingTitlePath(heading, headingMap) || heading.title,
       text: sectionTextForHeading(mdText, heading, headings),
@@ -2499,6 +2968,7 @@ function prdSectionsForSupplement(mdText: string) {
   return mdText
     .split(/\n{2,}/)
     .map((paragraph, index) => ({
+      id: `PRD-PARAGRAPH-${String(index + 1).padStart(3, '0')}`,
       label: `PRD 段落 ${index + 1}`,
       matchText: paragraph,
       text: paragraph.trim(),
@@ -2507,46 +2977,74 @@ function prdSectionsForSupplement(mdText: string) {
     .filter((section) => section.text.length > 0)
 }
 
+function figmaPrdAlignmentGroups(groups: FigmaDesignEvidenceGroup[]): FigmaPrdAlignmentGroup[] {
+  return groups.map((group) => ({
+    key: group.key,
+    label: group.label,
+    frames: group.frames.map((frame) => ({
+      id: frame.id,
+      name: frame.name,
+      visibleTexts: frame.visibleTexts,
+      annotations: frame.annotations,
+      interactionTips: frame.interactionTips,
+      childNames: frame.childNames,
+    })),
+  }))
+}
+
+function prdAlignmentSectionsForSupplement(mdText: string): FigmaPrdAlignmentSection[] {
+  return prdSectionsForSupplement(mdText).map((section) => ({
+    id: section.id,
+    label: section.label,
+    matchText: section.matchText,
+    text: section.text,
+    headingBacked: section.headingBacked,
+  }))
+}
+
+function buildFigmaPrdAlignmentForGroups(rawPrdText: string, groups: FigmaDesignEvidenceGroup[]) {
+  const text = rawPrdText.trim()
+  if (!text || groups.length === 0) return buildFigmaPrdAlignment([], [])
+
+  return buildFigmaPrdAlignment(
+    figmaPrdAlignmentGroups(groups),
+    prdAlignmentSectionsForSupplement(text),
+    { maxMatchesPerGroup: 3, minScore: 32 },
+  )
+}
+
+function prdAlignmentContent(match: FigmaPrdAlignmentMatch) {
+  return [
+    `### ${match.sourceLabel}`,
+    `- 对齐依据：${match.reason}`,
+    `- 置信度：${match.confidence}%`,
+    match.content ? prdSupplementExcerpt(match.content) : match.excerpt,
+  ].join('\n')
+}
+
 function extractPrdSupplementsForFigmaGroups(rawPrdText: string, groups: FigmaDesignEvidenceGroup[]) {
   const supplements = new Map<string, FigmaPrdSupplement>()
-  const text = rawPrdText.trim()
-  if (!text || groups.length === 0) return supplements
-
-  const sections = prdSectionsForSupplement(text)
-  const aliasMap = new Map(groups.map((group) => [group.key, aliasesForFigmaGroup(group)]))
+  const alignment = buildFigmaPrdAlignmentForGroups(rawPrdText, groups)
 
   for (const group of groups) {
-    const aliases = aliasMap.get(group.key) ?? []
-    const matches = sections
-      .map((section) => {
-        const normalizedMatchText = normalizeInterfaceMatchText(section.matchText)
-        const normalizedBody = normalizeInterfaceMatchText(section.text.slice(0, 1200))
-        const score = aliases.reduce((best, alias) => {
-          if (normalizedMatchText.includes(alias)) return Math.max(best, 120 + alias.length)
-          if (!section.headingBacked && normalizedBody.includes(alias)) return Math.max(best, 60 + alias.length)
-          return best
-        }, 0)
-        return score > 0 ? { section, score } : null
-      })
-      .filter((match): match is { section: ReturnType<typeof prdSectionsForSupplement>[number]; score: number } => Boolean(match))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 3)
-
+    const matches = alignment.matchesByGroup.get(group.key) ?? []
     if (!matches.length) continue
 
-    const evidenceRefs: PrdNodeEvidenceRef[] = matches.map(({ section }) => ({
+    const evidenceRefs: PrdNodeEvidenceRef[] = matches.map((match) => ({
       sourceKind: 'prd',
-      sourceLabel: section.label,
-      quote: prdSupplementExcerpt(section.text).slice(0, 220),
+      sourceLabel: match.sourceLabel,
+      quote: match.excerpt.slice(0, 220),
     }))
     const content = matches
-      .map(({ section }) => `### ${section.label}\n${prdSupplementExcerpt(section.text)}`)
+      .map(prdAlignmentContent)
       .join('\n\n')
 
     supplements.set(group.key, {
-      sourceLabels: matches.map(({ section }) => section.label),
+      sourceLabels: matches.map((match) => match.sourceLabel),
       content,
       evidenceRefs,
+      confidence: Math.max(...matches.map((match) => match.confidence)),
+      matchedTerms: uniqueByKey(matches.flatMap((match) => match.matchedTerms), (term) => normalizeInterfaceMatchText(term)).slice(0, 12),
     })
   }
 
@@ -2611,9 +3109,266 @@ async function buildFigmaDesignEvidence(figmaUrl: string, assetBaseUrl?: string 
     rootBounds: figmaBoundsLabel(root),
     groups,
     relations: inferFigmaConnectorRelations(root, groups, sourceUrl),
+    figmaUxMap: null,
   }
 
-  return hydrateFigmaPreviewAssets(evidence, assetBaseUrl)
+  const hydrated = await hydrateFigmaPreviewAssets(evidence, assetBaseUrl)
+  hydrated.figmaUxMap = buildHeuristicFigmaUxMap({
+    sourceUrl: hydrated.sourceUrl,
+    rootName: hydrated.rootName,
+    groups: hydrated.groups,
+    relations: hydrated.relations,
+  })
+  return hydrated
+}
+
+const reviewFigmaUxMapTool: Anthropic.Tool = {
+  name: 'review_figma_ux_map',
+  description: '审阅 Figma UX Map，修正同界面状态、状态角色、触发条件和跨界面/状态流转。不得新增没有证据的 screen 或 state。',
+  input_schema: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      review: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          source: { type: 'string', enum: ['ai_review'] },
+          confidence: { type: 'integer', minimum: 0, maximum: 100 },
+          notes: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 140 } },
+        },
+        required: ['source', 'confidence', 'notes'],
+      },
+      screens: {
+        type: 'array',
+        maxItems: 80,
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            id: { type: 'string' },
+            groupKey: { type: 'string' },
+            label: { type: 'string', maxLength: 80 },
+            sourceFrameIds: { type: 'array', maxItems: 24, items: { type: 'string' } },
+            primaryFigmaNodeId: { type: ['string', 'null'] },
+            stateIds: { type: 'array', maxItems: 40, items: { type: 'string' } },
+            evidence: { type: 'array', maxItems: 12, items: { type: 'string', maxLength: 180 } },
+            confidence: { type: 'integer', minimum: 0, maximum: 100 },
+          },
+          required: ['id', 'groupKey', 'label'],
+        },
+      },
+      states: {
+        type: 'array',
+        maxItems: 160,
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            id: { type: 'string' },
+            screenId: { type: 'string' },
+            label: { type: 'string', maxLength: 80 },
+            role: { type: 'string', enum: ['base', 'variant', 'overlay', 'feedback', 'localized'] },
+            kind: { type: 'string', enum: ['default', 'overlay', 'loading', 'success', 'error', 'empty', 'disabled', 'expanded', 'collapsed', 'localized', 'mirror', 'selected', 'variant'] },
+            figmaNodeId: { type: 'string' },
+            sourceUrl: { type: ['string', 'null'] },
+            previewImageUrl: { type: ['string', 'null'] },
+            visibleTexts: { type: 'array', maxItems: 12, items: { type: 'string', maxLength: 160 } },
+            annotations: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 180 } },
+            triggerHints: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 120 } },
+            confidence: { type: 'integer', minimum: 0, maximum: 100 },
+          },
+          required: ['id', 'screenId', 'label', 'role', 'kind', 'figmaNodeId'],
+        },
+      },
+      transitions: {
+        type: 'array',
+        maxItems: 160,
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            id: { type: 'string' },
+            sourceScreenId: { type: 'string' },
+            sourceStateId: { type: ['string', 'null'] },
+            targetScreenId: { type: 'string' },
+            targetStateId: { type: ['string', 'null'] },
+            trigger: { type: ['string', 'null'], maxLength: 100 },
+            condition: { type: ['string', 'null'], maxLength: 120 },
+            effect: { type: ['string', 'null'], maxLength: 120 },
+            evidence: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 180 } },
+            confidence: { type: 'integer', minimum: 0, maximum: 100 },
+            source: { type: 'string', enum: ['frame_title', 'annotation', 'prd_text', 'figma_connector', 'figma_prototype', 'canvas_order', 'text_entry', 'ai_review'] },
+          },
+          required: ['id', 'sourceScreenId', 'targetScreenId', 'confidence', 'source'],
+        },
+      },
+      ambiguities: {
+        type: 'array',
+        maxItems: 80,
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            id: { type: 'string' },
+            kind: { type: 'string', enum: ['screen_grouping', 'state_role', 'transition_target', 'missing_trigger', 'prd_conflict', 'low_confidence'] },
+            message: { type: 'string', maxLength: 180 },
+            screenId: { type: ['string', 'null'] },
+            stateId: { type: ['string', 'null'] },
+            transitionId: { type: ['string', 'null'] },
+            evidence: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 180 } },
+            severity: { type: 'string', enum: ['info', 'warning', 'critical'] },
+          },
+          required: ['id', 'kind', 'message', 'severity'],
+        },
+      },
+    },
+    required: ['review', 'screens', 'states', 'transitions', 'ambiguities'],
+  },
+}
+
+function compactFigmaUxMapForReview(evidence: FigmaDesignEvidence) {
+  const map = evidence.figmaUxMap
+  if (!map) return null
+  return {
+    root: {
+      name: evidence.rootName,
+      type: evidence.rootType,
+      bounds: evidence.rootBounds,
+      sourceUrl: evidence.sourceUrl,
+    },
+    screens: map.screens.map((screen) => ({
+      ...screen,
+      states: map.states
+        .filter((state) => state.screenId === screen.id)
+        .map((state) => ({
+          id: state.id,
+          label: state.label,
+          role: state.role,
+          kind: state.kind,
+          figmaNodeId: state.figmaNodeId,
+          visibleTexts: state.visibleTexts.slice(0, 6),
+          annotations: state.annotations.slice(0, 5),
+          triggerHints: state.triggerHints,
+          confidence: state.confidence,
+        })),
+    })),
+    transitions: map.transitions,
+    ambiguities: map.ambiguities,
+    relationEvidence: evidence.relations,
+  }
+}
+
+function figmaUxMapReviewFallback(map: FigmaUxMap, reason: string): FigmaUxMap {
+  return {
+    ...map,
+    review: {
+      source: 'ai_review_fallback',
+      confidence: map.review.confidence,
+      notes: [
+        ...map.review.notes.slice(0, 5),
+        `AI 语义审阅未采用：${reason}`,
+      ],
+    },
+  }
+}
+
+async function reviewFigmaUxMapForEvidence(evidence: FigmaDesignEvidence): Promise<FigmaDesignEvidence> {
+  if (!evidence.figmaUxMap || !anthropic) return evidence
+  const reviewInput = compactFigmaUxMapForReview(evidence)
+  if (!reviewInput) return evidence
+
+  try {
+    const response = await withTimeout(anthropic.messages.create({
+      model,
+      max_tokens: 3600,
+      system: [
+        'High priority evidence: Figma vector-line relations describe source UI -> target screen/state. Preserve their direction and evidence.',
+        'High priority evidence: Interaction tips are product requirements for a concrete UI element/screen, not decorative copy.',
+        '你是游戏交互设计稿结构审阅员，任务是审阅 Figma UX Map。',
+        '重点判断：哪些 frame 是同一界面的不同状态，哪些是独立界面；哪些注释/标题表达了状态触发或界面跳转。',
+        '只能基于给定 JSON 的 screen/state/frame/annotation/relation evidence 工作。',
+        '不得新增不存在的 screen/state，不得删除有 Figma 证据的 state；可以修正 label、role、kind、transition、ambiguity。',
+        '所有用户可见说明使用中文；ID 必须沿用输入中的 screen/state id，新 transition/ambiguity id 可自拟。',
+      ].join('\n'),
+      tools: [reviewFigmaUxMapTool],
+      tool_choice: { type: 'tool', name: 'review_figma_ux_map' },
+      messages: [
+        {
+          role: 'user',
+          content: `请审阅并修正下面的 Figma UX Map。尤其注意同一界面的多状态、半屏浮层、加载/成功/失败/空态、镜像/多语言变体，以及状态之间或界面之间的触发关系。\n\n${JSON.stringify(reviewInput, null, 2)}`,
+        },
+      ],
+    }), FIGMA_UX_MAP_REVIEW_TIMEOUT_MS, `Figma UX Map AI review timed out after ${Math.round(FIGMA_UX_MAP_REVIEW_TIMEOUT_MS / 1000)}s`)
+    const toolUse = response.content.find(
+      (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use' && block.name === 'review_figma_ux_map',
+    )
+    const normalized = normalizeFigmaUxMap(toolUse?.input, evidence.figmaUxMap, 'ai_review')
+    evidence.figmaUxMap = normalized ?? figmaUxMapReviewFallback(evidence.figmaUxMap, '模型返回无法归一化')
+  } catch (err) {
+    evidence.figmaUxMap = figmaUxMapReviewFallback(
+      evidence.figmaUxMap,
+      err instanceof Error ? err.message : String(err),
+    )
+  }
+
+  return evidence
+}
+
+function buildFigmaUxMapMarkdown(map: FigmaUxMap | null | undefined) {
+  if (!map) return ''
+  const statesByScreen = new Map<string, FigmaUxMapState[]>()
+  for (const state of map.states) {
+    statesByScreen.set(state.screenId, [...(statesByScreen.get(state.screenId) ?? []), state])
+  }
+  const screenLines = map.screens.map((screen, index) => {
+    const states = statesByScreen.get(screen.id) ?? []
+    const stateLines = states.length
+      ? states.map((state) => `  - ${state.label}：${figmaUiStateKindLabel(state.kind)} / ${state.role} / node-id=${state.figmaNodeId} / 置信度 ${state.confidence}%${state.annotations.length ? ` / 注释：${state.annotations.join('；')}` : ''}`).join('\n')
+      : '  - 未识别独立状态'
+    return [
+      `### ${index + 1}. ${screen.label}`,
+      `- Screen ID：${screen.id}`,
+      `- Figma frames：${screen.sourceFrameIds.join(', ')}`,
+      `- 置信度：${screen.confidence}%`,
+      '- 状态：',
+      stateLines,
+    ].join('\n')
+  })
+  const transitionLines = map.transitions.length
+    ? map.transitions.map((transition, index) => [
+      `${index + 1}. ${transition.trigger ?? transition.effect ?? '状态/界面流转'}`,
+      `source=${transition.sourceScreenId}${transition.sourceStateId ? `/${transition.sourceStateId}` : ''}`,
+      `target=${transition.targetScreenId}${transition.targetStateId ? `/${transition.targetStateId}` : ''}`,
+      `sourceType=${transition.source}`,
+      `confidence=${transition.confidence}%`,
+      transition.condition ? `condition=${transition.condition}` : null,
+      transition.effect ? `effect=${transition.effect}` : null,
+      transition.evidence.length ? `evidence=${transition.evidence.join('；')}` : null,
+    ].filter(Boolean).join('；')).join('\n')
+    : '- 未识别明确流转'
+  const ambiguityLines = map.ambiguities.length
+    ? map.ambiguities.map((ambiguity) => `- [${ambiguity.severity}] ${ambiguity.message}${ambiguity.evidence.length ? ` 证据：${ambiguity.evidence.join('；')}` : ''}`).join('\n')
+    : '- 暂无'
+
+  return [
+    '## Figma UX Map 语义审阅',
+    `- 审阅来源：${map.review.source}`,
+    `- 总体置信度：${map.review.confidence}%`,
+    `- 说明：${map.review.notes.join('；') || '无'}`,
+    `- Screen 数：${map.screens.length}`,
+    `- State 数：${map.states.length}`,
+    `- Transition 数：${map.transitions.length}`,
+    '',
+    '## UX Map Screen / State',
+    screenLines.join('\n\n') || '- 未识别 screen',
+    '',
+    '## UX Map Transition',
+    transitionLines,
+    '',
+    '## UX Map Ambiguity',
+    ambiguityLines,
+  ].join('\n')
 }
 
 function buildFigmaDesignEvidenceMarkdown(evidence: FigmaDesignEvidence) {
@@ -2624,6 +3379,13 @@ function buildFigmaDesignEvidenceMarkdown(evidence: FigmaDesignEvidence) {
     const childLines = frame.childNames.length
       ? frame.childNames.map((name) => `  - ${name}`).join('\n')
       : '  - 无主要子容器'
+    const annotationLines = frame.annotations.length
+      ? frame.annotations.map((text) => `  - ${text}`).join('\n')
+      : '  - 无近邻标题/注释'
+
+    const interactionTipLines = frame.interactionTips.length
+      ? frame.interactionTips.map((text) => `  - ${text}`).join('\n')
+      : '  - No Interaction tips'
 
     return [
       `### ${groupIndex + 1}.${frameIndex + 1} ${group.label} / ${frame.name}`,
@@ -2632,11 +3394,16 @@ function buildFigmaDesignEvidenceMarkdown(evidence: FigmaDesignEvidence) {
       `- 路径：${frame.path}`,
       `- 画布位置：${frame.bounds}`,
       `- 归属界面：${group.label}`,
+      `- 状态语义：${frame.stateLabel} / ${figmaUiStateKindLabel(frame.stateKind)} / 置信度 ${frame.stateConfidence}%`,
       frame.assetUrl ? `- 截图预览：${frame.assetUrl}` : '- 截图预览：待导出',
       '- 子层/状态命名：',
       childLines,
       '- 可见文本样本：',
       textLines,
+      '- 近邻标题/注释证据：',
+      annotationLines,
+      '- Interaction tips:',
+      interactionTipLines,
     ].join('\n')
   }))
 
@@ -2647,7 +3414,7 @@ function buildFigmaDesignEvidenceMarkdown(evidence: FigmaDesignEvidence) {
     '- Figma 是主证据：优先依据页面/Frame/Section/Component 名称、画布顺序、状态命名、可见文本和层级关系拆出界面节点。',
     '- 只能基于设计稿中出现的结构与文案推断页面、状态、入口、跳转和反馈；不要编造后端接口、计费、权限、运营配置或服务端规则。',
     '- 如果只有 Figma 资料，缺失的业务规则、接口字段、异常分支和验收口径必须写入“需澄清点”。',
-    '- 如果同时有 Markdown PRD，PRD 只作为功能规则、边界条件、验收标准和服务端约束补充；不得覆盖 Figma 中明确存在的界面边界。',
+    '- 如果同时有导入素材，素材只作为功能规则、边界条件、验收标准、代码/配置约束补充；不得覆盖 Figma 中明确存在的界面边界。',
     '',
     '## 选中节点',
     `- Figma 链接：${evidence.sourceUrl}`,
@@ -2662,6 +3429,8 @@ function buildFigmaDesignEvidenceMarkdown(evidence: FigmaDesignEvidence) {
     '## 确定性界面清单',
     ...evidence.groups.map((group, index) => `- ${index + 1}. ${group.label}：${group.frames.map((frame) => frame.name).join(' / ')}`),
     '',
+    buildFigmaUxMapMarkdown(evidence.figmaUxMap),
+    '',
     '## 页面/状态帧',
     frameLines.join('\n\n') || '- 未发现可解析的顶层界面 Frame。请确认链接选中了包含界面稿的节点。',
   ].join('\n')
@@ -2669,32 +3438,38 @@ function buildFigmaDesignEvidenceMarkdown(evidence: FigmaDesignEvidence) {
 
 async function buildCombinedDecompositionInput(
   sources: NormalizedDecompositionSources,
-  options: { assetBaseUrl?: string | null } = {},
+  options: { assetBaseUrl?: string | null; semanticReview?: boolean } = {},
 ): Promise<CombinedDecompositionInput> {
   const parts: string[] = []
   let figmaEvidence: FigmaDesignEvidence | null = null
 
   if (sources.figmaUrl) {
     figmaEvidence = await buildFigmaDesignEvidence(sources.figmaUrl, options.assetBaseUrl)
+    if (options.semanticReview) figmaEvidence = await reviewFigmaUxMapForEvidence(figmaEvidence)
     parts.push(buildFigmaDesignEvidenceMarkdown(figmaEvidence))
   }
 
   if (sources.mdText) {
     const filename = sources.mdFilename ? `：${sources.mdFilename}` : ''
     parts.push([
-      `# Markdown PRD 补充资料${filename}`,
+      `# 导入素材补充资料${filename}`,
       '',
       sources.figmaUrl
-        ? '以下 Markdown PRD 用于补充功能规则、边界条件、验收标准、数据/API/配置约束；界面拆分边界优先以 Figma 设计稿证据为准。'
-        : '以下 Markdown PRD 是本次拆解的唯一资料来源。',
+        ? '以下导入素材用于补充功能规则、边界条件、验收标准、数据/API/配置约束和现有实现线索；界面拆分边界优先以 Figma 设计稿证据为准。'
+        : '以下导入素材是本次拆解的资料来源，可能包含 PRD、代码、配置、文案和引擎资源文本。',
       '',
       sources.mdText,
     ].join('\n'))
   }
 
+  const imageEvidence = buildSourceImageEvidenceMarkdown(sources.sourceImages)
+  if (imageEvidence) parts.push(imageEvidence)
+
   return {
     text: parts.join('\n\n---\n\n'),
+    rawPrdText: sources.mdText,
     figmaEvidence,
+    imageBlocks: sourceImagesToAnthropicBlocks(sources.sourceImages),
   }
 }
 
@@ -2703,25 +3478,102 @@ function figmaGroupExcerpt(group: FigmaDesignEvidenceGroup) {
   return texts.length ? texts.join(' / ') : group.frames.map((frame) => frame.name).join(' / ')
 }
 
-function buildFigmaCandidateNodes(evidence: FigmaDesignEvidence): PrdImportCandidateNode[] {
-  return evidence.groups.map((group, index) => ({
-    title: group.label,
-    sectionId: `figma-${String(index + 1).padStart(2, '0')}`,
-    sourceLabel: `Figma 界面组：${group.frames.map((frame) => frame.name).join(' / ')}`,
-    reason: `Figma 顶层界面 Frame，包含 ${group.frames.length} 张截图，应作为导图界面节点保留。`,
-    confidence: 96,
-    excerpt: figmaGroupExcerpt(group).slice(0, 500),
-  }))
+function buildFigmaCandidateNodes(evidence: FigmaDesignEvidence, rawPrdText?: string | null): PrdImportCandidateNode[] {
+  const alignment = buildFigmaPrdAlignmentForGroups(rawPrdText ?? '', evidence.groups)
+  return evidence.groups.map((group, index) => {
+    const screen = uxScreenForGroup(evidence, group)
+    const states = uxStatesForScreen(evidence, screen)
+    const transitions = evidence.figmaUxMap?.transitions.filter((transition) =>
+      transition.sourceScreenId === screen?.id || transition.targetScreenId === screen?.id
+    ) ?? []
+    const prdMatches = alignment.matchesByGroup.get(group.key) ?? []
+    const prdReason = prdMatches.length
+      ? `已对齐 ${prdMatches.length} 段 PRD 补充：${prdMatches.map((match) => match.sourceLabel).join(' / ')}`
+      : rawPrdText?.trim()
+        ? '暂未稳定匹配到 PRD 章节，正式拆解会保留为 Figma 主界面并把 PRD 候选作为补充线索。'
+        : null
+    const prdExcerpt = prdMatches
+      .map((match) => `PRD ${match.confidence}%: ${match.excerpt}`)
+      .join('\n')
+    return {
+      title: screen?.label ?? group.label,
+      sectionId: `figma-${String(index + 1).padStart(2, '0')}`,
+      sourceLabel: [
+        `Figma 界面组：${group.frames.map((frame) => frame.name).join(' / ')}`,
+        prdMatches.length ? `PRD：${prdMatches.map((match) => match.sourceLabel).join(' / ')}` : null,
+      ].filter(Boolean).join(' + '),
+      reason: [
+        `Figma UX Map 识别为独立界面，包含 ${states.length || group.frames.length} 个状态、${transitions.length} 条相关流转，应作为导图界面节点保留。`,
+        prdReason,
+      ].filter(Boolean).join(' '),
+      confidence: screen?.confidence ?? 96,
+      excerpt: [figmaGroupExcerpt(group), prdExcerpt].filter(Boolean).join('\n').slice(0, 500),
+    }
+  })
+}
+
+function buildPreviewPrdSourceSummary(basePreview: PrdImportPreview, evidence: FigmaDesignEvidence | null, rawPrdText: string | null) {
+  const text = rawPrdText?.trim()
+  if (!text) return null
+  const alignment = evidence ? buildFigmaPrdAlignmentForGroups(text, evidence.groups) : null
+  return {
+    totalChars: basePreview.sourceIndex.totalChars,
+    headingCount: basePreview.sourceIndex.headingCount,
+    sectionCount: basePreview.sourceIndex.sectionCount,
+    matchedFigmaGroups: alignment?.matchesByGroup.size ?? 0,
+    excerpts: basePreview.sourceIndex.sections.slice(0, 4).map((section) => ({
+      titlePath: section.titlePath,
+      excerpt: section.excerpt,
+      startLine: section.startLine,
+      endLine: section.endLine,
+    })),
+  }
+}
+
+function buildPreviewRelationSummary(evidence: FigmaDesignEvidence, rawPrdText: string | null) {
+  const groupLabelByKey = new Map(evidence.groups.map((group) => [group.key, group.label]))
+  const prdRelations = extractPrdInterfaceRelations(rawPrdText ?? '', evidence.groups)
+
+  return {
+    figmaTransitionCount: evidence.figmaUxMap?.transitions.length ?? evidence.relations.length,
+    prdRelationCount: prdRelations.length,
+    prdRelations: prdRelations.slice(0, 8).map((relation) => ({
+      sourceLabel: groupLabelByKey.get(relation.sourceGroupKey) ?? relation.sourceGroupKey,
+      targetLabel: groupLabelByKey.get(relation.targetGroupKey) ?? relation.targetGroupKey,
+      label: relation.label,
+      reason: relation.reason,
+      confidence: relation.confidence,
+    })),
+  }
 }
 
 function buildImportPreviewFromCombinedInput(input: CombinedDecompositionInput): PrdImportPreview {
-  const basePreview = buildPrdImportPreview(input.text)
-  if (!input.figmaEvidence) return basePreview
+  const previewText = input.rawPrdText?.trim() ? input.rawPrdText : input.text
+  const basePreview = buildPrdImportPreview(previewText)
+  if (!input.figmaEvidence) {
+    return {
+      ...basePreview,
+      prdSource: buildPreviewPrdSourceSummary(basePreview, null, input.rawPrdText),
+      relationSummary: null,
+    }
+  }
 
-  const figmaCandidates = buildFigmaCandidateNodes(input.figmaEvidence)
+  const figmaCandidates = buildFigmaCandidateNodes(input.figmaEvidence, input.rawPrdText)
+  const prdSupplementCandidates = input.rawPrdText?.trim()
+    ? basePreview.candidateNodes.slice(0, 8).map((candidate) => ({
+      ...candidate,
+      sectionId: `prd-supplement-${candidate.sectionId}`,
+      sourceLabel: `PRD 补充候选：${candidate.sourceLabel}`,
+      reason: `作为 Figma 界面关系、交互规则、数据约束的补充线索：${candidate.reason}`,
+      confidence: Math.min(candidate.confidence, 88),
+    }))
+    : []
   return {
     sourceIndex: basePreview.sourceIndex,
-    candidateNodes: figmaCandidates,
+    candidateNodes: [...figmaCandidates, ...prdSupplementCandidates],
+    figmaUxMap: input.figmaEvidence.figmaUxMap,
+    prdSource: buildPreviewPrdSourceSummary(basePreview, input.figmaEvidence, input.rawPrdText),
+    relationSummary: buildPreviewRelationSummary(input.figmaEvidence, input.rawPrdText),
   }
 }
 
@@ -2733,6 +3585,61 @@ function figmaPreviewForFrame(frame: FigmaDesignEvidenceFrame): PrdNodeFigmaPrev
     imageUrl: frame.assetUrl ?? null,
     width: Math.round(frame.width),
     height: Math.round(frame.height),
+  }
+}
+
+function uxScreenForGroup(evidence: FigmaDesignEvidence, group: FigmaDesignEvidenceGroup) {
+  return evidence.figmaUxMap?.screens.find((screen) => screen.groupKey === group.key) ?? null
+}
+
+function uxStatesForScreen(evidence: FigmaDesignEvidence, screen: FigmaUxMapScreen | null) {
+  if (!screen || !evidence.figmaUxMap) return []
+  const stateIdSet = new Set(screen.stateIds)
+  return evidence.figmaUxMap.states.filter((state) => stateIdSet.has(state.id))
+}
+
+function figmaUiStateFromUxState(nodeId: string, state: FigmaUxMapState, index: number) {
+  return {
+    id: `${nodeId}-state-${String(index + 1).padStart(2, '0')}-${transitionIdPart(state.id)}`,
+    label: state.label,
+    kind: state.kind,
+    figmaNodeId: state.figmaNodeId,
+    sourceUrl: state.sourceUrl ?? null,
+    previewImageUrl: state.previewImageUrl ?? null,
+    visibleTexts: state.visibleTexts,
+    annotations: state.annotations,
+    confidence: state.confidence,
+  }
+}
+
+function figmaUiStatesForGroup(nodeId: string, group: FigmaDesignEvidenceGroup, evidence: FigmaDesignEvidence) {
+  const screen = uxScreenForGroup(evidence, group)
+  const uxStates = uxStatesForScreen(evidence, screen)
+  if (uxStates.length > 0) return uxStates.map((state, index) => figmaUiStateFromUxState(nodeId, state, index))
+  return buildFigmaUiStatesForFrames(nodeId, group.label, group.frames)
+}
+
+function nodeFigmaUxMapSlice(
+  map: FigmaUxMap | null | undefined,
+  screen: FigmaUxMapScreen | null,
+): PrdNodeFigmaUxMapSlice | null {
+  if (!map || !screen) return null
+  const transitionIds = map.transitions
+    .filter((transition) => transition.sourceScreenId === screen.id || transition.targetScreenId === screen.id)
+    .map((transition) => transition.id)
+  const ambiguityIds = map.ambiguities
+    .filter((ambiguity) => ambiguity.screenId === screen.id || screen.stateIds.includes(ambiguity.stateId ?? ''))
+    .map((ambiguity) => ambiguity.id)
+  return {
+    screenId: screen.id,
+    screenLabel: screen.label,
+    sourceFrameIds: screen.sourceFrameIds,
+    stateIds: screen.stateIds,
+    transitionIds,
+    ambiguityIds,
+    reviewSource: map.review.source,
+    reviewConfidence: map.review.confidence,
+    notes: map.review.notes,
   }
 }
 
@@ -2771,10 +3678,164 @@ function applyFigmaInterfaceReferences(nodes: PrdNode[], evidence: FigmaDesignEv
     applyFigmaReference(source, target, relation.label, relation.reason)
   }
 
-  evidence.relations.forEach(link)
-  extractPrdInterfaceRelations(rawPrdText ?? '', evidence.groups).forEach(link)
+  const relations = [
+    ...evidence.relations,
+    ...extractPrdInterfaceRelations(rawPrdText ?? '', evidence.groups),
+  ]
+  relations.forEach(link)
+  const uxMapApplied = applyFigmaUxMapTransitions(nodes, evidence)
+  if (!uxMapApplied) applyFigmaStateTransitions(nodes, evidence, relations)
 
   return nodes
+}
+
+function transitionIdPart(value: string | null | undefined) {
+  return (value ?? '')
+    .replace(/[^A-Za-z0-9\u4e00-\u9fa5_-]+/gu, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 36) || 'state'
+}
+
+function addFigmaStateTransition(node: PrdNode | null | undefined, transition: PrdStateTransition) {
+  if (!node) return
+  node.stateTransitions = uniqueFigmaStateTransitions([...(node.stateTransitions ?? []), transition])
+}
+
+function buildUxScreenNodeMap(nodes: PrdNode[], evidence: FigmaDesignEvidence) {
+  const nodeByScreenId = new Map<string, PrdNode>()
+  evidence.groups.forEach((group, index) => {
+    const screen = uxScreenForGroup(evidence, group)
+    const node = nodes[index]
+    if (screen && node) nodeByScreenId.set(screen.id, node)
+  })
+  return nodeByScreenId
+}
+
+function prdStateIdForUxState(node: PrdNode | null | undefined, map: FigmaUxMap | null | undefined, uxStateId: string | null | undefined) {
+  if (!node || !map || !uxStateId) return null
+  const uxState = map.states.find((state) => state.id === uxStateId)
+  if (!uxState) return null
+  return node.uiStates?.find((state) => state.figmaNodeId === uxState.figmaNodeId)?.id ?? null
+}
+
+function uxTransitionLabel(transition: FigmaUxMapTransition) {
+  return transition.trigger ?? transition.effect ?? 'Figma UX Map 流转'
+}
+
+function uxTransitionReason(transition: FigmaUxMapTransition, map: FigmaUxMap) {
+  const source = map.screens.find((screen) => screen.id === transition.sourceScreenId)?.label ?? transition.sourceScreenId
+  const target = map.screens.find((screen) => screen.id === transition.targetScreenId)?.label ?? transition.targetScreenId
+  const evidence = transition.evidence.length ? `证据：${transition.evidence.join('；')}` : '无附加证据'
+  return `Figma UX Map：${source} → ${target}；来源 ${transition.source}；置信度 ${transition.confidence}%。${evidence}`
+}
+
+function applyFigmaUxMapTransitions(nodes: PrdNode[], evidence: FigmaDesignEvidence) {
+  const map = evidence.figmaUxMap
+  if (!map) return false
+  const nodeByScreenId = buildUxScreenNodeMap(nodes, evidence)
+  let applied = false
+
+  for (const transition of map.transitions) {
+    const sourceNode = nodeByScreenId.get(transition.sourceScreenId)
+    const targetNode = nodeByScreenId.get(transition.targetScreenId)
+    if (!sourceNode || !targetNode) continue
+    addFigmaStateTransition(sourceNode, createFigmaStateTransition({
+      id: `figma-ux-${transitionIdPart(transition.id)}`,
+      sourceNodeId: sourceNode.id,
+      sourceStateId: prdStateIdForUxState(sourceNode, map, transition.sourceStateId),
+      targetNodeId: targetNode.id,
+      targetStateId: prdStateIdForUxState(targetNode, map, transition.targetStateId),
+      trigger: transition.trigger,
+      condition: transition.condition,
+      effect: transition.effect ?? (sourceNode.id === targetNode.id ? '进入同界面状态' : `进入 ${targetNode.label}`),
+      evidence: transition.evidence,
+      confidence: transition.confidence,
+      source: transition.source,
+    }))
+    if (sourceNode.id !== targetNode.id) {
+      applyFigmaReference(sourceNode, targetNode, `Figma UX Map：${uxTransitionLabel(transition)}`, uxTransitionReason(transition, map))
+    }
+    applied = true
+  }
+
+  return applied
+}
+
+function stateForFigmaFrame(node: PrdNode | null | undefined, frame: FigmaDesignEvidenceFrame) {
+  return node?.uiStates?.find((state) => state.figmaNodeId === frame.id) ?? null
+}
+
+function findFigmaTransitionTargetGroup(targetHint: string | null | undefined, groups: FigmaDesignEvidenceGroup[]) {
+  const normalizedHint = normalizeInterfaceMatchText(targetHint ?? '')
+  if (normalizedHint.length < 2) return null
+
+  return groups
+    .map((group) => {
+      const aliases = aliasesForFigmaGroup(group)
+      const score = aliases.reduce((best, alias) => {
+        if (alias === normalizedHint) return Math.max(best, 100 + alias.length)
+        if (alias.length >= 2 && normalizedHint.includes(alias)) return Math.max(best, 80 + alias.length)
+        if (normalizedHint.length >= 2 && alias.includes(normalizedHint)) return Math.max(best, 70 + normalizedHint.length)
+        return best
+      }, 0)
+      return { group, score }
+    })
+    .filter((item) => item.score >= 72)
+    .sort((a, b) => b.score - a.score || compareFigmaGroupVisualOrder(a.group, b.group))[0]?.group ?? null
+}
+
+function applyFigmaStateTransitions(
+  nodes: PrdNode[],
+  evidence: FigmaDesignEvidence,
+  relations: FigmaDesignEvidenceRelation[],
+) {
+  const nodeByGroupKey = new Map<string, PrdNode>()
+  evidence.groups.forEach((group, index) => {
+    const node = nodes[index]
+    if (node) nodeByGroupKey.set(group.key, node)
+  })
+
+  for (const relation of relations) {
+    const source = nodeByGroupKey.get(relation.sourceGroupKey)
+    const target = nodeByGroupKey.get(relation.targetGroupKey)
+    if (!source || !target || source.id === target.id) continue
+    addFigmaStateTransition(source, createFigmaStateTransition({
+      id: `figma-relation-${transitionIdPart(source.id)}-${transitionIdPart(target.id)}-${transitionIdPart(relation.label)}`,
+      sourceNodeId: source.id,
+      targetNodeId: target.id,
+      trigger: relation.label,
+      effect: `进入 ${target.label}`,
+      evidence: [relation.reason],
+      confidence: relation.confidence,
+    }))
+  }
+
+  for (const group of evidence.groups) {
+    const sourceNode = nodeByGroupKey.get(group.key)
+    if (!sourceNode) continue
+
+    for (const frame of group.frames) {
+      const cue = [frame.name, ...frame.annotations]
+        .map((text) => extractFigmaStateTransitionCue(text))
+        .find((item): item is NonNullable<ReturnType<typeof extractFigmaStateTransitionCue>> => Boolean(item))
+      if (!cue) continue
+
+      const targetGroup = findFigmaTransitionTargetGroup(cue.targetHint, evidence.groups) ?? group
+      const targetNode = nodeByGroupKey.get(targetGroup.key) ?? sourceNode
+      const targetState = targetGroup.key === group.key ? stateForFigmaFrame(sourceNode, frame) : null
+      addFigmaStateTransition(sourceNode, createFigmaStateTransition({
+        id: `figma-cue-${transitionIdPart(sourceNode.id)}-${transitionIdPart(targetNode.id)}-${transitionIdPart(frame.id)}`,
+        sourceNodeId: sourceNode.id,
+        targetNodeId: targetNode.id,
+        targetStateId: targetState?.id ?? null,
+        trigger: cue.trigger,
+        condition: cue.condition,
+        effect: cue.effect ?? (targetState ? `进入状态：${targetState.label}` : `进入 ${targetNode.label}`),
+        evidence: [cue.evidence],
+        confidence: cue.confidence,
+      }))
+    }
+  }
 }
 
 function aliasesForPrdNode(node: PrdNode) {
@@ -2930,6 +3991,52 @@ function nodeMatchAliases(node: PrdNode) {
   return aliasesForPrdNode(node)
 }
 
+function textPartsForNode(node: PrdNode) {
+  return [
+    node.label,
+    node.summary,
+    node.content,
+    node.extractedFrom,
+    node.techNotes,
+    node.handoffGoal,
+    node.qualityGate,
+    ...(['view', 'interaction', 'data'] as PrdNodeSectionKey[]).flatMap((key) => {
+      const section = node.sections?.[key]
+      return [section?.title, section?.summary, section?.content, ...(section?.openQuestions ?? [])]
+    }),
+    ...(node.evidenceRefs ?? []).flatMap((ref) => [ref.sourceLabel, ref.quote]),
+  ].filter((part): part is string => Boolean(part?.trim()))
+}
+
+function figmaNodeAlignmentGroup(node: PrdNode): FigmaPrdAlignmentGroup {
+  return {
+    key: node.id,
+    label: node.label,
+    frames: [{
+      name: [node.label, node.summary].filter(Boolean).join(' '),
+      visibleTexts: [
+        ...(node.uiStates ?? []).flatMap((state) => state.visibleTexts),
+        ...(node.figmaPreviews ?? []).map((preview) => preview.name),
+      ],
+      annotations: [
+        ...(node.uiStates ?? []).flatMap((state) => state.annotations),
+        ...textPartsForNode(node).slice(0, 8),
+      ],
+      childNames: [],
+    }],
+  }
+}
+
+function prdNodeAlignmentSection(node: PrdNode): FigmaPrdAlignmentSection {
+  return {
+    id: node.id,
+    label: node.extractedFrom ?? node.label,
+    matchText: [node.label, node.summary].filter(Boolean).join(' / '),
+    text: textPartsForNode(node).join('\n\n'),
+    headingBacked: false,
+  }
+}
+
 function scoreNodeAliasMatch(a: PrdNode, b: PrdNode) {
   const aAliases = nodeMatchAliases(a)
   const bAliases = nodeMatchAliases(b)
@@ -2947,11 +4054,29 @@ function scoreNodeAliasMatch(a: PrdNode, b: PrdNode) {
   return best
 }
 
+function scoreNodePrdFigmaAlignment(prdNode: PrdNode, figmaNode: PrdNode) {
+  const result = buildFigmaPrdAlignment(
+    [figmaNodeAlignmentGroup(figmaNode)],
+    [prdNodeAlignmentSection(prdNode)],
+    { maxMatchesPerGroup: 1, minScore: 1 },
+  )
+  return result.matchesByGroup.get(figmaNode.id)?.[0]?.score ?? 0
+}
+
 function bestFigmaNodeForPrdNode(prdNode: PrdNode, figmaNodes: PrdNode[], usedFigmaNodeIds: Set<string>) {
   const matches = figmaNodes
     .filter((node) => !usedFigmaNodeIds.has(node.id))
-    .map((node) => ({ node, score: scoreNodeAliasMatch(prdNode, node) }))
-    .filter((match) => match.score >= 86)
+    .map((node) => {
+      const aliasScore = scoreNodeAliasMatch(prdNode, node)
+      const alignmentScore = scoreNodePrdFigmaAlignment(prdNode, node)
+      return {
+        node,
+        score: Math.max(aliasScore, alignmentScore),
+        aliasScore,
+        alignmentScore,
+      }
+    })
+    .filter((match) => match.aliasScore >= 86 || match.alignmentScore >= 32)
     .sort((a, b) => b.score - a.score || a.node.order - b.node.order)
   return matches[0]?.node ?? null
 }
@@ -3147,12 +4272,20 @@ function hasPrdEvidence(node: PrdNode) {
 function buildFigmaPageNodes(evidence: FigmaDesignEvidence, rawPrdText?: string | null): PrdNode[] {
   const prdSupplements = extractPrdSupplementsForFigmaGroups(rawPrdText ?? '', evidence.groups)
   const nodes = evidence.groups.map((group, order): PrdNode => {
-    const id = `PAGE-FIGMA-${String(order + 1).padStart(2, '0')}-${idSegmentFromTitle(group.label, String(order + 1))}`
+    const uxScreen = uxScreenForGroup(evidence, group)
+    const label = uxScreen?.label ?? group.label
+    const id = `PAGE-FIGMA-${String(order + 1).padStart(2, '0')}-${idSegmentFromTitle(label, String(order + 1))}`
     const previews = group.frames.map(figmaPreviewForFrame)
+    const uiStates = figmaUiStatesForGroup(id, group, evidence)
     const prdSupplement = prdSupplements.get(group.key) ?? null
     const screenshotList = group.frames.map((frame, index) => (
       `- ${index + 1}. ${frame.name}（${Math.round(frame.width)}×${Math.round(frame.height)}，node-id=${frame.id}）`
     )).join('\n')
+    const stateMatrix = uiStates.map((state, index) => {
+      const annotations = state.annotations.length ? `；注释：${state.annotations.join(' / ')}` : ''
+      const visibleTexts = state.visibleTexts.length ? `；文案：${state.visibleTexts.slice(0, 4).join(' / ')}` : ''
+      return `- ${index + 1}. ${state.label}（${figmaUiStateKindLabel(state.kind)}，置信度 ${state.confidence}%，node-id=${state.figmaNodeId}${visibleTexts}${annotations}）`
+    }).join('\n') || '- 未识别到独立状态'
     const textSamples = Array.from(new Set(group.frames.flatMap((frame) => frame.visibleTexts)))
       .slice(0, 12)
       .map((text) => `- ${text}`)
@@ -3167,13 +4300,13 @@ function buildFigmaPageNodes(evidence: FigmaDesignEvidence, rawPrdText?: string 
     return {
       id,
       parentId: null,
-      label: group.label,
+      label,
       summary: prdSupplement
         ? `来自 Figma 的确定性界面节点，包含 ${group.frames.length} 张界面截图，并已融合 PRD 补充资料。`
         : `来自 Figma 的确定性界面节点，包含 ${group.frames.length} 张界面截图。`,
       content: [
         '## 原文位置',
-        `Figma 设计稿：${evidence.rootName} / ${group.label}`,
+        `Figma 设计稿：${evidence.rootName} / ${label}`,
         prdSupplement ? `PRD 匹配章节：${prdSupplement.sourceLabels.join('；')}` : null,
         '',
         '## 关键原文摘录',
@@ -3184,8 +4317,11 @@ function buildFigmaPageNodes(evidence: FigmaDesignEvidence, rawPrdText?: string 
         `该节点由 Figma 顶层界面 Frame 确定生成，必须保留在导图中。包含的截图/状态如下：`,
         screenshotList,
         '',
+        '## Figma 状态矩阵',
+        stateMatrix,
+        '',
         '## 需澄清点',
-        '- Figma 未表达的接口字段、服务端规则、计费、权限、异常分支和验收口径，需要结合 Markdown PRD 或后续打磨补齐。',
+        '- Figma 未表达的接口字段、服务端规则、计费、权限、异常分支和验收口径，需要结合导入素材或后续打磨补齐。',
       ].join('\n'),
       type: 'page',
       status: 'pending_refine',
@@ -3200,29 +4336,32 @@ function buildFigmaPageNodes(evidence: FigmaDesignEvidence, rawPrdText?: string 
       specLens: 'full',
       sections: {
         view: {
-          title: `${group.label} View`,
+          title: `${label} View`,
           summary: `Figma 提供 ${group.frames.length} 张界面截图作为视觉主证据。`,
-          content: `## Figma 截图\n${screenshotList}\n\n## 可见文本样本\n${textSamples}`,
+          content: `## Figma 截图\n${screenshotList}\n\n## Figma 状态矩阵\n${stateMatrix}\n\n## 可见文本样本\n${textSamples}`,
           evidenceRefs,
           openQuestions: [],
         },
         ...(prdSupplement ? {
           interaction: {
             title: `${group.label} PRD 补充`,
-            summary: '从 Markdown PRD 中匹配到的功能、交互或规则补充。',
+            summary: '从导入素材中匹配到的功能、交互或规则补充。',
             content: prdSupplement.content,
             evidenceRefs: prdSupplement.evidenceRefs,
             openQuestions: [],
           },
         } : {}),
       },
-      handoffGoal: `基于 Figma 截图补齐「${group.label}」的 View / Flow / Data 交互规格。`,
+      handoffGoal: `基于 Figma 截图补齐「${label}」的 View / Flow / Data 交互规格。`,
       qualityGate: '必须保留 Figma 截图对应状态；PRD 只能补充规则和验收，不得删除设计稿中已有界面状态。',
       backendContracts: [],
       references: [],
       sourceKind: 'upload',
       evidenceRefs: allEvidenceRefs,
       figmaPreviews: previews,
+      uiStates,
+      stateTransitions: [],
+      figmaUxMap: nodeFigmaUxMapSlice(evidence.figmaUxMap, uxScreen),
     }
   })
   return applyFigmaInterfaceReferences(nodes, evidence, rawPrdText)
@@ -3248,18 +4387,18 @@ function buildSourceOutlineForPrompt(mdText: string) {
 
 function sourceDirectoryLabel(mdText: string) {
   const hasFigma = mdText.includes('# Figma 设计稿证据')
-  const hasMarkdown = mdText.includes('# Markdown PRD 补充资料')
-  if (hasFigma && hasMarkdown) return 'Figma+PRD 资料目录'
+  const hasMarkdown = mdText.includes('# Markdown PRD 补充资料') || mdText.includes('# 导入素材补充资料')
+  if (hasFigma && hasMarkdown) return 'Figma+导入素材目录'
   if (hasFigma) return 'Figma 设计稿目录'
-  return 'PRD 原文目录'
+  return '导入素材目录'
 }
 
 function sourceDirectoryExtractedFrom(mdText: string) {
   const hasFigma = mdText.includes('# Figma 设计稿证据')
-  const hasMarkdown = mdText.includes('# Markdown PRD 补充资料')
-  if (hasFigma && hasMarkdown) return 'Figma 设计稿证据 + Markdown PRD'
+  const hasMarkdown = mdText.includes('# Markdown PRD 补充资料') || mdText.includes('# 导入素材补充资料')
+  if (hasFigma && hasMarkdown) return 'Figma 设计稿证据 + 导入素材'
   if (hasFigma) return 'Figma 设计稿证据'
-  return '原文 Markdown 标题'
+  return '导入素材标题'
 }
 
 function buildSourceOutlineRootNode(mdText: string, sourceIndex = buildDocumentSourceIndex(mdText)): PrdNode {
@@ -3526,7 +4665,12 @@ function mergeLargePrdCandidates(candidates: PrdNode[]) {
   })))
 }
 
-async function decomposeLargeL1(mdText: string, session: DecompositionSession, claude: Anthropic) {
+async function decomposeLargeL1(
+  mdText: string,
+  session: DecompositionSession,
+  claude: Anthropic,
+  imageBlocks: Anthropic.ImageBlockParam[] = [],
+) {
   const slices = buildPrdSourceSlices(mdText)
   const candidates: PrdNode[] = []
   const projectWorkflowContext = formatProjectWorkflowForDecomposition(session.projectWorkflow)
@@ -3544,7 +4688,10 @@ async function decomposeLargeL1(mdText: string, session: DecompositionSession, c
           messages: [
             {
               role: 'user',
-              content: `${projectWorkflowContext}\n\n请从下面这段 PRD 原文中识别页面/界面/弹窗级候选节点。本段只是原文的一部分，只输出本段有明确依据的候选；不要补全没出现的信息，不要输出按钮、字段、奖励条目等内部细节节点。每个节点正文必须很短，只写覆盖范围、关键依据、职责边界和需澄清点。所有展示给用户的文字必须是中文；ID、路径、字段名、枚举值可以保留英文。\n\n原文位置：${slice.label}\n原文阅读进度：${index + 1}/${slices.length}\n\nPRD 原文：\n${slice.text}`,
+              content: buildContentWithImages(
+                `${projectWorkflowContext}\n\n请从下面这段 PRD 原文中识别页面/界面/弹窗级候选节点。本段只是原文的一部分，只输出本段有明确依据的候选；不要补全没出现的信息，不要输出按钮、字段、奖励条目等内部细节节点。每个节点正文必须很短，只写覆盖范围、关键依据、职责边界和需澄清点。所有展示给用户的文字必须是中文；ID、路径、字段名、枚举值可以保留英文。\n\n原文位置：${slice.label}\n原文阅读进度：${index + 1}/${slices.length}\n\nPRD 原文：\n${slice.text}`,
+                index === 0 ? imageBlocks : [],
+              ),
             },
           ],
         })
@@ -3727,7 +4874,7 @@ async function withDecompositionProgress<T>(
 
 const decompositionL1SystemPrompt = `你是游戏 UX 架构师，正在分析一份产品资料（可能是 PRD、Figma 设计稿证据，或二者组合）。
 如果资料包含“Figma 设计稿证据”，Figma 是主证据：优先按 Frame/Section/Component 名称、画布顺序、状态命名、可见文本和层级关系确定页面/界面/弹窗节点边界。
-如果资料同时包含“Markdown PRD 补充资料”，PRD 只补充功能规则、边界条件、验收标准、数据/API/配置约束；不得覆盖 Figma 中明确存在的界面边界。
+如果资料同时包含“导入素材补充资料”，导入素材只补充功能规则、边界条件、验收标准、数据/API/配置约束和现有实现线索；不得覆盖 Figma 中明确存在的界面边界。
 如果只有 Figma 资料，不要编造未出现的业务规则、接口、计费、权限或服务端细节；缺失信息写入需澄清点。
 	任务：识别这份资料中玩家实际会看到、且适合逐个打磨的页面/界面/弹窗节点。
 	不要把按钮、字段、奖励条目、动画帧或规则段落单独拆成页面节点；这些内部细节必须放入所属页面节点的 content，并在后续 MVC 子节点中展开。
@@ -3807,10 +4954,14 @@ function formatProjectWorkflowForDecomposition(projectWorkflow?: ProjectWorkflow
   ].filter(Boolean).join('\n')
 }
 
-async function decomposeL1(mdText: string, session: DecompositionSession): Promise<PrdNode[]> {
+async function decomposeL1(
+  mdText: string,
+  session: DecompositionSession,
+  imageBlocks: Anthropic.ImageBlockParam[] = [],
+): Promise<PrdNode[]> {
   if (!anthropic) throw new Error('Anthropic 客户端未初始化，请检查 ANTHROPIC_API_KEY')
   const claude = anthropic
-  if (mdText.length >= LARGE_PRD_DECOMPOSE_THRESHOLD) return decomposeLargeL1(mdText, session, claude)
+  if (mdText.length >= LARGE_PRD_DECOMPOSE_THRESHOLD) return decomposeLargeL1(mdText, session, claude, imageBlocks)
   const sourceOutline = buildSourceOutlineForPrompt(mdText)
   const projectWorkflowContext = formatProjectWorkflowForDecomposition(session.projectWorkflow)
 
@@ -3826,13 +4977,16 @@ async function decomposeL1(mdText: string, session: DecompositionSession): Promi
         system: decompositionL1SystemPrompt,
         tools: [decomposePrdTopLevelTool],
         tool_choice: { type: 'tool', name: 'decompose_prd' },
-        messages: [
-          {
-            role: 'user',
-            content: `${projectWorkflowContext}\n\n${retryInstruction} 本次只输出页面/界面/弹窗级节点，type 必须为 page，status 必须为 pending_refine，needsPolish 必须为 true。不要输出按钮、字段、奖励条目等内部细节节点；这些内容应写入所属页面的 content。拆分目标是后续以单个页面为单位逐个打磨。所有展示给用户的文字必须是中文，包括节点标题、摘要、正文、接力目标、质量门槛；只有 ID、路径、字段名、枚举值可以保留英文。跨页面关系写入 references，不要重复复制全文。\n\n原文标题参考（只作为定位线索，不是输出模板）：\n${sourceOutline}\n\n完整 PRD 原文：\n${mdText}`,
-          },
-        ],
-      })
+          messages: [
+            {
+              role: 'user',
+              content: buildContentWithImages(
+                `${projectWorkflowContext}\n\n${retryInstruction} 本次只输出页面/界面/弹窗级节点，type 必须为 page，status 必须为 pending_refine，needsPolish 必须为 true。不要输出按钮、字段、奖励条目等内部细节节点；这些内容应写入所属页面的 content。拆分目标是后续以单个页面为单位逐个打磨。所有展示给用户的文字必须是中文，包括节点标题、摘要、正文、接力目标、质量门槛；只有 ID、路径、字段名、枚举值可以保留英文。跨页面关系写入 references，不要重复复制全文。\n\n原文标题参考（只作为定位线索，不是输出模板）：\n${sourceOutline}\n\n完整 PRD 原文：\n${mdText}`,
+                imageBlocks,
+              ),
+            },
+          ],
+        })
     )
 
     const toolUse = response.content.find(
@@ -3887,7 +5041,12 @@ async function decomposeL1(mdText: string, session: DecompositionSession): Promi
   return normalizeTopLevelInterfaceNodes(retry.nodes)
 }
 
-async function decomposeBranch(mdText: string, parentNode: PrdNode, session: DecompositionSession): Promise<PrdNode[]> {
+async function decomposeBranch(
+  mdText: string,
+  parentNode: PrdNode,
+  session: DecompositionSession,
+  imageBlocks: Anthropic.ImageBlockParam[] = [],
+): Promise<PrdNode[]> {
   if (!anthropic) throw new Error('Anthropic 客户端未初始化，请检查 ANTHROPIC_API_KEY')
   const claude = anthropic
   const branchContext = extractRelevantMarkdownForNode(mdText, parentNode)
@@ -3906,13 +5065,16 @@ async function decomposeBranch(mdText: string, parentNode: PrdNode, session: Dec
         system: decompositionBranchSystemPrompt(parentNode.label, parentNode.id),
         tools: [decomposePrdTool],
         tool_choice: { type: 'tool', name: 'decompose_prd' },
-        messages: [
-          {
-            role: 'user',
-            content: `${projectWorkflowContext}\n\n${retryInstruction} 只输出有原文依据的 model、ctrl、view 子节点；缺失的 MVC 类别不要输出空节点或占位节点。分类必须基于原文事实维度：数据/配置/规则/领域状态归 model，操作流程/接口/校验/状态流转归 ctrl，布局/文案/动画/视觉反馈归 view；禁止按关键词机械归类。每个返回节点 parentId 必须为 "${parentNode.id}"，level 必须为 2，sourceKind 必须为 prd，evidenceRefs 必须引用真实原文，content 必须包含“原文位置 / 关键原文摘录 / 整理说明 / 需澄清点”。所有展示给用户的文字必须是中文；model、ctrl、view、ID、路径、字段名、枚举值可以保留英文。不要输出模板化标题说明，content 必须是你对原文相关内容的引用+整理。\n\n原文标题参考（只作为定位线索，不是输出模板）：\n${sourceOutline}\n\n相关 PRD 原文片段：\n${branchContext}`,
-          },
-        ],
-      })
+          messages: [
+            {
+              role: 'user',
+              content: buildContentWithImages(
+                `${projectWorkflowContext}\n\n${retryInstruction} 只输出有原文依据的 model、ctrl、view 子节点；缺失的 MVC 类别不要输出空节点或占位节点。分类必须基于原文事实维度：数据/配置/规则/领域状态归 model，操作流程/接口/校验/状态流转归 ctrl，布局/文案/动画/视觉反馈归 view；禁止按关键词机械归类。每个返回节点 parentId 必须为 "${parentNode.id}"，level 必须为 2，sourceKind 必须为 prd，evidenceRefs 必须引用真实原文，content 必须包含“原文位置 / 关键原文摘录 / 整理说明 / 需澄清点”。所有展示给用户的文字必须是中文；model、ctrl、view、ID、路径、字段名、枚举值可以保留英文。不要输出模板化标题说明，content 必须是你对原文相关内容的引用+整理。\n\n原文标题参考（只作为定位线索，不是输出模板）：\n${sourceOutline}\n\n相关 PRD 原文片段：\n${branchContext}`,
+                imageBlocks,
+              ),
+            },
+          ],
+        })
     )
 
     const toolUse = response.content.find(
@@ -4010,6 +5172,7 @@ async function runDecompositionJob(
   projectWorkflow?: ProjectWorkflowState | null,
   figmaEvidence?: FigmaDesignEvidence | null,
   rawPrdText?: string | null,
+  imageBlocks: Anthropic.ImageBlockParam[] = [],
 ): Promise<void> {
   const session = decompositionSessions.get(sessionId)
   if (!session) return
@@ -4025,7 +5188,7 @@ async function runDecompositionJob(
     let prdPageNodes: PrdNode[] = []
     if (rawPrdText?.trim() && anthropic) {
       try {
-        prdPageNodes = discardImportedReferences(await decomposeL1(rawPrdText, activeSession))
+        prdPageNodes = discardImportedReferences(await decomposeL1(rawPrdText, activeSession, imageBlocks))
       } catch (err) {
         appendDecompositionWarning(activeSession, `PRD 页面补充拆解失败，已保留 Figma 界面节点：${decompositionErrorMessage(err)}`)
       }
@@ -4038,7 +5201,7 @@ async function runDecompositionJob(
     }
   } else {
     pageNodes = applyPrdTextReferencesToNodes(
-      discardImportedReferences(await decomposeL1(mdText, activeSession)),
+      discardImportedReferences(await decomposeL1(mdText, activeSession, imageBlocks)),
       rawPrdText ?? mdText,
     )
   }
@@ -4060,7 +5223,7 @@ async function runDecompositionJob(
   if (shouldRunBranchDecomposition) {
     await runWithConcurrency(branchTargets, DECOMPOSITION_BRANCH_CONCURRENCY, async (pageNode) => {
       try {
-        const mvcNodes = await decomposeBranch(branchSourceText, pageNode, activeSession)
+        const mvcNodes = await decomposeBranch(branchSourceText, pageNode, activeSession, imageBlocks)
         if (mvcNodes.length > 0) mergeSessionNodes(activeSession, mvcNodes)
       } catch (err) {
         appendBranchErrorNote(activeSession, pageNode, decompositionErrorMessage(err))
@@ -4123,6 +5286,394 @@ function hasOwnEnvField(payload: AiEnvironmentUpdate, key: keyof typeof DEFAULT_
   return Object.prototype.hasOwnProperty.call(payload, key)
 }
 
+interface LarkCliRunResult {
+  stdout: string
+  stderr: string
+  code: number | null
+}
+
+interface LarkImageReference {
+  alt: string | null
+  token: string | null
+  url: string | null
+}
+
+interface LarkImportedImage {
+  name: string
+  mediaType: SupportedSourceImageMediaType
+  data: string
+  sourceUrl: string | null
+  token: string | null
+  size: number
+}
+
+class LarkImportError extends Error {
+  status: number
+  authorizationRequired: boolean
+  hint: string | null
+
+  constructor(message: string, options: { status?: number; authorizationRequired?: boolean; hint?: string | null } = {}) {
+    super(message)
+    this.name = 'LarkImportError'
+    this.status = options.status ?? 400
+    this.authorizationRequired = options.authorizationRequired ?? false
+    this.hint = options.hint ?? null
+  }
+}
+
+function configuredLarkCliBin() {
+  return (process.env.LARK_CLI_BIN ?? DEFAULT_ENV_CONFIG.LARK_CLI_BIN).trim() || DEFAULT_ENV_CONFIG.LARK_CLI_BIN
+}
+
+function larkIdentityArgs() {
+  const identity = (process.env.LARK_IDENTITY ?? DEFAULT_ENV_CONFIG.LARK_IDENTITY).trim().toLowerCase()
+  return identity === 'user' || identity === 'bot' ? ['--as', identity] : []
+}
+
+function larkChildEnv() {
+  return {
+    ...process.env,
+    LARK_APP_ID: process.env.LARK_APP_ID ?? '',
+    LARK_APP_SECRET: process.env.LARK_APP_SECRET ?? '',
+    LARK_TENANT_ACCESS_TOKEN: process.env.LARK_TENANT_ACCESS_TOKEN ?? '',
+    LARK_USER_ACCESS_TOKEN: process.env.LARK_USER_ACCESS_TOKEN ?? '',
+  }
+}
+
+function runLarkCli(args: string[], timeoutMs = LARK_CLI_TIMEOUT_MS): Promise<LarkCliRunResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(configuredLarkCliBin(), args, {
+      env: larkChildEnv(),
+      shell: process.platform === 'win32',
+      windowsHide: true,
+    })
+    let stdout = ''
+    let stderr = ''
+    let timedOut = false
+
+    child.stdout?.setEncoding('utf8')
+    child.stderr?.setEncoding('utf8')
+    child.stdout?.on('data', (chunk: string) => { stdout += chunk })
+    child.stderr?.on('data', (chunk: string) => { stderr += chunk })
+
+    const timer = setTimeout(() => {
+      timedOut = true
+      child.kill()
+    }, timeoutMs)
+
+    child.on('error', (error) => {
+      clearTimeout(timer)
+      reject(new LarkImportError(`无法启动 lark-cli：${error.message}`, { status: 503 }))
+    })
+
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      if (timedOut) {
+        reject(new LarkImportError(`lark-cli 超过 ${Math.round(timeoutMs / 1000)} 秒未返回，请稍后重试或检查授权。`, { status: 504 }))
+        return
+      }
+      resolve({ stdout, stderr, code })
+    })
+  })
+}
+
+function tryParseJson(value: string): unknown {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  try {
+    return JSON.parse(trimmed)
+  } catch {
+    return null
+  }
+}
+
+function larkEnvelopeFromResult(result: LarkCliRunResult): Record<string, unknown> | null {
+  const parsed = tryParseJson(result.stdout) ?? tryParseJson(result.stderr)
+  return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : null
+}
+
+function nestedRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' ? value as Record<string, unknown> : null
+}
+
+function larkCliErrorMessage(envelope: Record<string, unknown> | null, result: LarkCliRunResult) {
+  const error = nestedRecord(envelope?.error)
+  const message = normalizeOptionalSourceText(error?.message)
+    ?? normalizeOptionalSourceText(envelope?.message)
+    ?? normalizeOptionalSourceText(result.stderr)
+    ?? normalizeOptionalSourceText(result.stdout)
+    ?? `lark-cli 退出码 ${result.code ?? 'unknown'}`
+  const hint = normalizeOptionalSourceText(error?.hint)
+  return { message, hint }
+}
+
+function isLarkAuthorizationError(message: string, hint: string | null) {
+  return /auth|login|permission|scope|unauthorized|forbidden|access token|授权|权限|登录|未授权|未登录|身份/iu.test(
+    [message, hint].filter(Boolean).join('\n'),
+  )
+}
+
+async function runLarkCliJson(args: string[]) {
+  const result = await runLarkCli([...args, '--json'])
+  const envelope = larkEnvelopeFromResult(result)
+  const ok = envelope?.ok
+  if (result.code !== 0 || ok === false || !envelope) {
+    const { message, hint } = larkCliErrorMessage(envelope, result)
+    const authorizationRequired = isLarkAuthorizationError(message, hint)
+    throw new LarkImportError(message, {
+      status: authorizationRequired ? 409 : 400,
+      authorizationRequired,
+      hint,
+    })
+  }
+  return envelope
+}
+
+function normalizeLarkDocumentRef(value: unknown) {
+  const text = normalizeOptionalSourceText(value)
+  if (!text) throw new LarkImportError('请先粘贴飞书文档链接或文档 token。')
+  if (/^https?:\/\/.+/iu.test(text)) return text
+  if (/^[A-Za-z0-9_-]{8,}$/u.test(text)) return text
+  throw new LarkImportError('飞书链接格式无效，请粘贴 docx/wiki 链接或文档 token。')
+}
+
+function extractLarkDocumentContent(envelope: Record<string, unknown>) {
+  const data = nestedRecord(envelope.data)
+  const document = nestedRecord(data?.document)
+  const content = normalizeOptionalSourceText(document?.content ?? data?.content ?? envelope.content)
+  if (!content) throw new LarkImportError('飞书文档读取成功，但没有返回可分析正文。')
+  return {
+    content,
+    title: normalizeOptionalSourceText(document?.title),
+    documentId: normalizeOptionalSourceText(document?.document_id),
+  }
+}
+
+async function fetchLarkDocumentContent(documentRef: string, docFormat: 'markdown' | 'xml') {
+  const envelope = await runLarkCliJson([
+    'docs',
+    '+fetch',
+    '--api-version',
+    'v2',
+    '--doc',
+    documentRef,
+    '--doc-format',
+    docFormat,
+    '--detail',
+    'simple',
+    ...larkIdentityArgs(),
+  ])
+  return extractLarkDocumentContent(envelope)
+}
+
+function parseXmlAttributes(value: string) {
+  const attrs: Record<string, string> = {}
+  const attrRegex = /([:\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/giu
+  for (const match of value.matchAll(attrRegex)) {
+    const key = match[1]?.toLowerCase()
+    if (key) attrs[key] = match[2] ?? match[3] ?? ''
+  }
+  return attrs
+}
+
+function normalizeLarkImageTarget(rawTarget: string | null | undefined): Pick<LarkImageReference, 'token' | 'url'> | null {
+  const target = rawTarget?.trim()
+  if (!target || target.startsWith('data:')) return null
+  if (/^https?:\/\//iu.test(target)) return { url: target, token: null }
+  if (/^[A-Za-z0-9_-]{8,}$/u.test(target)) return { url: null, token: target }
+  return null
+}
+
+function dedupeLarkImageReferences(refs: LarkImageReference[]) {
+  const seen = new Set<string>()
+  const deduped: LarkImageReference[] = []
+  for (const ref of refs) {
+    const key = ref.url ?? ref.token
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    deduped.push(ref)
+  }
+  return deduped
+}
+
+function extractLarkImageReferences(markdown: string, xml: string | null) {
+  const refs: LarkImageReference[] = []
+  const markdownImageRegex = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/gu
+  for (const match of markdown.matchAll(markdownImageRegex)) {
+    const target = normalizeLarkImageTarget(match[2])
+    if (target) refs.push({ alt: match[1]?.trim() || null, ...target })
+  }
+
+  if (xml) {
+    const xmlImageRegex = /<img\b([^>]*)\/?>/giu
+    for (const match of xml.matchAll(xmlImageRegex)) {
+      const attrs = parseXmlAttributes(match[1])
+      const target = normalizeLarkImageTarget(attrs.url) ?? normalizeLarkImageTarget(attrs.token)
+      if (target) refs.push({ alt: attrs.alt || attrs.name || null, ...target })
+    }
+  }
+
+  return dedupeLarkImageReferences(refs)
+}
+
+function mediaTypeFromValue(value: string | null | undefined): SupportedSourceImageMediaType | null {
+  const normalized = value?.split(';')[0].trim().toLowerCase()
+  if (!normalized) return null
+  if (normalized === 'image/jpg') return 'image/jpeg'
+  return SUPPORTED_SOURCE_IMAGE_MEDIA_TYPES.has(normalized as SupportedSourceImageMediaType)
+    ? normalized as SupportedSourceImageMediaType
+    : null
+}
+
+function mediaTypeFromFilePath(filePath: string): SupportedSourceImageMediaType | null {
+  const extension = path.extname(filePath).toLowerCase()
+  if (extension === '.jpg' || extension === '.jpeg') return 'image/jpeg'
+  if (extension === '.png') return 'image/png'
+  if (extension === '.gif') return 'image/gif'
+  if (extension === '.webp') return 'image/webp'
+  return null
+}
+
+function safePathSegment(value: string) {
+  return value.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 80) || 'media'
+}
+
+function findFirstFile(root: string): string | null {
+  if (!existsSync(root)) return null
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const fullPath = path.join(root, entry.name)
+    if (entry.isFile()) return fullPath
+    if (entry.isDirectory()) {
+      const nested = findFirstFile(fullPath)
+      if (nested) return nested
+    }
+  }
+  return null
+}
+
+function imageFromBuffer(
+  bytes: Buffer,
+  mediaType: SupportedSourceImageMediaType,
+  ref: LarkImageReference,
+  index: number,
+): LarkImportedImage | null {
+  if (bytes.byteLength > LARK_IMPORT_MAX_IMAGE_BYTES) return null
+  return {
+    name: ref.alt || `feishu-image-${index + 1}`,
+    mediaType,
+    data: bytes.toString('base64'),
+    sourceUrl: ref.url,
+    token: ref.token,
+    size: bytes.byteLength,
+  }
+}
+
+async function downloadLarkImageFromUrl(ref: LarkImageReference, index: number) {
+  if (!ref.url) return null
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 10000)
+  try {
+    const response = await fetch(ref.url, { signal: controller.signal })
+    if (!response.ok) return null
+    const mediaType = mediaTypeFromValue(response.headers.get('content-type'))
+    if (!mediaType) return null
+    const contentLength = Number.parseInt(response.headers.get('content-length') ?? '0', 10)
+    if (contentLength > LARK_IMPORT_MAX_IMAGE_BYTES) return null
+    const bytes = Buffer.from(await response.arrayBuffer())
+    return imageFromBuffer(bytes, mediaType, ref, index)
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function downloadLarkImageFromToken(ref: LarkImageReference, index: number) {
+  if (!ref.token) return null
+  const outputDir = path.join(LARK_MEDIA_CACHE_ROOT, safePathSegment(ref.token))
+  mkdirSync(outputDir, { recursive: true })
+  await runLarkCliJson([
+    'docs',
+    '+media-preview',
+    '--token',
+    ref.token,
+    '--output',
+    path.join(outputDir, 'image'),
+    '--overwrite',
+    ...larkIdentityArgs(),
+  ])
+  const filePath = findFirstFile(outputDir)
+  if (!filePath) return null
+  const mediaType = mediaTypeFromFilePath(filePath)
+  if (!mediaType) return null
+  const stats = statSync(filePath)
+  if (stats.size > LARK_IMPORT_MAX_IMAGE_BYTES) return null
+  return imageFromBuffer(readFileSync(filePath), mediaType, ref, index)
+}
+
+async function importLarkImages(refs: LarkImageReference[]) {
+  const images: LarkImportedImage[] = []
+  const warnings: string[] = []
+  const cappedRefs = refs.slice(0, LARK_IMPORT_MAX_IMAGES)
+
+  for (const [index, ref] of cappedRefs.entries()) {
+    try {
+      const image = ref.url
+        ? await downloadLarkImageFromUrl(ref, index)
+        : await downloadLarkImageFromToken(ref, index)
+      if (image) images.push(image)
+      else warnings.push(`飞书图片 ${index + 1} 未能下载为可分析图片，已保留文本中的图片引用。`)
+    } catch (error) {
+      warnings.push(`飞书图片 ${index + 1} 读取失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  if (refs.length > cappedRefs.length) {
+    warnings.push(`飞书文档包含 ${refs.length} 张图片，本次最多随 AI 请求读取 ${LARK_IMPORT_MAX_IMAGES} 张。`)
+  }
+
+  return { images, warnings }
+}
+
+function titleFromMarkdown(markdown: string) {
+  const heading = markdown.match(/^#\s+(.+)$/mu)?.[1]
+  return heading?.trim() || null
+}
+
+function buildLarkImportText(options: {
+  documentRef: string
+  title: string
+  markdown: string
+  imageRefs: LarkImageReference[]
+  importedImages: LarkImportedImage[]
+}) {
+  const imageIndex = options.imageRefs.length
+    ? options.imageRefs.map((ref, index) => {
+        const imported = options.importedImages.find((image) => image.sourceUrl === ref.url || image.token === ref.token)
+        return [
+          `- 图片 ${index + 1}：${ref.alt || imported?.name || '未命名图片'}`,
+          ref.url ? `  - URL：${ref.url}` : null,
+          ref.token ? `  - token：${ref.token}` : null,
+          imported ? `  - 已作为视觉证据传入：${imported.mediaType}，${imported.size} bytes` : '  - 未下载为视觉证据，请根据正文引用继续判断',
+        ].filter(Boolean).join('\n')
+      }).join('\n')
+    : '- 未检测到图片引用。'
+
+  return [
+    `# 飞书文档：${options.title}`,
+    '',
+    `- 来源：${options.documentRef}`,
+    `- 图片引用数：${options.imageRefs.length}`,
+    `- 已随 AI 请求传入图片数：${options.importedImages.length}`,
+    '',
+    '## 正文',
+    '',
+    options.markdown.trim(),
+    '',
+    '## 图片索引',
+    '',
+    imageIndex,
+  ].join('\n')
+}
+
 function buildAiEnvironmentStatus() {
   return {
     aiConfigured: Boolean(process.env.ANTHROPIC_API_KEY?.trim()),
@@ -4133,6 +5684,12 @@ function buildAiEnvironmentStatus() {
       CLAUDE_MODEL: readEnvValue('CLAUDE_MODEL'),
       MOCK_DECOMPOSE: readEnvValue('MOCK_DECOMPOSE') === 'true',
       FIGMA_TOKEN_PRESENT: Boolean(process.env.FIGMA_TOKEN?.trim()),
+      LARK_CLI_BIN: readEnvValue('LARK_CLI_BIN'),
+      LARK_IDENTITY: readEnvValue('LARK_IDENTITY'),
+      LARK_APP_ID_PRESENT: Boolean(process.env.LARK_APP_ID?.trim()),
+      LARK_APP_SECRET_PRESENT: Boolean(process.env.LARK_APP_SECRET?.trim()),
+      LARK_TENANT_ACCESS_TOKEN_PRESENT: Boolean(process.env.LARK_TENANT_ACCESS_TOKEN?.trim()),
+      LARK_USER_ACCESS_TOKEN_PRESENT: Boolean(process.env.LARK_USER_ACCESS_TOKEN?.trim()),
     },
   }
 }
@@ -4159,6 +5716,24 @@ app.post('/api/environment', (req, res) => {
     FIGMA_TOKEN: hasOwnEnvField(payload, 'FIGMA_TOKEN')
       ? normalizeEnvField(payload.FIGMA_TOKEN, '')
       : (process.env.FIGMA_TOKEN ?? ''),
+    LARK_CLI_BIN: hasOwnEnvField(payload, 'LARK_CLI_BIN')
+      ? (normalizeEnvField(payload.LARK_CLI_BIN, DEFAULT_ENV_CONFIG.LARK_CLI_BIN) || DEFAULT_ENV_CONFIG.LARK_CLI_BIN)
+      : readEnvValue('LARK_CLI_BIN'),
+    LARK_IDENTITY: hasOwnEnvField(payload, 'LARK_IDENTITY')
+      ? (normalizeEnvField(payload.LARK_IDENTITY, DEFAULT_ENV_CONFIG.LARK_IDENTITY) || DEFAULT_ENV_CONFIG.LARK_IDENTITY)
+      : readEnvValue('LARK_IDENTITY'),
+    LARK_APP_ID: hasOwnEnvField(payload, 'LARK_APP_ID')
+      ? normalizeEnvField(payload.LARK_APP_ID, '')
+      : (process.env.LARK_APP_ID ?? ''),
+    LARK_APP_SECRET: hasOwnEnvField(payload, 'LARK_APP_SECRET')
+      ? normalizeEnvField(payload.LARK_APP_SECRET, '')
+      : (process.env.LARK_APP_SECRET ?? ''),
+    LARK_TENANT_ACCESS_TOKEN: hasOwnEnvField(payload, 'LARK_TENANT_ACCESS_TOKEN')
+      ? normalizeEnvField(payload.LARK_TENANT_ACCESS_TOKEN, '')
+      : (process.env.LARK_TENANT_ACCESS_TOKEN ?? ''),
+    LARK_USER_ACCESS_TOKEN: hasOwnEnvField(payload, 'LARK_USER_ACCESS_TOKEN')
+      ? normalizeEnvField(payload.LARK_USER_ACCESS_TOKEN, '')
+      : (process.env.LARK_USER_ACCESS_TOKEN ?? ''),
   }
 
   if (!nextEnv.ANTHROPIC_API_KEY) {
@@ -4176,11 +5751,64 @@ app.post('/api/environment', (req, res) => {
     `CLAUDE_MODEL=${nextEnv.CLAUDE_MODEL}`,
     `MOCK_DECOMPOSE=${nextEnv.MOCK_DECOMPOSE}`,
     `FIGMA_TOKEN=${nextEnv.FIGMA_TOKEN}`,
+    `LARK_CLI_BIN=${nextEnv.LARK_CLI_BIN}`,
+    `LARK_IDENTITY=${nextEnv.LARK_IDENTITY}`,
+    `LARK_APP_ID=${nextEnv.LARK_APP_ID}`,
+    `LARK_APP_SECRET=${nextEnv.LARK_APP_SECRET}`,
+    `LARK_TENANT_ACCESS_TOKEN=${nextEnv.LARK_TENANT_ACCESS_TOKEN}`,
+    `LARK_USER_ACCESS_TOKEN=${nextEnv.LARK_USER_ACCESS_TOKEN}`,
     '',
   ].join('\n')
   writeFileSync(ENV_FILE_PATH, fileBody, 'utf8')
 
   res.json(buildAiEnvironmentStatus())
+})
+
+app.post('/api/lark/import', async (req, res) => {
+  try {
+    const documentRef = normalizeLarkDocumentRef((req.body as { url?: unknown; doc?: unknown })?.url ?? (req.body as { doc?: unknown })?.doc)
+    const markdownResult = await fetchLarkDocumentContent(documentRef, 'markdown')
+    let xmlContent: string | null = null
+    const warnings: string[] = []
+
+    try {
+      xmlContent = (await fetchLarkDocumentContent(documentRef, 'xml')).content
+    } catch (xmlError) {
+      warnings.push(`飞书图片索引读取受限：${xmlError instanceof Error ? xmlError.message : String(xmlError)}`)
+    }
+
+    const imageRefs = extractLarkImageReferences(markdownResult.content, xmlContent)
+    const importedImages = await importLarkImages(imageRefs)
+    warnings.push(...importedImages.warnings)
+
+    const title = markdownResult.title ?? titleFromMarkdown(markdownResult.content) ?? markdownResult.documentId ?? '飞书文档'
+    const text = buildLarkImportText({
+      documentRef,
+      title,
+      markdown: markdownResult.content,
+      imageRefs,
+      importedImages: importedImages.images,
+    })
+
+    res.json({
+      title,
+      filename: `${title.replace(/[<>:"/\\|?*\x00-\x1F]/g, '-').slice(0, 80) || 'feishu-document'}.md`,
+      text,
+      documentId: markdownResult.documentId,
+      imageCount: imageRefs.length,
+      images: importedImages.images,
+      warnings,
+    })
+  } catch (error) {
+    if (error instanceof LarkImportError) {
+      return void res.status(error.status).json({
+        error: error.message,
+        authorizationRequired: error.authorizationRequired,
+        hint: error.hint,
+      })
+    }
+    res.status(400).json({ error: error instanceof Error ? error.message : '飞书文档导入失败' })
+  }
 })
 
 app.get('/api/health', (_req, res) => {
@@ -4196,6 +5824,11 @@ app.get('/api/health', (_req, res) => {
       mode: 'local-in-memory-index',
       status: 'ready',
       description: 'Indexes the current PRD source document, node tree, evidence references, backend contracts, and recent node-chat confirmations per request.',
+    },
+    lark: {
+      cli: readEnvValue('LARK_CLI_BIN'),
+      identity: readEnvValue('LARK_IDENTITY'),
+      configured: Boolean(process.env.LARK_APP_SECRET?.trim() || process.env.LARK_USER_ACCESS_TOKEN?.trim() || process.env.LARK_TENANT_ACCESS_TOKEN?.trim()),
     },
   })
 })
@@ -4254,8 +5887,8 @@ app.post('/api/decompose/start', (req, res) => {
   const assetBaseUrl = `${req.protocol}://${req.get('host') ?? `127.0.0.1:${port}`}`
   const jobFn = process.env.MOCK_DECOMPOSE === 'true'
     ? runMockDecompositionJob(sessionId)
-    : buildCombinedDecompositionInput(sources, { assetBaseUrl })
-        .then((input) => runDecompositionJob(sessionId, input.text, projectWorkflow, input.figmaEvidence, sources.mdText))
+    : buildCombinedDecompositionInput(sources, { assetBaseUrl, semanticReview: true })
+        .then((input) => runDecompositionJob(sessionId, input.text, projectWorkflow, input.figmaEvidence, input.rawPrdText, input.imageBlocks))
   jobFn.catch((err: unknown) => {
     const session = decompositionSessions.get(sessionId)
     if (session) {
@@ -5023,6 +6656,7 @@ app.post('/api/node-chat', async (req, res) => {
   const pageSectionContext = hasNodeSections(targetNode.sections)
     ? `\n\n${formatNodeSectionsForContext(targetNode.sections)}`
     : ''
+  const figmaStateContext = formatFigmaStateSemanticsMarkdown(targetNode, tree)
   const performanceSpec = resolveNodePerformanceSpec(targetNode)
   const latestUserText = extractText(latestUserMessage.content)
   const canUseFastPerformancePath = isPerformancePolishMode
@@ -5059,6 +6693,8 @@ app.post('/api/node-chat', async (req, res) => {
     targetNode.techNotes,
     targetNode.handoffGoal,
     targetNode.qualityGate,
+    targetNode.uiStates?.map((state) => [state.label, state.kind, state.visibleTexts.join('\n'), state.annotations.join('\n')].filter(Boolean).join('\n')).join('\n\n'),
+    targetNode.stateTransitions?.map((transition) => [transition.trigger, transition.condition, transition.effect, transition.evidence.join('\n')].filter(Boolean).join('\n')).join('\n\n'),
     Object.values(targetNode.sections ?? {}).map((section) => [
       section?.title,
       section?.summary,
@@ -5086,7 +6722,7 @@ app.post('/api/node-chat', async (req, res) => {
 规格视角: ${formatSpecLens(resolveNodeSpecLens(targetNode))}
 AI 接力目标: ${targetNode.handoffGoal ?? '未指定'}
 质量门槛: ${targetNode.qualityGate ?? '未指定'}
-内容: ${compactExcerpt(targetNode.content, 6000)}${projectKnowledgeContext ? `\n\n${projectKnowledgeContext}` : ''}${pageSectionContext}${performanceContext}${targetNode.techNotes ? `\n技术备注: ${targetNode.techNotes}` : ''}${parentNode ? `\n\n父节点上下文：\n标题: ${parentNode.label}\n摘要: ${parentNode.summary}` : ''}${mvcChildContext}`
+内容: ${compactExcerpt(targetNode.content, 6000)}${projectKnowledgeContext ? `\n\n${projectKnowledgeContext}` : ''}${pageSectionContext}${figmaStateContext ? `\n\n${figmaStateContext}` : ''}${performanceContext}${targetNode.techNotes ? `\n技术备注: ${targetNode.techNotes}` : ''}${parentNode ? `\n\n父节点上下文：\n标题: ${parentNode.label}\n摘要: ${parentNode.summary}` : ''}${mvcChildContext}`
 
   const hasReferenceImages = hasImages(latestUserMessage.content)
   const conversationText = latestUserText
@@ -8112,6 +9748,73 @@ function formatNodeSectionsForContext(sections: PrdNode['sections']) {
   ].join('\n')
 }
 
+function findNodeStateLabel(node: PrdNode | null | undefined, stateId: string | null | undefined) {
+  if (!node || !stateId) return null
+  return node.uiStates?.find((state) => state.id === stateId)?.label ?? null
+}
+
+function formatStateTransitionLine(transition: PrdStateTransition, tree?: Record<string, PrdNode> | null) {
+  const source = tree?.[transition.sourceNodeId]
+  const target = tree?.[transition.targetNodeId]
+  const sourceLabel = source?.label ?? transition.sourceNodeId
+  const targetLabel = target?.label ?? transition.targetNodeId
+  const sourceState = findNodeStateLabel(source, transition.sourceStateId)
+  const targetState = findNodeStateLabel(target, transition.targetStateId)
+  const trigger = transition.trigger ? `触发：${transition.trigger}` : null
+  const condition = transition.condition ? `条件：${transition.condition}` : null
+  const effect = transition.effect ? `结果：${transition.effect}` : null
+  const transitionSource = transition.source ? `来源：${transition.source}` : null
+  const evidence = transition.evidence.length ? `证据：${transition.evidence.join(' / ')}` : null
+  return [
+    `- ${sourceLabel}${sourceState ? `「${sourceState}」` : ''} -> ${targetLabel}${targetState ? `「${targetState}」` : ''}`,
+    `  ${[trigger, condition, effect, transitionSource, `置信度：${transition.confidence}%`].filter(Boolean).join('；')}`,
+    evidence ? `  ${evidence}` : null,
+  ].filter(Boolean).join('\n')
+}
+
+function collectIncomingStateTransitions(node: PrdNode, tree?: Record<string, PrdNode> | null) {
+  if (!tree) return []
+  return Object.values(tree)
+    .filter((source) => source.id !== node.id)
+    .flatMap((source) => (source.stateTransitions ?? []).filter((transition) => transition.targetNodeId === node.id))
+}
+
+function formatFigmaStateSemanticsMarkdown(node: PrdNode, tree?: Record<string, PrdNode> | null) {
+  const lines: string[] = []
+  if (node.figmaUxMap) {
+    lines.push('## Figma UX Map 审阅摘要', '')
+    lines.push(`- Screen：${node.figmaUxMap.screenLabel}（${node.figmaUxMap.screenId}）`)
+    lines.push(`- 审阅来源：${node.figmaUxMap.reviewSource}，总体置信度 ${node.figmaUxMap.reviewConfidence}%`)
+    if (node.figmaUxMap.sourceFrameIds.length) lines.push(`- 来源 Frames：${node.figmaUxMap.sourceFrameIds.join(', ')}`)
+    if (node.figmaUxMap.transitionIds.length) lines.push(`- 相关流转：${node.figmaUxMap.transitionIds.join(', ')}`)
+    if (node.figmaUxMap.ambiguityIds.length) lines.push(`- 待确认项：${node.figmaUxMap.ambiguityIds.join(', ')}`)
+    if (node.figmaUxMap.notes.length) lines.push(`- 审阅备注：${node.figmaUxMap.notes.join('；')}`)
+  }
+
+  if (node.uiStates?.length) {
+    lines.push('', '## Figma 状态语义', '')
+    for (const state of node.uiStates) {
+      const visibleTexts = state.visibleTexts.length ? `；文案：${state.visibleTexts.slice(0, 5).join(' / ')}` : ''
+      const annotations = state.annotations.length ? `；注释：${state.annotations.join(' / ')}` : ''
+      lines.push(`- ${state.label}（${figmaUiStateKindLabel(state.kind)}，置信度 ${state.confidence}%，node-id=${state.figmaNodeId}${visibleTexts}${annotations}）`)
+    }
+  }
+
+  const outgoing = node.stateTransitions ?? []
+  const incoming = collectIncomingStateTransitions(node, tree)
+  if (outgoing.length || incoming.length) {
+    lines.push('', '## Figma 状态/界面流转', '')
+    if (outgoing.length) {
+      lines.push('### 流出', ...outgoing.map((transition) => formatStateTransitionLine(transition, tree)))
+    }
+    if (incoming.length) {
+      lines.push('', '### 流入', ...incoming.map((transition) => formatStateTransitionLine(transition, tree)))
+    }
+  }
+
+  return lines.join('\n').trim()
+}
+
 function generateMarkdown(node: PrdNode, tree?: Record<string, PrdNode>): string {
   const statusLabel = node.status === 'done' ? '已完成' : node.status === 'pending_refine' || node.needsPolish ? '待打磨' : '无需打磨'
   const lines = [
@@ -8178,6 +9881,11 @@ function generateMarkdown(node: PrdNode, tree?: Record<string, PrdNode>): string
         if (section.openQuestions.length) lines.push('', '#### 需澄清点', ...section.openQuestions.map((item) => `- ${item}`))
       }
     }
+  }
+
+  const figmaStateMarkdown = formatFigmaStateSemanticsMarkdown(node, tree)
+  if (figmaStateMarkdown) {
+    lines.push('', figmaStateMarkdown)
   }
 
   const performanceMarkdown = formatPerformanceSpecMarkdown(resolveNodePerformanceSpec(node))

@@ -12,7 +12,6 @@ const X_STEP = 480
 const SIBLING_GAP = 28
 const ROOT_GAP = 64
 const REFERENCE_LANE_GAP = 28
-const FREE_NODE_X_STEP = 540
 const FREE_NODE_Y_STEP = 350
 const FREE_COMPONENT_GAP_X = 92
 const FREE_COMPONENT_GAP_Y = 118
@@ -30,6 +29,12 @@ const NODE_DRAG_THRESHOLD = 4
 const NODE_DROP_GAP = 12
 const NODE_DROP_SEARCH_STEP = 32
 const NODE_DROP_SEARCH_RADIUS = 1280
+const FREE_CANVAS_BASE_EXTENT = 12000
+const FREE_CANVAS_SAFE_MARGIN = 1600
+const FREE_CANVAS_MIN_WIDTH = 2600
+const FREE_CANVAS_MIN_HEIGHT = 1800
+const FREE_DRAG_AUTOPAN_EDGE = 72
+const FREE_DRAG_AUTOPAN_MAX_STEP = 28
 
 type ConnectionDirection = 'incoming' | 'outgoing'
 type LayoutMode = 'tree' | 'free'
@@ -46,6 +51,7 @@ interface TreeCanvasProps {
   selectedNodeId: string | null
   canvasNodePositions?: Record<string, { x: number; y: number }>
   previewHtmlByNodeId?: Record<string, string>
+  fitRequest?: number
   connectableNodeIds?: string[]
   connectionDraft?: CanvasConnectionDraft | null
   onNodeClick: (id: string) => void
@@ -73,6 +79,14 @@ interface Rect {
   top: number
   right: number
   bottom: number
+}
+
+interface CanvasMetrics {
+  contentWidth: number
+  contentHeight: number
+  renderOffsetX: number
+  renderOffsetY: number
+  fitBounds: Rect
 }
 
 interface AddNodeSlot {
@@ -118,6 +132,18 @@ interface FlowEdge {
   labelY: number
   selected: boolean
   note?: string | null
+}
+
+interface DirectedReferenceEdge {
+  fromId: string
+  toId: string
+}
+
+interface FreeComponentPlan {
+  width: number
+  height: number
+  gapAfterX: number
+  place: (originX: number, originY: number) => PositionedNode[]
 }
 
 function sortByOrder(a: PrdNode, b: PrdNode) {
@@ -339,6 +365,26 @@ function buildReferenceGraph(nodes: PrdNode[], fullTree: PrdTree) {
   return adjacency
 }
 
+function buildReferenceEdges(nodes: PrdNode[], fullTree: PrdTree): DirectedReferenceEdge[] {
+  const visibleIds = new Set(nodes.map((node) => node.id))
+  const seen = new Set<string>()
+  const edges: DirectedReferenceEdge[] = []
+
+  for (const node of nodes) {
+    const source = fullTree[node.id] ?? node
+    for (const reference of source.references ?? []) {
+      const targetNodeId = reference.targetNodeId
+      if (!targetNodeId || targetNodeId === source.id || !visibleIds.has(targetNodeId)) continue
+      const key = `${source.id}->${targetNodeId}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      edges.push({ fromId: source.id, toId: targetNodeId })
+    }
+  }
+
+  return edges
+}
+
 function freeNodeSort(
   adjacency: Map<string, Set<string>>,
   focusNodeId?: string | null,
@@ -397,6 +443,445 @@ function freeComponentColumns(size: number) {
   return Math.ceil(Math.sqrt(size * 1.25))
 }
 
+function freeLineCorridorGap(nodeWidth: number) {
+  return nodeWidth
+}
+
+function freeLooseNodeGap(nodeWidth: number) {
+  return nodeWidth / 2
+}
+
+function hasReachablePath(adjacency: Map<string, Set<string>>, fromId: string, toId: string) {
+  const visited = new Set<string>()
+  const queue = [fromId]
+
+  while (queue.length) {
+    const nodeId = queue.shift()!
+    if (nodeId === toId) return true
+    if (visited.has(nodeId)) continue
+    visited.add(nodeId)
+    for (const nextId of adjacency.get(nodeId) ?? []) queue.push(nextId)
+  }
+
+  return false
+}
+
+function buildAcyclicReferenceBackbone(component: PrdNode[], edges: DirectedReferenceEdge[]) {
+  const nodeById = new Map(component.map((node) => [node.id, node]))
+  const forward = new Map(component.map((node) => [node.id, new Set<string>()]))
+  const sortedEdges = [...edges].sort((a, b) => {
+    const sourceA = nodeById.get(a.fromId)
+    const sourceB = nodeById.get(b.fromId)
+    const targetA = nodeById.get(a.toId)
+    const targetB = nodeById.get(b.toId)
+    if (sourceA && sourceB) {
+      const sourceOrder = sortByOrder(sourceA, sourceB)
+      if (sourceOrder !== 0) return sourceOrder
+    }
+    if (targetA && targetB) {
+      const targetOrder = sortByOrder(targetA, targetB)
+      if (targetOrder !== 0) return targetOrder
+    }
+    return `${a.fromId}->${a.toId}`.localeCompare(`${b.fromId}->${b.toId}`)
+  })
+  const backbone: DirectedReferenceEdge[] = []
+
+  for (const edge of sortedEdges) {
+    if (hasReachablePath(forward, edge.toId, edge.fromId)) continue
+    forward.get(edge.fromId)?.add(edge.toId)
+    backbone.push(edge)
+  }
+
+  return backbone
+}
+
+function rankLayeredComponent(
+  component: PrdNode[],
+  edges: DirectedReferenceEdge[],
+  adjacency: Map<string, Set<string>>,
+  focusNodeId?: string | null,
+) {
+  const nodeById = new Map(component.map((node) => [node.id, node]))
+  const incomingCount = new Map(component.map((node) => [node.id, 0]))
+  const outgoing = new Map(component.map((node) => [node.id, [] as string[]]))
+  const ranks = new Map(component.map((node) => [node.id, 0]))
+
+  for (const edge of edges) {
+    if (!nodeById.has(edge.fromId) || !nodeById.has(edge.toId)) continue
+    incomingCount.set(edge.toId, (incomingCount.get(edge.toId) ?? 0) + 1)
+    outgoing.get(edge.fromId)?.push(edge.toId)
+  }
+
+  const compare = freeNodeSort(adjacency, focusNodeId)
+  const queue = component.filter((node) => (incomingCount.get(node.id) ?? 0) === 0).sort(compare)
+  const visited = new Set<string>()
+
+  while (queue.length) {
+    const node = queue.shift()!
+    if (visited.has(node.id)) continue
+    visited.add(node.id)
+
+    for (const targetId of outgoing.get(node.id) ?? []) {
+      ranks.set(targetId, Math.max(ranks.get(targetId) ?? 0, (ranks.get(node.id) ?? 0) + 1))
+      const nextIncoming = (incomingCount.get(targetId) ?? 0) - 1
+      incomingCount.set(targetId, nextIncoming)
+      if (nextIncoming === 0) {
+        const targetNode = nodeById.get(targetId)
+        if (targetNode) {
+          queue.push(targetNode)
+          queue.sort(compare)
+        }
+      }
+    }
+  }
+
+  for (const node of [...component].sort(compare)) {
+    if (visited.has(node.id)) continue
+    const predecessorRanks = edges
+      .filter((edge) => edge.toId === node.id && visited.has(edge.fromId))
+      .map((edge) => ranks.get(edge.fromId) ?? 0)
+    ranks.set(node.id, predecessorRanks.length ? Math.max(...predecessorRanks) + 1 : 0)
+  }
+
+  return ranks
+}
+
+function groupNodesByRank(component: PrdNode[], ranks: Map<string, number>) {
+  const groups = new Map<number, PrdNode[]>()
+  for (const node of component) {
+    const rank = ranks.get(node.id) ?? 0
+    const group = groups.get(rank) ?? []
+    group.push(node)
+    groups.set(rank, group)
+  }
+  return groups
+}
+
+function freeRankFallbackSort(
+  adjacency: Map<string, Set<string>>,
+  focusNodeId?: string | null,
+) {
+  return (a: PrdNode, b: PrdNode) => (
+    (b.id === focusNodeId ? 1 : 0) - (a.id === focusNodeId ? 1 : 0)
+    || (adjacency.get(b.id)?.size ?? 0) - (adjacency.get(a.id)?.size ?? 0)
+    || sortByOrder(a, b)
+  )
+}
+
+function buildRankOrderIndex(groups: Map<number, PrdNode[]>) {
+  const index = new Map<string, number>()
+  for (const nodes of groups.values()) {
+    nodes.forEach((node, order) => index.set(node.id, order))
+  }
+  return index
+}
+
+function averageNeighborOrder(nodeId: string, edges: DirectedReferenceEdge[], orderIndex: Map<string, number>, direction: 'incoming' | 'outgoing') {
+  const neighborOrders = edges
+    .map((edge) => {
+      if (direction === 'incoming' && edge.toId === nodeId) return orderIndex.get(edge.fromId)
+      if (direction === 'outgoing' && edge.fromId === nodeId) return orderIndex.get(edge.toId)
+      return undefined
+    })
+    .filter((value): value is number => typeof value === 'number')
+
+  if (neighborOrders.length === 0) return Number.POSITIVE_INFINITY
+  return neighborOrders.reduce((sum, value) => sum + value, 0) / neighborOrders.length
+}
+
+function abstractSegmentCcw(a: { x: number; y: number }, b: { x: number; y: number }, c: { x: number; y: number }) {
+  return (c.y - a.y) * (b.x - a.x) > (b.y - a.y) * (c.x - a.x)
+}
+
+function abstractSegmentsIntersect(
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+  c: { x: number; y: number },
+  d: { x: number; y: number },
+) {
+  return (
+    abstractSegmentCcw(a, c, d) !== abstractSegmentCcw(b, c, d)
+    && abstractSegmentCcw(a, b, c) !== abstractSegmentCcw(a, b, d)
+  )
+}
+
+function countLayerCrossings(groups: Map<number, PrdNode[]>, edges: DirectedReferenceEdge[]) {
+  const rankKeys = [...groups.keys()].sort((a, b) => a - b)
+  const positions = new Map<string, { x: number; y: number }>()
+
+  rankKeys.forEach((rank, rankIndex) => {
+    const nodes = groups.get(rank) ?? []
+    nodes.forEach((node, nodeIndex) => {
+      positions.set(node.id, {
+        x: rankIndex,
+        y: nodeIndex - (nodes.length - 1) / 2,
+      })
+    })
+  })
+
+  let count = 0
+  for (let i = 0; i < edges.length; i += 1) {
+    for (let j = i + 1; j < edges.length; j += 1) {
+      const first = edges[i]
+      const second = edges[j]
+      if (new Set([first.fromId, first.toId, second.fromId, second.toId]).size < 4) continue
+
+      const a = positions.get(first.fromId)
+      const b = positions.get(first.toId)
+      const c = positions.get(second.fromId)
+      const d = positions.get(second.toId)
+      if (a && b && c && d && abstractSegmentsIntersect(a, b, c, d)) count += 1
+    }
+  }
+
+  return count
+}
+
+function factorial(value: number) {
+  let result = 1
+  for (let index = 2; index <= value; index += 1) result *= index
+  return result
+}
+
+function permutations<T>(items: T[]): T[][] {
+  if (items.length <= 1) return [items]
+  const result: T[][] = []
+
+  items.forEach((item, index) => {
+    const rest = [...items.slice(0, index), ...items.slice(index + 1)]
+    for (const tail of permutations(rest)) result.push([item, ...tail])
+  })
+
+  return result
+}
+
+function reduceSmallRankCrossings(groups: Map<number, PrdNode[]>, edges: DirectedReferenceEdge[]) {
+  const rankKeys = [...groups.keys()].sort((a, b) => a - b)
+  const permutationBudget = rankKeys.reduce((product, rank) => (
+    product * factorial(groups.get(rank)?.length ?? 1)
+  ), 1)
+  if (permutationBudget > 2400) return false
+
+  const rankPermutations = rankKeys.map((rank) => permutations(groups.get(rank) ?? []))
+  const originalCrossings = countLayerCrossings(groups, edges)
+  let bestCrossings = originalCrossings
+  let bestGroups: Map<number, PrdNode[]> | null = null
+
+  function visit(rankIndex: number, candidate: Map<number, PrdNode[]>) {
+    if (rankIndex >= rankKeys.length) {
+      const crossings = countLayerCrossings(candidate, edges)
+      if (crossings < bestCrossings) {
+        bestCrossings = crossings
+        bestGroups = new Map([...candidate.entries()].map(([rank, nodes]) => [rank, [...nodes]]))
+      }
+      return
+    }
+
+    const rank = rankKeys[rankIndex]
+    for (const nodes of rankPermutations[rankIndex]) {
+      candidate.set(rank, nodes)
+      visit(rankIndex + 1, candidate)
+    }
+  }
+
+  visit(0, new Map())
+
+  const winningGroups = bestGroups as Map<number, PrdNode[]> | null
+  if (!winningGroups) return false
+  for (const [rank, nodes] of winningGroups.entries()) groups.set(rank, nodes)
+  return true
+}
+
+function reduceRankCrossings(groups: Map<number, PrdNode[]>, edges: DirectedReferenceEdge[]) {
+  if (reduceSmallRankCrossings(groups, edges)) return
+
+  const rankKeys = [...groups.keys()].sort((a, b) => a - b)
+  for (let sweep = 0; sweep < 6; sweep += 1) {
+    let improved = false
+
+    for (const rank of rankKeys) {
+      const nodes = groups.get(rank)
+      if (!nodes || nodes.length < 2) continue
+
+      for (let index = 0; index < nodes.length - 1; index += 1) {
+        const currentNodes = groups.get(rank) ?? nodes
+        const before = countLayerCrossings(groups, edges)
+        const nextNodes = [...currentNodes]
+        const temp = nextNodes[index]
+        nextNodes[index] = nextNodes[index + 1]
+        nextNodes[index + 1] = temp
+        groups.set(rank, nextNodes)
+
+        const after = countLayerCrossings(groups, edges)
+        if (after < before) {
+          improved = true
+        } else {
+          groups.set(rank, currentNodes)
+        }
+      }
+    }
+
+    if (!improved) break
+  }
+}
+
+function orderLayeredRanks(
+  component: PrdNode[],
+  ranks: Map<string, number>,
+  edges: DirectedReferenceEdge[],
+  adjacency: Map<string, Set<string>>,
+  focusNodeId?: string | null,
+) {
+  const groups = groupNodesByRank(component, ranks)
+  const rankKeys = [...groups.keys()].sort((a, b) => a - b)
+  const fallback = freeRankFallbackSort(adjacency, focusNodeId)
+
+  for (const rank of rankKeys) {
+    groups.get(rank)?.sort(fallback)
+  }
+
+  for (let sweep = 0; sweep < 4; sweep += 1) {
+    let orderIndex = buildRankOrderIndex(groups)
+    for (const rank of rankKeys) {
+      groups.get(rank)?.sort((a, b) => (
+        averageNeighborOrder(a.id, edges, orderIndex, 'incoming')
+        - averageNeighborOrder(b.id, edges, orderIndex, 'incoming')
+        || fallback(a, b)
+      ))
+    }
+
+    orderIndex = buildRankOrderIndex(groups)
+    for (const rank of [...rankKeys].reverse()) {
+      groups.get(rank)?.sort((a, b) => (
+        averageNeighborOrder(a.id, edges, orderIndex, 'outgoing')
+        - averageNeighborOrder(b.id, edges, orderIndex, 'outgoing')
+        || fallback(a, b)
+      ))
+    }
+  }
+
+  reduceRankCrossings(groups, edges)
+
+  return rankKeys.map((rank) => groups.get(rank) ?? []).filter((group) => group.length > 0)
+}
+
+function buildGridComponentPlan(component: PrdNode[], previewNodeIds: Set<string>): FreeComponentPlan {
+  const cols = freeComponentColumns(component.length)
+  const rows = Math.ceil(component.length / cols)
+  const componentSizes = component.map((node) => getCardSize(node, previewNodeIds.has(node.id)))
+  const maxNodeWidth = componentSizes.reduce((max, size) => Math.max(max, size.width), DEFAULT_CARD_WIDTH)
+  const maxNodeHeight = componentSizes.reduce((max, size) => Math.max(max, size.height), DEFAULT_CARD_HEIGHT)
+  const looseGap = freeLooseNodeGap(maxNodeWidth)
+  const colStep = maxNodeWidth + looseGap
+  const rowStep = Math.max(FREE_NODE_Y_STEP, maxNodeHeight + looseGap)
+  const width = (cols - 1) * colStep + maxNodeWidth + 72
+  const height = (rows - 1) * rowStep + maxNodeHeight + 28
+
+  return {
+    width,
+    height,
+    gapAfterX: looseGap,
+    place(originX, originY) {
+      return component.map((node, index) => {
+        const col = index % cols
+        const row = Math.floor(index / cols)
+        const size = getCardSize(node, previewNodeIds.has(node.id))
+        const staggerX = row % 2 === 1 ? 72 : 0
+        const staggerY = col % 2 === 1 ? 28 : 0
+        return {
+          node,
+          x: originX + col * colStep + staggerX,
+          y: originY + row * rowStep + staggerY,
+          width: size.width,
+          height: size.height,
+          depth: 0,
+        }
+      })
+    },
+  }
+}
+
+function rankGapHasReferenceLine(edges: DirectedReferenceEdge[], rankIndexByNodeId: Map<string, number>, gapIndex: number) {
+  return edges.some((edge) => {
+    const fromRank = rankIndexByNodeId.get(edge.fromId)
+    const toRank = rankIndexByNodeId.get(edge.toId)
+    if (fromRank === undefined || toRank === undefined || fromRank === toRank) return false
+    return Math.min(fromRank, toRank) <= gapIndex && Math.max(fromRank, toRank) > gapIndex
+  })
+}
+
+function buildLayeredComponentPlan(
+  component: PrdNode[],
+  componentEdges: DirectedReferenceEdge[],
+  adjacency: Map<string, Set<string>>,
+  previewNodeIds: Set<string>,
+  focusNodeId?: string | null,
+): FreeComponentPlan | null {
+  const backbone = buildAcyclicReferenceBackbone(component, componentEdges)
+  if (backbone.length === 0) return null
+
+  const ranks = rankLayeredComponent(component, backbone, adjacency, focusNodeId)
+  const rankGroups = orderLayeredRanks(component, ranks, backbone, adjacency, focusNodeId)
+  if (rankGroups.length <= 1 && component.length > 2) return null
+
+  const rankHeights = rankGroups.map((group) => (
+    group.reduce((sum, node) => (
+      sum + getCardSize(node, previewNodeIds.has(node.id)).height
+    ), 0)
+  ))
+  const maxNodeWidth = component.reduce((max, node) => Math.max(max, getCardSize(node, previewNodeIds.has(node.id)).width), DEFAULT_CARD_WIDTH)
+  const looseGap = freeLooseNodeGap(maxNodeWidth)
+  const rankNodeGap = looseGap
+  const rankHeightsWithGaps = rankGroups.map((group, index) => (
+    rankHeights[index] + Math.max(0, group.length - 1) * rankNodeGap
+  ))
+  const rankWidths = rankGroups.map((group) => (
+    group.reduce((max, node) => Math.max(max, getCardSize(node, previewNodeIds.has(node.id)).width), DEFAULT_CARD_WIDTH)
+  ))
+  const rankIndexByNodeId = new Map<string, number>()
+  rankGroups.forEach((group, rankIndex) => {
+    group.forEach((node) => rankIndexByNodeId.set(node.id, rankIndex))
+  })
+  const rankGaps = rankGroups.slice(0, -1).map((_, gapIndex) => (
+    rankGapHasReferenceLine(componentEdges, rankIndexByNodeId, gapIndex)
+      ? freeLineCorridorGap(maxNodeWidth)
+      : looseGap
+  ))
+  const rankXOffsets = rankGroups.map((_, rankIndex) => {
+    if (rankIndex === 0) return 0
+    return rankGroups.slice(0, rankIndex).reduce((sum, _group, index) => (
+      sum + rankWidths[index] + rankGaps[index]
+    ), 0)
+  })
+  const height = Math.max(DEFAULT_CARD_HEIGHT, ...rankHeightsWithGaps) + 28
+  const width = rankXOffsets[rankXOffsets.length - 1] + rankWidths[rankWidths.length - 1] + 72
+
+  return {
+    width,
+    height,
+    gapAfterX: looseGap,
+    place(originX, originY) {
+      return rankGroups.flatMap((group, rankIndex) => {
+        const rankHeight = rankHeightsWithGaps[rankIndex] ?? 0
+        let cursorY = originY + (height - rankHeight) / 2
+        return group.map((node) => {
+          const size = getCardSize(node, previewNodeIds.has(node.id))
+          const item = {
+            node,
+            x: originX + rankXOffsets[rankIndex],
+            y: cursorY,
+            width: size.width,
+            height: size.height,
+            depth: rankIndex,
+          }
+          cursorY += size.height + rankNodeGap
+          return item
+        })
+      })
+    },
+  }
+}
+
 function buildFreeLayout(
   tree: PrdTree,
   sourceTree: PrdTree | undefined,
@@ -416,6 +901,7 @@ function buildFreeLayout(
 
   const fullTree = sourceTree ?? tree
   const adjacency = buildReferenceGraph(nodes, fullTree)
+  const referenceEdges = buildReferenceEdges(nodes, fullTree)
   const components = collectFreeComponents(nodes, adjacency, focusNodeId)
   const positioned: PositionedNode[] = []
   const byId = new Map<string, PositionedNode>()
@@ -427,43 +913,26 @@ function buildFreeLayout(
   let maxBottom = cursorY
 
   for (const component of components) {
-    const cols = freeComponentColumns(component.length)
-    const rows = Math.ceil(component.length / cols)
-    const componentSizes = component.map((node) => getCardSize(node, previewNodeIds.has(node.id)))
-    const maxNodeWidth = componentSizes.reduce((max, size) => Math.max(max, size.width), DEFAULT_CARD_WIDTH)
-    const maxNodeHeight = componentSizes.reduce((max, size) => Math.max(max, size.height), DEFAULT_CARD_HEIGHT)
-    const rowStep = Math.max(FREE_NODE_Y_STEP, maxNodeHeight + 80)
-    const componentWidth = (cols - 1) * FREE_NODE_X_STEP + maxNodeWidth + 72
-    const componentHeight = (rows - 1) * rowStep + maxNodeHeight + 28
+    const componentIds = new Set(component.map((node) => node.id))
+    const componentEdges = referenceEdges.filter((edge) => componentIds.has(edge.fromId) && componentIds.has(edge.toId))
+    const plan = buildLayeredComponentPlan(component, componentEdges, adjacency, previewNodeIds, focusNodeId)
+      ?? buildGridComponentPlan(component, previewNodeIds)
 
-    if (cursorX > PADDING_X && cursorX + componentWidth > PADDING_X + FREE_ROW_WIDTH) {
+    if (cursorX > PADDING_X && cursorX + plan.width > PADDING_X + FREE_ROW_WIDTH) {
       cursorX = PADDING_X
       cursorY += rowHeight + FREE_COMPONENT_GAP_Y
       rowHeight = 0
     }
 
-    component.forEach((node, index) => {
-      const col = index % cols
-      const row = Math.floor(index / cols)
-      const size = getCardSize(node, previewNodeIds.has(node.id))
-      const staggerX = row % 2 === 1 ? 72 : 0
-      const staggerY = col % 2 === 1 ? 28 : 0
-      const item: PositionedNode = {
-        node,
-        x: cursorX + col * FREE_NODE_X_STEP + staggerX,
-        y: cursorY + row * rowStep + staggerY,
-        width: size.width,
-        height: size.height,
-        depth: 0,
-      }
+    for (const item of plan.place(cursorX, cursorY)) {
       positioned.push(item)
-      byId.set(node.id, item)
+      byId.set(item.node.id, item)
       maxRight = Math.max(maxRight, item.x + item.width)
       maxBottom = Math.max(maxBottom, item.y + item.height)
-    })
+    }
 
-    cursorX += componentWidth + FREE_COMPONENT_GAP_X
-    rowHeight = Math.max(rowHeight, componentHeight)
+    cursorX += plan.width + Math.max(FREE_COMPONENT_GAP_X, plan.gapAfterX)
+    rowHeight = Math.max(rowHeight, plan.height)
   }
 
   return {
@@ -483,8 +952,8 @@ function applyManualPositions(layout: LayoutResult, manualPositions: Record<stri
     if (!manual) return item
     return {
       ...item,
-      x: Math.max(24, manual.x),
-      y: Math.max(72, manual.y),
+      x: Number.isFinite(manual.x) ? manual.x : item.x,
+      y: Number.isFinite(manual.y) ? manual.y : item.y,
     }
   })
   const byId = new Map(nodes.map((item) => [item.node.id, item]))
@@ -535,6 +1004,19 @@ function referenceGeometry(
   const sy = source.y + source.height / 2
   const ex = direction > 0 ? target.x : target.x + target.width
   const ey = target.y + target.height / 2
+
+  if (direction < 0) {
+    const loopGap = Math.max(120, Math.abs(ex - sx) / 4)
+    const arcY = Math.max(24, Math.min(source.y, target.y) - 320 - Math.abs(outgoingOffset - incomingOffset))
+    const midX = (sx + ex) / 2
+
+    return {
+      d: `M ${sx} ${sy} C ${sx - loopGap} ${sy}, ${sx - loopGap} ${arcY}, ${midX} ${arcY} C ${ex + loopGap} ${arcY}, ${ex + loopGap} ${ey}, ${ex} ${ey}`,
+      labelX: midX - 62,
+      labelY: arcY - 13,
+    }
+  }
+
   const controlGap = Math.max(88, Math.abs(ex - sx) / 2)
   const c1x = sx + direction * controlGap
   const c2x = ex - direction * controlGap
@@ -556,6 +1038,95 @@ function edgeLabelRect(edge: FlowEdge, labelX = edge.labelX, labelY = edge.label
     top,
     right: labelX - 20 + EDGE_LABEL_WIDTH,
     bottom: top + height,
+  }
+}
+
+function includeRect(bounds: Rect | null, rect: Rect): Rect {
+  if (!bounds) return rect
+  return {
+    left: Math.min(bounds.left, rect.left),
+    top: Math.min(bounds.top, rect.top),
+    right: Math.max(bounds.right, rect.right),
+    bottom: Math.max(bounds.bottom, rect.bottom),
+  }
+}
+
+function fallbackRect(width: number, height: number): Rect {
+  return {
+    left: 0,
+    top: 0,
+    right: Math.max(1, width),
+    bottom: Math.max(1, height),
+  }
+}
+
+function buildGraphBounds(
+  layout: LayoutResult,
+  addSlot: AddNodeSlot | null,
+  flowEdges: FlowEdge[],
+  fallbackWidth: number,
+  fallbackHeight: number,
+  layoutMode: LayoutMode,
+): Rect {
+  let bounds: Rect | null = layoutMode === 'free' ? null : fallbackRect(fallbackWidth, fallbackHeight)
+
+  for (const item of layout.nodes) {
+    bounds = includeRect(bounds, positionedNodeRect(item))
+  }
+
+  if (addSlot) {
+    bounds = includeRect(bounds, positionedNodeRect(addSlot))
+  }
+
+  for (const edge of flowEdges) {
+    bounds = includeRect(bounds, edgeLabelRect(edge))
+  }
+
+  return bounds ?? fallbackRect(fallbackWidth, fallbackHeight)
+}
+
+function buildCanvasMetrics(
+  layoutMode: LayoutMode,
+  graphBounds: Rect,
+  nominalContentWidth: number,
+  nominalContentHeight: number,
+): CanvasMetrics {
+  if (layoutMode !== 'free') {
+    return {
+      contentWidth: nominalContentWidth,
+      contentHeight: nominalContentHeight,
+      renderOffsetX: 0,
+      renderOffsetY: 0,
+      fitBounds: fallbackRect(nominalContentWidth, nominalContentHeight),
+    }
+  }
+
+  const canvasLeft = Math.min(-FREE_CANVAS_BASE_EXTENT, graphBounds.left - FREE_CANVAS_SAFE_MARGIN)
+  const canvasTop = Math.min(-FREE_CANVAS_BASE_EXTENT, graphBounds.top - FREE_CANVAS_SAFE_MARGIN)
+  const canvasRight = Math.max(
+    FREE_CANVAS_BASE_EXTENT,
+    nominalContentWidth,
+    graphBounds.right + FREE_CANVAS_SAFE_MARGIN,
+    canvasLeft + FREE_CANVAS_MIN_WIDTH,
+  )
+  const canvasBottom = Math.max(
+    FREE_CANVAS_BASE_EXTENT,
+    nominalContentHeight,
+    graphBounds.bottom + FREE_CANVAS_SAFE_MARGIN,
+    canvasTop + FREE_CANVAS_MIN_HEIGHT,
+  )
+
+  return {
+    contentWidth: canvasRight - canvasLeft,
+    contentHeight: canvasBottom - canvasTop,
+    renderOffsetX: -canvasLeft,
+    renderOffsetY: -canvasTop,
+    fitBounds: {
+      left: graphBounds.left - canvasLeft,
+      top: graphBounds.top - canvasTop,
+      right: graphBounds.right - canvasLeft,
+      bottom: graphBounds.bottom - canvasTop,
+    },
   }
 }
 
@@ -609,12 +1180,16 @@ function isEdgeSelected(edge: Pick<FlowEdge, 'fromId' | 'toId'>, selectedNodeId:
 function buildFlowEdges(layout: LayoutResult, tree: PrdTree, sourceTree: PrdTree | undefined, selectedNodeId: string | null): FlowEdge[] {
   const fullTree = sourceTree ?? tree
   const edges: FlowEdge[] = []
-  const referenceRows: Array<{
+  const referenceGroups: Array<{
     item: PositionedNode
     source: PrdNode
     target: PositionedNode
-    reference: NonNullable<PrdNode['references']>[number]
+    references: Array<{
+      referenceIndex: number
+      reference: NonNullable<PrdNode['references']>[number]
+    }>
   }> = []
+  const referenceGroupByKey = new Map<string, (typeof referenceGroups)[number]>()
 
   for (const item of layout.nodes) {
     const parentId = item.node.parentId
@@ -637,43 +1212,56 @@ function buildFlowEdges(layout: LayoutResult, tree: PrdTree, sourceTree: PrdTree
     const source = fullTree[item.node.id]
     if (!source?.references?.length) continue
 
-    for (const reference of source.references) {
+    for (const [referenceIndex, reference] of source.references.entries()) {
       if (!reference.targetNodeId || reference.targetNodeId === source.id) continue
       const target = layout.byId.get(reference.targetNodeId)
       if (!target) continue
-      referenceRows.push({ item, source, target, reference })
+      const groupKey = `${source.id}->${reference.targetNodeId}`
+      let group = referenceGroupByKey.get(groupKey)
+      if (!group) {
+        group = { item, source, target, references: [] }
+        referenceGroupByKey.set(groupKey, group)
+        referenceGroups.push(group)
+      }
+      group.references.push({ referenceIndex, reference })
     }
   }
 
   const outgoingCounts = new Map<string, number>()
   const incomingCounts = new Map<string, number>()
-  for (const row of referenceRows) {
-    outgoingCounts.set(row.source.id, (outgoingCounts.get(row.source.id) ?? 0) + 1)
-    incomingCounts.set(row.target.node.id, (incomingCounts.get(row.target.node.id) ?? 0) + 1)
+  for (const group of referenceGroups) {
+    outgoingCounts.set(group.source.id, (outgoingCounts.get(group.source.id) ?? 0) + 1)
+    incomingCounts.set(group.target.node.id, (incomingCounts.get(group.target.node.id) ?? 0) + 1)
   }
 
   const outgoingSeen = new Map<string, number>()
   const incomingSeen = new Map<string, number>()
-  for (const row of referenceRows) {
-    const outgoingIndex = outgoingSeen.get(row.source.id) ?? 0
-    const incomingIndex = incomingSeen.get(row.target.node.id) ?? 0
-    outgoingSeen.set(row.source.id, outgoingIndex + 1)
-    incomingSeen.set(row.target.node.id, incomingIndex + 1)
+  for (const group of referenceGroups) {
+    const outgoingIndex = outgoingSeen.get(group.source.id) ?? 0
+    const incomingIndex = incomingSeen.get(group.target.node.id) ?? 0
+    outgoingSeen.set(group.source.id, outgoingIndex + 1)
+    incomingSeen.set(group.target.node.id, incomingIndex + 1)
 
-    const geometry = referenceGeometry(row.item, row.target, {
+    const geometry = referenceGeometry(group.item, group.target, {
       outgoingIndex,
-      outgoingCount: outgoingCounts.get(row.source.id) ?? 1,
+      outgoingCount: outgoingCounts.get(group.source.id) ?? 1,
       incomingIndex,
-      incomingCount: incomingCounts.get(row.target.node.id) ?? 1,
+      incomingCount: incomingCounts.get(group.target.node.id) ?? 1,
     })
-    const base = { fromId: row.source.id, toId: row.target.node.id }
+    const base = { fromId: group.source.id, toId: group.target.node.id }
+    const firstReference = group.references[0]?.reference
+    const referenceCount = group.references.length
     edges.push({
-      id: `reference-${row.source.id}-${row.reference.targetNodeId}-${row.reference.label}`,
+      id: `reference-${group.source.id}-${group.target.node.id}`,
       kind: 'reference',
       ...base,
       ...geometry,
-      label: row.reference.label || '跨页面跳转',
-      note: row.reference.reason,
+      label: referenceCount > 1
+        ? `${firstReference?.label || '跨页面跳转'} 等 ${referenceCount} 条`
+        : firstReference?.label || '跨页面跳转',
+      note: referenceCount > 1
+        ? `共 ${referenceCount} 个条件标题，点击编辑`
+        : firstReference?.reason,
       selected: isEdgeSelected(base, selectedNodeId),
     })
   }
@@ -697,6 +1285,7 @@ export function TreeCanvas({
   selectedNodeId,
   canvasNodePositions = {},
   previewHtmlByNodeId = {},
+  fitRequest,
   connectableNodeIds,
   connectionDraft,
   onNodeClick,
@@ -716,6 +1305,7 @@ export function TreeCanvas({
   const nodeDragRef = useRef<NodeDragState | null>(null)
   const suppressNodeClickRef = useRef<{ nodeId: string; until: number } | null>(null)
   const didInitialFitRef = useRef(false)
+  const lastFitRequestRef = useRef(fitRequest)
   const [scaleLabel, setScaleLabel] = useState(1)
 
   const focusNodeId = connectionDraft?.nodeId ?? selectedNodeId
@@ -734,7 +1324,7 @@ export function TreeCanvas({
   const addSlot = useMemo<AddNodeSlot | null>(() => {
     if (!onAddNode) return null
     if (layoutMode === 'free') {
-      const occupiedRects = generatedLayout.nodes.map((item) => positionedNodeRect(item, 36))
+      const occupiedRects = layout.nodes.map((item) => positionedNodeRect(item, 36))
       for (let row = 0; row < 12; row += 1) {
         for (let col = 0; col < 6; col += 1) {
           const x = PADDING_X + col * 460 + (row % 2 === 1 ? 70 : 0)
@@ -755,7 +1345,7 @@ export function TreeCanvas({
 
       return {
         parent: null,
-        x: generatedLayout.contentWidth + 32,
+        x: layout.contentWidth + 32,
         y: PADDING_TOP + 28,
         width: ADD_SLOT_WIDTH,
         height: ADD_SLOT_HEIGHT,
@@ -782,7 +1372,11 @@ export function TreeCanvas({
         height,
       }),
     }
-  }, [generatedLayout, layoutMode, onAddNode])
+  }, [layout, layoutMode, onAddNode])
+  const baseContentWidth = Math.max(
+    layout.contentWidth,
+    addSlot ? addSlot.x + addSlot.width + PADDING_X : 0,
+  )
   const baseContentHeight = addSlot
     ? Math.max(layout.contentHeight, addSlot.y + addSlot.height + PADDING_BOTTOM)
     : layout.contentHeight
@@ -793,13 +1387,19 @@ export function TreeCanvas({
       right: Math.max(bounds.right, rect.right),
       bottom: Math.max(bounds.bottom, rect.bottom),
     }
-  }, { right: layout.contentWidth, bottom: baseContentHeight })
-  const contentWidth = Math.max(
+  }, { right: baseContentWidth, bottom: baseContentHeight })
+  const nominalContentWidth = Math.max(
     labelBounds.right + PADDING_X,
-    layout.contentWidth,
-    addSlot ? addSlot.x + addSlot.width + PADDING_X : 0,
+    baseContentWidth,
   )
-  const contentHeight = Math.max(baseContentHeight, labelBounds.bottom + PADDING_BOTTOM)
+  const nominalContentHeight = Math.max(baseContentHeight, labelBounds.bottom + PADDING_BOTTOM)
+  const graphBounds = useMemo(() => (
+    buildGraphBounds(layout, addSlot, flowEdges, nominalContentWidth, nominalContentHeight, layoutMode)
+  ), [addSlot, flowEdges, layout, layoutMode, nominalContentHeight, nominalContentWidth])
+  const canvasMetrics = useMemo(() => (
+    buildCanvasMetrics(layoutMode, graphBounds, nominalContentWidth, nominalContentHeight)
+  ), [graphBounds, layoutMode, nominalContentHeight, nominalContentWidth])
+  const { contentWidth, contentHeight, renderOffsetX, renderOffsetY, fitBounds } = canvasMetrics
   const selectedPosition = selectedNodeId ? layout.byId.get(selectedNodeId) ?? null : null
   const isConnecting = Boolean(connectionDraft)
 
@@ -841,15 +1441,15 @@ export function TreeCanvas({
   function canDropNodeAt(nodeId: string, x: number, y: number) {
     const current = layout.byId.get(nodeId)
     if (!current) return false
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false
     const candidate = positionedNodeRect({ x, y, width: current.width, height: current.height }, NODE_DROP_GAP)
-    if (candidate.left < 0 || candidate.top < 56) return false
     return !blockedRectsForNode(nodeId).some((rect) => rectsOverlap(candidate, rect))
   }
 
   function clampDropPosition(x: number, y: number) {
     return {
-      x: Math.max(0, x),
-      y: Math.max(56, y),
+      x: Number.isFinite(x) ? x : 0,
+      y: Number.isFinite(y) ? y : 56,
     }
   }
 
@@ -935,6 +1535,40 @@ export function TreeCanvas({
     window.removeEventListener('pointercancel', handleWindowNodePointerEnd)
   }
 
+  function autoPanWhileDragging(e: globalThis.PointerEvent, scale: number) {
+    const viewport = viewportRef.current
+    if (!viewport) return { panX: 0, panY: 0 }
+
+    const rect = viewport.getBoundingClientRect()
+    let panX = 0
+    let panY = 0
+
+    if (e.clientX < rect.left + FREE_DRAG_AUTOPAN_EDGE) {
+      panX = ((rect.left + FREE_DRAG_AUTOPAN_EDGE - e.clientX) / FREE_DRAG_AUTOPAN_EDGE) * FREE_DRAG_AUTOPAN_MAX_STEP
+    } else if (e.clientX > rect.right - FREE_DRAG_AUTOPAN_EDGE) {
+      panX = -((e.clientX - (rect.right - FREE_DRAG_AUTOPAN_EDGE)) / FREE_DRAG_AUTOPAN_EDGE) * FREE_DRAG_AUTOPAN_MAX_STEP
+    }
+
+    if (e.clientY < rect.top + FREE_DRAG_AUTOPAN_EDGE) {
+      panY = ((rect.top + FREE_DRAG_AUTOPAN_EDGE - e.clientY) / FREE_DRAG_AUTOPAN_EDGE) * FREE_DRAG_AUTOPAN_MAX_STEP
+    } else if (e.clientY > rect.bottom - FREE_DRAG_AUTOPAN_EDGE) {
+      panY = -((e.clientY - (rect.bottom - FREE_DRAG_AUTOPAN_EDGE)) / FREE_DRAG_AUTOPAN_EDGE) * FREE_DRAG_AUTOPAN_MAX_STEP
+    }
+
+    if (panX === 0 && panY === 0) return { panX: 0, panY: 0 }
+
+    applyTransform({
+      ...transformRef.current,
+      tx: transformRef.current.tx + panX,
+      ty: transformRef.current.ty + panY,
+    })
+
+    return {
+      panX: panX / scale,
+      panY: panY / scale,
+    }
+  }
+
   function handleWindowNodePointerMove(e: globalThis.PointerEvent) {
     const drag = nodeDragRef.current
     if (!drag || drag.pointerId !== e.pointerId) return
@@ -948,12 +1582,16 @@ export function TreeCanvas({
     }
     e.preventDefault()
     const scale = transformRef.current.scale || 1
+    const pan = autoPanWhileDragging(e, scale)
+    drag.originX -= pan.panX
+    drag.originY -= pan.panY
+
     const nextPosition = clampDropPosition(drag.originX + dx / scale, drag.originY + dy / scale)
 
     drag.currentX = nextPosition.x
     drag.currentY = nextPosition.y
-    drag.element.style.left = `${nextPosition.x}px`
-    drag.element.style.top = `${nextPosition.y}px`
+    drag.element.style.left = `${nextPosition.x + renderOffsetX}px`
+    drag.element.style.top = `${nextPosition.y + renderOffsetY}px`
     drag.element.style.zIndex = '40'
     drag.element.style.willChange = 'left, top'
   }
@@ -966,8 +1604,8 @@ export function TreeCanvas({
       const settledPosition = resolveNodeDropPosition(drag.nodeId, drag.currentX, drag.currentY)
       drag.currentX = settledPosition.x
       drag.currentY = settledPosition.y
-      drag.element.style.left = `${settledPosition.x}px`
-      drag.element.style.top = `${settledPosition.y}px`
+      drag.element.style.left = `${settledPosition.x + renderOffsetX}px`
+      drag.element.style.top = `${settledPosition.y + renderOffsetY}px`
       suppressNodeClickRef.current = { nodeId: drag.nodeId, until: Date.now() + 350 }
       onNodePositionCommit?.(drag.nodeId, settledPosition)
       drag.element.style.zIndex = ''
@@ -1034,11 +1672,22 @@ export function TreeCanvas({
       return
     }
 
+    const fitWidth = Math.max(1, fitBounds.right - fitBounds.left)
+    const fitHeight = Math.max(1, fitBounds.bottom - fitBounds.top)
     const scale = clampScale(Math.min(
       1,
-      (viewport.clientWidth - 56) / contentWidth,
-      (viewport.clientHeight - 56) / contentHeight,
+      Math.max(1, viewport.clientWidth - 56) / fitWidth,
+      Math.max(1, viewport.clientHeight - 56) / fitHeight,
     ))
+    if (layoutMode === 'free') {
+      applyTransform({
+        scale,
+        tx: (viewport.clientWidth - fitWidth * scale) / 2 - fitBounds.left * scale,
+        ty: (viewport.clientHeight - fitHeight * scale) / 2 - fitBounds.top * scale,
+      })
+      return
+    }
+
     applyTransform({ scale, tx: 28, ty: 28 })
   }
 
@@ -1049,7 +1698,14 @@ export function TreeCanvas({
       handleFitScreen()
     })
     return () => window.cancelAnimationFrame(frame)
-  }, [contentWidth, contentHeight, layout.nodes.length])
+  }, [fitBounds, layout.nodes.length, layoutMode])
+
+  useEffect(() => {
+    if (fitRequest === undefined || lastFitRequestRef.current === fitRequest) return
+    lastFitRequestRef.current = fitRequest
+    const frame = window.requestAnimationFrame(() => handleFitScreen())
+    return () => window.cancelAnimationFrame(frame)
+  }, [fitBounds, fitRequest, layoutMode])
 
   function handleWheel(e: WheelEvent<HTMLDivElement>) {
     e.preventDefault()
@@ -1162,7 +1818,7 @@ export function TreeCanvas({
           <div
             key={layer.depth}
             className="absolute top-9 flex items-center gap-xs font-mono text-[10px] uppercase text-on-surface-variant/70"
-            style={{ left: layer.x, width: layer.width }}
+            style={{ left: layer.x + renderOffsetX, width: layer.width }}
           >
             <span className="h-px flex-1 bg-outline-variant/30" />
             <span>{layer.label}</span>
@@ -1183,33 +1839,35 @@ export function TreeCanvas({
             </marker>
           </defs>
 
-          {flowEdges.map((edge, index) => (
-            <path
-              key={edge.id}
-              data-flow-edge-path={`${edge.fromId}->${edge.toId}`}
-              data-flow-edge-kind={edge.kind}
-              d={edge.d}
-              fill="none"
-              markerEnd={edge.selected ? 'url(#flow-arrow-selected)' : 'url(#flow-arrow)'}
-              pathLength={1}
-              stroke={edge.selected ? '#4edea3' : edge.kind === 'reference' ? '#adc6ff' : '#919095'}
-              strokeOpacity={focusNodeId && !edge.selected ? 0.22 : 1}
-              strokeDasharray={edge.kind === 'reference' ? '8 8' : undefined}
-              strokeLinecap="round"
-              strokeWidth={edge.selected ? 3 : 2}
-              vectorEffect="non-scaling-stroke"
-              style={{ animationDelay: `${Math.min(index * 45, 420)}ms` }}
-            />
-          ))}
+          <g transform={`translate(${renderOffsetX} ${renderOffsetY})`}>
+            {flowEdges.map((edge, index) => (
+              <path
+                key={edge.id}
+                data-flow-edge-path={`${edge.fromId}->${edge.toId}`}
+                data-flow-edge-kind={edge.kind}
+                d={edge.d}
+                fill="none"
+                markerEnd={edge.selected ? 'url(#flow-arrow-selected)' : 'url(#flow-arrow)'}
+                pathLength={1}
+                stroke={edge.selected ? '#4edea3' : edge.kind === 'reference' ? '#adc6ff' : '#919095'}
+                strokeOpacity={focusNodeId && !edge.selected ? 0.22 : 1}
+                strokeDasharray={edge.kind === 'reference' ? '8 8' : undefined}
+                strokeLinecap="round"
+                strokeWidth={edge.selected ? 3 : 2}
+                vectorEffect="non-scaling-stroke"
+                style={{ animationDelay: `${Math.min(index * 45, 420)}ms` }}
+              />
+            ))}
 
-          {addSlot?.d && (
-            <path
-              d={addSlot.d}
-              className="svg-line"
-              pathLength={1}
-              style={{ animationDelay: '180ms' }}
-            />
-          )}
+            {addSlot?.d && (
+              <path
+                d={addSlot.d}
+                className="svg-line"
+                pathLength={1}
+                style={{ animationDelay: '180ms' }}
+              />
+            )}
+          </g>
 
         </svg>
 
@@ -1222,7 +1880,11 @@ export function TreeCanvas({
                 ? 'border-secondary/50 bg-secondary-container/30 text-secondary'
                 : 'border-outline-variant bg-surface-container-high/90 text-on-surface-variant',
           ].join(' ')
-          const style = { left: edge.labelX - 20, top: edge.labelY - (edge.note ? 8 : 0), width: 164 }
+          const style = {
+            left: edge.labelX - 20 + renderOffsetX,
+            top: edge.labelY - (edge.note ? 8 : 0) + renderOffsetY,
+            width: 164,
+          }
 
           if (edge.kind === 'reference') {
             return (
@@ -1267,7 +1929,7 @@ export function TreeCanvas({
                 isConnectionSource ? 'outline outline-2 outline-primary shadow-[0_0_0_4px_rgba(43,136,255,0.16)]' : '',
                 connectionDraft && !isConnectionSource && !isConnectionTarget ? 'opacity-45' : '',
               ].join(' ')}
-              style={{ left: item.x, top: item.y, width: item.width, height: item.height }}
+              style={{ left: item.x + renderOffsetX, top: item.y + renderOffsetY, width: item.width, height: item.height }}
             >
               <NodeCard
                 node={item.node}
@@ -1290,7 +1952,10 @@ export function TreeCanvas({
               type="button"
               onClick={() => handleStartConnection(selectedPosition.node.id, 'incoming')}
               className="absolute z-30 flex h-9 w-9 items-center justify-center rounded-full border border-secondary/60 bg-secondary-container text-on-secondary-container shadow-lg transition-transform hover:scale-105 hover:border-secondary"
-              style={{ left: selectedPosition.x - 48, top: selectedPosition.y + selectedPosition.height / 2 - 18 }}
+              style={{
+                left: selectedPosition.x - 48 + renderOffsetX,
+                top: selectedPosition.y + selectedPosition.height / 2 - 18 + renderOffsetY,
+              }}
               title="连接流入界面"
               aria-label="连接流入界面"
             >
@@ -1300,7 +1965,10 @@ export function TreeCanvas({
               type="button"
               onClick={() => handleStartConnection(selectedPosition.node.id, 'outgoing')}
               className="absolute z-30 flex h-9 w-9 items-center justify-center rounded-full border border-tertiary/60 bg-tertiary-container text-tertiary shadow-lg transition-transform hover:scale-105 hover:border-tertiary"
-              style={{ left: selectedPosition.x + selectedPosition.width + 10, top: selectedPosition.y + selectedPosition.height / 2 - 18 }}
+              style={{
+                left: selectedPosition.x + selectedPosition.width + 10 + renderOffsetX,
+                top: selectedPosition.y + selectedPosition.height / 2 - 18 + renderOffsetY,
+              }}
               title="连接流出界面"
               aria-label="连接流出界面"
             >
@@ -1317,7 +1985,7 @@ export function TreeCanvas({
             title="新增页面节点"
             aria-label="新增页面节点"
             className="group absolute z-20 flex items-center gap-sm rounded-lg border border-dashed border-primary/70 bg-surface-container-high/95 p-sm text-left shadow-lg transition-all hover:-translate-y-0.5 hover:border-primary hover:bg-primary-container/30 hover:shadow-xl focus:outline-none focus:ring-2 focus:ring-primary/50"
-            style={{ left: addSlot.x, top: addSlot.y, width: addSlot.width, height: addSlot.height }}
+            style={{ left: addSlot.x + renderOffsetX, top: addSlot.y + renderOffsetY, width: addSlot.width, height: addSlot.height }}
           >
             <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg border border-primary/50 bg-primary-container text-primary transition-colors group-hover:bg-primary group-hover:text-on-primary">
               <span className="material-symbols-outlined" style={{ fontSize: '30px' }}>add</span>

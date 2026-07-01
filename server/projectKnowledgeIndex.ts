@@ -10,6 +10,7 @@ export type ProjectKnowledgeDocumentType =
   | 'backend'
   | 'evidence'
   | 'reference'
+  | 'state'
   | 'chat'
 
 export interface ProjectKnowledgeDocument {
@@ -100,6 +101,25 @@ function messageText(content: ChatMessage['content']) {
 function evidenceText(refs: PrdNodeEvidenceRef[] | null | undefined) {
   if (!refs?.length) return ''
   return refs.map((ref) => `[${ref.sourceKind}] ${ref.sourceLabel}${ref.quote ? `: ${ref.quote}` : ''}`).join('\n')
+}
+
+function figmaStateText(node: PrdNode) {
+  const stateText = (node.uiStates ?? []).map((state) => [
+    `${state.label} (${state.kind})`,
+    `figma:${state.figmaNodeId}`,
+    state.visibleTexts.length ? `visible:${state.visibleTexts.join(' / ')}` : null,
+    state.annotations.length ? `annotations:${state.annotations.join(' / ')}` : null,
+    `confidence:${state.confidence}`,
+  ].filter(Boolean).join('\n'))
+  const transitionText = (node.stateTransitions ?? []).map((transition) => [
+    `${transition.sourceNodeId} -> ${transition.targetNodeId}`,
+    transition.trigger ? `trigger:${transition.trigger}` : null,
+    transition.condition ? `condition:${transition.condition}` : null,
+    transition.effect ? `effect:${transition.effect}` : null,
+    transition.evidence.length ? `evidence:${transition.evidence.join(' / ')}` : null,
+    `confidence:${transition.confidence}`,
+  ].filter(Boolean).join('\n'))
+  return [...stateText, ...transitionText].join('\n\n')
 }
 
 function pushDocument(documents: ProjectKnowledgeDocument[], document: ProjectKnowledgeDocument) {
@@ -242,6 +262,20 @@ function pushNodeDocuments(documents: ProjectKnowledgeDocument[], tree: Record<s
         nodeId: node.id,
         parentNodeId: node.parentId ?? null,
         tags: [node.id, 'reference'],
+      })
+    }
+
+    const stateText = figmaStateText(node)
+    if (stateText) {
+      pushDocument(documents, {
+        id: `state:${node.id}`,
+        type: 'state',
+        title: `${node.label} / Figma 状态与流转`,
+        source: node.docPath ?? node.id,
+        text: stateText,
+        nodeId: node.id,
+        parentNodeId: node.parentId ?? null,
+        tags: [node.id, 'figma', 'state', 'transition'],
       })
     }
   })

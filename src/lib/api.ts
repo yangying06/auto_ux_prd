@@ -9,19 +9,23 @@ import type {
   ProjectKnowledgeSearchResult,
   ReferenceImageClassificationRequest,
   ReferenceImageClassificationResponse,
+  SourceImageInput,
 } from '../types/chat'
 import type { UXRequirementState } from '../types/uxRequirement'
 import type { MapAdjustmentOperation, PrdImportPreview, PrdNode, PrdNodeBackendContractRef, PrdNodeEvidenceRef, PrdNodeOperationSuggestion, PrdPerformanceSpec } from '../types/prdNode'
 import type { QaChatResponse, QaIssue } from '../types/qa'
 import type { AssetWorkbenchState, AudioAssetRow, EffectAssetRow, UiAssetKind, UiAssetParseResult } from '../types/assetWorkbench'
 import type { PrototypeAssetAuditIssue, PrototypeAssetManifest } from '../types/prototypeAssets'
-import type { ProjectSourceDocument } from '../types/archive'
+import type { ProjectSourceDocument, ProjectSourceFile } from '../types/archive'
 import type { ProjectBaselineScan, ProjectWorkflowState } from '../types/projectWorkflow'
 
 function apiErrorMessage(data: unknown, status: number) {
   if (data && typeof data === 'object') {
     const record = data as Record<string, unknown>
-    if (typeof record.error === 'string' && record.error.trim()) return record.error
+    const hint = typeof record.hint === 'string' && record.hint.trim() ? record.hint.trim() : ''
+    if (typeof record.error === 'string' && record.error.trim()) {
+      return [record.error, hint].filter(Boolean).join('\n')
+    }
     if (record.error && typeof record.error === 'object') {
       const nested = record.error as Record<string, unknown>
       if (typeof nested.message === 'string' && nested.message.trim()) return nested.message
@@ -97,6 +101,23 @@ export function saveAiEnvironmentConfig(baseUrl: string, payload: AiEnvironmentU
   return requestJson<AiEnvironmentConfig>(baseUrl, '/api/environment', {
     method: 'POST',
     body: JSON.stringify(payload),
+  })
+}
+
+export interface LarkImportResponse {
+  title: string
+  filename: string
+  text: string
+  documentId?: string | null
+  imageCount: number
+  images: SourceImageInput[]
+  warnings: string[]
+}
+
+export function importLarkDocument(baseUrl: string, url: string) {
+  return requestJson<LarkImportResponse>(baseUrl, '/api/lark/import', {
+    method: 'POST',
+    body: JSON.stringify({ url }),
   })
 }
 
@@ -202,6 +223,10 @@ export function exportFinalPrompt(baseUrl: string, requirementState: UXRequireme
 export interface DecompositionSourcePayload {
   mdText?: string | null
   mdFilename?: string | null
+  sourceText?: string | null
+  sourceFilename?: string | null
+  sourceFiles?: ProjectSourceFile[]
+  sourceImages?: SourceImageInput[]
   figmaUrl?: string | null
 }
 

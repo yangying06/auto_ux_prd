@@ -10,6 +10,7 @@ import { formatSectionTitle, formatSpecLens, hasNodeSections, resolveNodeSpecLen
 import { buildDeliverySections, collectBackendContracts, isDeliveryNode } from '../lib/prdNodeDelivery'
 import { streamPrototype } from '../lib/prototypeStream'
 import { buildUiOnlyPrototypeInstruction, chatContentImages, chatContentText, extractFigmaUrlsFromText, isUiOnlyPrototypeFeedback } from '../lib/nodeChatIntent'
+import { getNodeFigmaDraftSource, nodeHasGeneratedPrototype, nodeHasPrototypeInFlight } from '../lib/figmaDraftPrototype'
 import { buildFigmaPrototypeIterationInstruction, mergeInstructionIntoPrototypeEvidence } from '../lib/prototypeIteration'
 import { buildDraftPrototypeSpecFromNode, mergeReusableLogicIntoPrototypeSpec, standardizePrototypeSpec } from '../lib/prototypeSpec'
 import { deriveReusableLogicCandidates, formatReusableLogicAssetForPrompt } from '../lib/reusableLogicSedimentation'
@@ -17,7 +18,7 @@ import { useAppStore } from '../store/appStore'
 import type { FigmaFrameImportResponse, NodeChatOptions } from '../lib/api'
 import type { AssetWorkbenchState } from '../types/assetWorkbench'
 import type { ChatMessage, ContentBlock, ReferenceImageClassificationRequest } from '../types/chat'
-import type { PrdNode } from '../types/prdNode'
+import type { PrdNode, PrdStateTransition, PrdUiStateKind } from '../types/prdNode'
 import type { PrototypeAssetManifest, PrototypeGenerationMode, PrototypeInterfaceBlueprint } from '../types/prototypeAssets'
 import type { ReusableLogicAsset } from '../types/reusableLogic'
 import type { AssetDependency, UXRequirementState } from '../types/uxRequirement'
@@ -523,6 +524,86 @@ function buildBackendContractContext(node: PrdNode, tree: Record<string, PrdNode
   ].join('\n')
 }
 
+const FIGMA_STATE_KIND_LABELS: Record<PrdUiStateKind, string> = {
+  default: '默认态',
+  overlay: '浮层/弹窗态',
+  loading: '加载态',
+  success: '成功态',
+  error: '失败/错误态',
+  empty: '空态',
+  disabled: '禁用态',
+  expanded: '展开态',
+  collapsed: '收起态',
+  localized: '多语言态',
+  mirror: '镜像态',
+  selected: '选中态',
+  variant: '变体态',
+}
+
+function figmaStateKindLabel(kind: PrdUiStateKind) {
+  return FIGMA_STATE_KIND_LABELS[kind] ?? FIGMA_STATE_KIND_LABELS.variant
+}
+
+function findPrototypeStateLabel(node: PrdNode | null | undefined, stateId: string | null | undefined) {
+  if (!node || !stateId) return null
+  return node.uiStates?.find((state) => state.id === stateId)?.label ?? null
+}
+
+function formatPrototypeStateTransition(transition: PrdStateTransition, tree: Record<string, PrdNode> | null) {
+  const source = tree?.[transition.sourceNodeId]
+  const target = tree?.[transition.targetNodeId]
+  const sourceLabel = source?.label ?? transition.sourceNodeId
+  const targetLabel = target?.label ?? transition.targetNodeId
+  const sourceState = findPrototypeStateLabel(source, transition.sourceStateId)
+  const targetState = findPrototypeStateLabel(target, transition.targetStateId)
+  return [
+    `- ${sourceLabel}${sourceState ? `「${sourceState}」` : ''} -> ${targetLabel}${targetState ? `「${targetState}」` : ''}`,
+    `  ${[
+      transition.trigger ? `触发：${transition.trigger}` : null,
+      transition.condition ? `条件：${transition.condition}` : null,
+      transition.effect ? `结果：${transition.effect}` : null,
+      transition.source ? `来源：${transition.source}` : null,
+      `置信度：${transition.confidence}%`,
+    ].filter(Boolean).join('；')}`,
+    transition.evidence.length ? `  证据：${transition.evidence.join(' / ')}` : null,
+  ].filter(Boolean).join('\n')
+}
+
+function buildFigmaStateContext(node: PrdNode, tree: Record<string, PrdNode> | null) {
+  const lines: string[] = []
+  if (node.figmaUxMap) {
+    lines.push('Figma UX Map review:')
+    lines.push(`- Screen: ${node.figmaUxMap.screenLabel} (${node.figmaUxMap.screenId})`)
+    lines.push(`- Review: ${node.figmaUxMap.reviewSource}, confidence ${node.figmaUxMap.reviewConfidence}%`)
+    if (node.figmaUxMap.ambiguityIds.length) lines.push(`- Ambiguities to confirm: ${node.figmaUxMap.ambiguityIds.join(', ')}`)
+    if (node.figmaUxMap.notes.length) lines.push(`- Notes: ${node.figmaUxMap.notes.join(' / ')}`)
+  }
+
+  if (node.uiStates?.length) {
+    if (lines.length) lines.push('')
+    lines.push('Figma UI states:')
+    lines.push(...node.uiStates.map((state) => {
+      const texts = state.visibleTexts.length ? `; visible text: ${state.visibleTexts.slice(0, 5).join(' / ')}` : ''
+      const annotations = state.annotations.length ? `; annotations: ${state.annotations.join(' / ')}` : ''
+      return `- ${state.label} (${figmaStateKindLabel(state.kind)}, confidence ${state.confidence}%, figma node ${state.figmaNodeId}${texts}${annotations})`
+    }))
+  }
+
+  const incoming = tree
+    ? Object.values(tree)
+      .filter((source) => source.id !== node.id)
+      .flatMap((source) => (source.stateTransitions ?? []).filter((transition) => transition.targetNodeId === node.id))
+    : []
+  const transitions = [...(node.stateTransitions ?? []), ...incoming]
+  if (transitions.length) {
+    if (lines.length) lines.push('')
+    lines.push('Figma state/screen transitions:')
+    lines.push(...transitions.map((transition) => formatPrototypeStateTransition(transition, tree)))
+  }
+
+  return lines.length ? lines.join('\n') : null
+}
+
 function buildNodePrototypeRequirement(
   node: PrdNode,
   messages: ChatMessage[],
@@ -542,6 +623,7 @@ function buildNodePrototypeRequirement(
   const mvcChildContext = node.type === 'page' ? buildMvcChildContext(node, tree) : null
   const pageSectionContext = buildPageSectionContext(node, tree)
   const backendContractContext = buildBackendContractContext(node, tree)
+  const figmaStateContext = buildFigmaStateContext(node, tree)
   const performanceSpec = resolveNodePerformanceSpec(node)
   const performanceContext = performanceSpec?.detected && !performanceSpec.disabled
     ? `表现编排规格：\n${formatPerformanceSpecForPrompt(performanceSpec)}`
@@ -554,6 +636,15 @@ function buildNodePrototypeRequirement(
       }))
     : []
   const figmaAssets = options.allowFigmaAssetReferences === false ? [] : collectFigmaAssetDependencies(messages)
+  const figmaStateAssets = options.allowFigmaAssetReferences === false
+    ? []
+    : (node.uiStates ?? [])
+      .filter((state) => state.previewImageUrl)
+      .map((state) => ({
+        type: `FigmaState:${figmaStateKindLabel(state.kind)}`,
+        path: `${state.label} - ${state.previewImageUrl}`,
+        is_ready: true,
+      }))
   const genericReferenceAssets = Array.from({ length: Math.max(0, referenceCount - figmaAssets.length) }, (_, index) => ({
     type: 'ReferenceImage',
     path: `Reference image ${index + 1} in the current node chat`,
@@ -565,12 +656,14 @@ function buildNodePrototypeRequirement(
     sequence_rules: [
       stripPolishSection(node.content),
       pageSectionContext,
+      figmaStateContext,
       mvcChildContext,
       backendContractContext,
       performanceContext,
       transcript ? `\nDeep Forge conversation summary:\n${transcript}` : null,
     ].filter(Boolean).join('\n\n'),
     asset_dependencies: [
+      ...figmaStateAssets,
       ...figmaAssets,
       ...genericReferenceAssets,
       ...performanceAssets,
@@ -765,10 +858,12 @@ export function ForgePage() {
   const [sedimentationOpen, setSedimentationOpen] = useState(false)
   const [pendingSedimentationAction, setPendingSedimentationAction] = useState<'confirm_node' | 'resource_mode' | null>(null)
   const prototypeAbortControllerRef = useRef<AbortController | null>(null)
+  const autoFigmaDraftAttemptsRef = useRef<Set<string>>(new Set())
 
   const node = prdTree?.[nodeId ?? ''] ?? null
   const messages = nodeChats[nodeId ?? ''] ?? []
   const performanceSpec = node ? resolveNodePerformanceSpec(node) : null
+  const autoFigmaDraftSource = useMemo(() => node ? getNodeFigmaDraftSource(node) : null, [node])
   const performanceSpecFingerprint = JSON.stringify(performanceSpec ?? null)
   const selectedPrototypeVariant = prototypeVariants.find((variant) => variant.index === selectedVariantIndex)
   const hasDraftPrototypeArtifact = Boolean(
@@ -832,10 +927,14 @@ export function ForgePage() {
     const hasPerformanceSpec = Boolean(performanceSpec?.detected && !performanceSpec.disabled)
     const visualPrompt = prototypeHtml
       ? '我看到右侧已有原型。它可以作为这个界面的视觉参考吗？'
-      : '请先上传原型截图/参考图，或粘贴 Figma 链接。如果没有，请回复“无原型资源”。'
+      : autoFigmaDraftSource
+        ? `我看到这个节点已绑定 Figma「${autoFigmaDraftSource.label}」，会先用它生成第一版草稿原型。`
+        : '请先上传原型截图/参考图，或粘贴 Figma 链接。如果没有，请回复“无原型资源”。'
     const nextStep = prototypeHtml
       ? `确认后，我会继续打磨主流程、边界状态、依赖字段和验收标准${hasPerformanceSpec ? '，再处理表现编排' : ''}。`
-      : '收到原型资源或“无原型资源”后，我会继续追问下一个具体问题。'
+      : autoFigmaDraftSource
+        ? '首稿生成后，你可以直接基于右侧原型继续调整交互、状态和验收标准。'
+        : '收到原型资源或“无原型资源”后，我会继续追问下一个具体问题。'
     const initialMessage = `正在打磨「${node.label}」。\n${visualPrompt}\n${nextStep}`
     const currentMessages = useAppStore.getState().nodeChats[nodeId] ?? []
     if (currentMessages.length > 0) {
@@ -851,7 +950,21 @@ export function ForgePage() {
       role: 'assistant',
       content: initialMessage,
     })
-  }, [appendNodeMessage, clearNodeChat, node, nodeId, prototypeHtml])
+  }, [appendNodeMessage, autoFigmaDraftSource, clearNodeChat, node, nodeId, prototypeHtml])
+
+  useEffect(() => {
+    if (!nodeId || !node || !prdTree || !autoFigmaDraftSource) return
+    if (generationMode !== 'draft_preview') return
+    if (nodeHasGeneratedPrototype(nodePrototypeState) || nodeHasPrototypeInFlight(nodePrototypeState)) return
+
+    const attemptKey = `${nodeId}:${autoFigmaDraftSource.url}`
+    if (autoFigmaDraftAttemptsRef.current.has(attemptKey)) return
+    autoFigmaDraftAttemptsRef.current.add(attemptKey)
+
+    void handleImportFigmaFrame({ url: autoFigmaDraftSource.url }, { generationMode: 'draft_preview' }).catch(() => {
+      // handleImportFigmaFrame records the user-visible failure message.
+    })
+  }, [autoFigmaDraftSource, generationMode, node, nodeId, nodePrototypeState, prdTree])
 
   async function handleSend(content: ChatMessage['content'], options: ForgeSendOptions = {}) {
     if (!nodeId || !prdTree || !node) return
