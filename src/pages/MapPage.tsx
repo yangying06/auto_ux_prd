@@ -129,18 +129,57 @@ function buildSmartReference(sourceNode: PrdNode, targetNode: PrdNode): PrdNodeR
   const targetHint = nodeInteractionHint(targetNode)
   const trigger = extractTriggerAction(sourceNode)
   const label = defaultFlowConnectionLabel(sourceNode, targetNode, trigger)
-  const reasonParts = [
-    `从「${sourceNode.label}」跳转到「${targetNode.label}」。`,
-    trigger ? `触发动作：${trigger}` : (sourceHint ? `触发线索：${sourceHint}` : ''),
-    targetHint ? `目标作用：${targetHint}` : '',
-  ].filter(Boolean)
+  const reason = buildStructuredFlowDetail(sourceNode, targetNode, { label: trigger, hint: sourceHint, targetHint })
 
   return {
     targetNodeId: targetNode.id,
     label,
-    reason: reasonParts.join(' '),
+    reason,
     sourceNodeId: sourceNode.id,
   }
+}
+
+function findNodeStateLabel(node: PrdNode | null | undefined, stateId: string | null | undefined) {
+  if (!node || !stateId) return ''
+  return node.uiStates?.find((state) => state.id === stateId)?.label?.trim() ?? ''
+}
+
+function defaultNodeStateLabel(node: PrdNode | null | undefined) {
+  if (!node?.uiStates?.length) return ''
+  const base = node.uiStates.find((state) => state.kind === 'default')
+  return (base ?? node.uiStates[0]).label?.trim() ?? ''
+}
+
+// 找出 source 节点上指向 target 的状态转移（出向优先，再回退入向）。
+function findTransitionBetween(sourceNode: PrdNode, targetNode: PrdNode) {
+  const outgoing = (sourceNode.stateTransitions ?? []).find((transition) => transition.targetNodeId === targetNode.id)
+  if (outgoing) return outgoing
+  const incoming = (targetNode.stateTransitions ?? []).find((transition) => transition.targetNodeId === sourceNode.id && transition.sourceNodeId === sourceNode.id)
+  return incoming ?? null
+}
+
+// 生成「从 X 界面的 Y 状态，通过 ... 跳转到 A 界面的 B 状态」的结构化跳转描述。
+function buildStructuredFlowDetail(
+  sourceNode: PrdNode,
+  targetNode: PrdNode,
+  fallback: { label?: string; hint?: string; targetHint?: string },
+): string {
+  const transition = findTransitionBetween(sourceNode, targetNode)
+  const sourceState = findNodeStateLabel(sourceNode, transition?.sourceStateId) || defaultNodeStateLabel(sourceNode)
+  const targetState = findNodeStateLabel(targetNode, transition?.targetStateId) || defaultNodeStateLabel(targetNode)
+  const trigger = compactText(transition?.trigger ?? fallback.label ?? '', 24)
+  const condition = compactText(transition?.condition ?? '', 40)
+  const hint = fallback.hint ?? ''
+
+  const fromClause = sourceState ? `「${sourceNode.label}」的「${sourceState}」状态` : `「${sourceNode.label}」`
+  const toClause = targetState ? `「${targetNode.label}」的「${targetState}」状态` : `「${targetNode.label}」`
+
+  const howParts: string[] = []
+  if (trigger) howParts.push(trigger)
+  if (condition) howParts.push(`满足「${condition}」`)
+  const howClause = howParts.length ? `通过${howParts.join('、')}触发` : (hint ? `由「${compactText(hint, 28)}」触发` : '跳转')
+
+  return `从${fromClause}${howClause}，进入${toClause}。`
 }
 
 function defaultFlowConnectionLabel(_sourceNode: PrdNode, targetNode: PrdNode, trigger?: string) {
@@ -150,18 +189,24 @@ function defaultFlowConnectionLabel(_sourceNode: PrdNode, targetNode: PrdNode, t
 
 function buildFlowConnectionDraftItems(sourceNode: PrdNode, targetNode: PrdNode): FlowConnectionDraftItem[] {
   const fallbackLabel = defaultFlowConnectionLabel(sourceNode, targetNode)
+  const trigger = extractTriggerAction(sourceNode)
+  const structuredReason = buildStructuredFlowDetail(sourceNode, targetNode, {
+    label: trigger,
+    hint: nodeInteractionHint(sourceNode),
+    targetHint: nodeInteractionHint(targetNode),
+  })
   const matches = (sourceNode.references ?? [])
     .map((reference, index) => ({ reference, index }))
     .filter(({ reference }) => reference.targetNodeId === targetNode.id)
 
   if (!matches.length) {
-    return [{ originalIndex: null, label: fallbackLabel, reason: '' }]
+    return [{ originalIndex: null, label: fallbackLabel, reason: structuredReason }]
   }
 
   return matches.map(({ reference, index }) => ({
     originalIndex: index,
     label: reference.label?.trim() || fallbackLabel,
-    reason: reference.reason ?? '',
+    reason: reference.reason?.trim() || structuredReason,
   }))
 }
 
@@ -1461,11 +1506,11 @@ export function MapPage() {
                       </label>
 
                       <label className="flex min-w-0 flex-col gap-xs">
-                        <span className="font-label-md text-label-md text-on-surface-variant">条件 / 过程 / 备注</span>
+                        <span className="font-label-md text-label-md text-on-surface-variant">详情</span>
                         <textarea
                           value={item.reason}
                           onChange={(event) => updateFlowConnectionDraftItem(itemIndex, { reason: event.target.value })}
-                          placeholder="例如：主界面点击“列表”先打开列表弹窗；列表中点击“帮助”选项后进入帮助界面。需要保留列表滚动位置。"
+                          placeholder="说明：从哪个界面的哪个状态，通过点击什么按钮或满足什么条件，跳转到哪个界面的哪个状态。例如：主界面默认态点击“列表”按钮，打开列表浮层后点击“帮助”，进入帮助界面的默认态。"
                           className="min-h-[104px] rounded border border-outline-variant bg-surface p-sm text-body-sm leading-relaxed text-on-surface outline-none focus:border-primary"
                         />
                       </label>
