@@ -10754,6 +10754,16 @@ app.post('/api/export-spec-folder', (req, res) => {
   }
 })
 
+app.post('/api/open-spec-folder', async (_req, res) => {
+  try {
+    mkdirSync(SPEC_EXPORT_ROOT, { recursive: true })
+    await openLocalPath(SPEC_EXPORT_ROOT)
+    res.json({ ok: true, path: SPEC_EXPORT_ROOT })
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : '打开导出文件夹失败' })
+  }
+})
+
 app.post('/api/open-doc', async (req, res) => {
   const { docPath } = req.body as { docPath?: string }
   if (!docPath) {

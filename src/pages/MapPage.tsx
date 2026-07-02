@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'wouter'
-import { getAiEnvironmentConfig, previewDecomposition, startDecomposition, pollDecomposition, exportSpecFolder, exportNodeMarkdown, suggestPrdNodeOperations, scanProjectBaseline, importFigmaFrame, generatePrototype } from '../lib/api'
+import { getAiEnvironmentConfig, previewDecomposition, startDecomposition, pollDecomposition, exportSpecFolder, openSpecExportFolder, exportNodeMarkdown, suggestPrdNodeOperations, scanProjectBaseline, importFigmaFrame, generatePrototype } from '../lib/api'
 import type { DecompositionSourcePayload } from '../lib/api'
 import { MapAdjustmentPanel } from '../components/map/MapAdjustmentPanel'
 import type { PrdImportPreview, PrdNode, PrdNodeOperationSuggestion, PrdNodeReference, PrdTree } from '../types/prdNode'
@@ -1056,6 +1056,11 @@ export function MapPage() {
           ? `\n素材清单：${result.assets.manifestPath}\n已复制文件：${result.assets.copiedFiles} 个，跳过：${result.assets.skippedItems} 项`
           : ''
         alert(`已导出页面级 spec 文件夹：${result.exportDir}${assetSummary}`)
+        try {
+          await openSpecExportFolder(settings.proxyBaseUrl)
+        } catch (openError) {
+          setExportError(openError instanceof Error ? openError.message : '打开导出文件夹失败')
+        }
       } catch (err) {
         setExportError(err instanceof Error ? err.message : '导出失败，请重试')
       } finally {

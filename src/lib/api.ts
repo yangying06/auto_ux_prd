@@ -540,6 +540,12 @@ export function openGeneratedDoc(baseUrl: string, docPath: string) {
   })
 }
 
+export function openSpecExportFolder(baseUrl: string) {
+  return requestJson<{ ok: true; path: string }>(baseUrl, '/api/open-spec-folder', {
+    method: 'POST',
+  })
+}
+
 export async function exportNodeMarkdown(
   baseUrl: string,
   tree: Record<string, PrdNode>,
