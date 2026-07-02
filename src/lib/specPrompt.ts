@@ -27,7 +27,7 @@ function formatComponentTree(components: UXRequirementState['ui_components'], de
 }
 
 export function requirementToBoltPrompt(requirement: UXRequirementState) {
-  return `请基于以下 GameUX 交互规格生成一个可运行的单文件 HTML/CSS/JS 原型。
+  return `请基于以下跨端 UX 交互规格生成一个可运行的单文件 HTML/CSS/JS 原型。
 
 要求：
 - 输出可直接运行的前端原型，不需要构建步骤。
@@ -151,7 +151,7 @@ export function prdTreeToBoltPrompt(tree: PrdTree) {
     node.techNotes ? `- 技术备注：${node.techNotes}` : null,
   ].filter(Boolean).join('\n')).join('\n\n')
 
-  return `请把以下 GameUX PRD 拆解结果生成一个可运行的交互原型。
+  return `请把以下跨端 UX PRD 拆解结果生成一个可运行的交互原型。
 
 要求：
 - 生成一个完整前端原型，体现主要界面、导航路径、状态变化和用户反馈。

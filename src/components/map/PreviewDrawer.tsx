@@ -219,52 +219,60 @@ export function PreviewDrawer({
           </div>
 
           <div className="shrink-0 border-t border-outline-variant bg-surface-container-low p-md">
-            <button
-              type="button"
-              onClick={() => setIsPreviewManagerOpen(true)}
-              className="mb-sm flex min-h-[40px] w-full items-center justify-center gap-xs rounded-lg border border-tertiary bg-tertiary-container px-md text-label-md font-medium text-on-tertiary-container transition-opacity hover:opacity-90"
-            >
-              <span className="material-symbols-outlined" style={{ fontSize: '17px' }}>dashboard_customize</span>
-              画面与状态
-              {figmaPreviewCount > 0 ? (
-                <span className="rounded border border-on-tertiary-container/25 px-xs font-code-sm text-code-sm">{figmaPreviewCount}</span>
-              ) : null}
-            </button>
-            <div className="mb-sm grid grid-cols-4 gap-xs">
-              <button
-                onClick={() => setIsEditing(true)}
-                className="rounded border border-outline-variant px-sm py-xs text-label-md text-on-surface-variant hover:bg-surface-variant"
-              >
-                编辑
-              </button>
-              <button
-                onClick={() => onOpenDoc?.(node)}
-                className="rounded border border-outline-variant px-sm py-xs text-label-md text-on-surface-variant hover:bg-surface-variant"
-              >
-                打开文档
-              </button>
-              <button
-                onClick={() => onOpenQa?.(node)}
-                className="rounded border border-primary/40 px-sm py-xs text-label-md text-primary hover:bg-primary-container/20"
-              >
-                提 Bug
-              </button>
-              <button
-                onClick={() => onDelete?.(node)}
-                className="rounded border border-error/40 px-sm py-xs text-label-md text-error hover:bg-error/10"
-              >
-                删除
-              </button>
-            </div>
             {canForge && (
               <button
                 onClick={() => navigate('/forge/' + node.id)}
-                className="flex w-full cursor-pointer items-center justify-center gap-sm rounded-lg border border-[#2b88ff]/30 bg-secondary-container px-lg py-sm font-headline-sm text-headline-sm text-on-secondary-container shadow-lg shadow-secondary-container/20 transition-all hover:bg-secondary-container/90"
+                className="mb-sm flex w-full cursor-pointer items-center justify-center gap-sm rounded-lg border border-secondary/55 bg-secondary-container px-lg py-sm font-headline-sm text-headline-sm text-on-secondary-container shadow-lg shadow-secondary-container/20 transition-all hover:bg-secondary-container/90"
               >
                 <span className="material-symbols-outlined">construction</span>
                 打磨文档包
               </button>
             )}
+            <div className="grid grid-cols-2 gap-xs">
+              <button
+                type="button"
+                onClick={() => setIsPreviewManagerOpen(true)}
+                className="flex min-h-[36px] items-center justify-center gap-xs rounded border border-tertiary/45 bg-tertiary/10 px-sm text-label-md font-medium text-tertiary transition-colors hover:border-tertiary hover:bg-tertiary/15"
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>dashboard_customize</span>
+                画面状态
+                {figmaPreviewCount > 0 ? (
+                  <span className="rounded border border-tertiary/35 px-xs font-code-sm text-code-sm">{figmaPreviewCount}</span>
+                ) : null}
+              </button>
+              <button
+                onClick={() => setIsEditing(true)}
+                className="flex min-h-[36px] items-center justify-center gap-xs rounded border border-outline-variant px-sm text-label-md text-on-surface-variant hover:bg-surface-variant"
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>edit_note</span>
+                编辑
+              </button>
+              <button
+                onClick={() => onOpenDoc?.(node)}
+                className="flex min-h-[36px] items-center justify-center gap-xs rounded border border-outline-variant px-sm text-label-md text-on-surface-variant hover:bg-surface-variant"
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>article</span>
+                打开文档
+              </button>
+              <button
+                onClick={() => onOpenQa?.(node)}
+                className="flex min-h-[36px] items-center justify-center gap-xs rounded border border-primary/40 px-sm text-label-md text-primary hover:bg-primary-container/20"
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>fact_check</span>
+                记录问题
+              </button>
+            </div>
+            {onDelete ? (
+              <div className="mt-xs flex justify-end">
+                <button
+                  onClick={() => onDelete(node)}
+                  className="flex min-h-[30px] items-center gap-xs rounded px-xs text-label-md text-error/75 transition-colors hover:bg-error/10 hover:text-error"
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>delete</span>
+                  删除节点
+                </button>
+              </div>
+            ) : null}
           </div>
           {isPreviewManagerOpen && onUpdateNode ? (
             <FigmaPreviewManager

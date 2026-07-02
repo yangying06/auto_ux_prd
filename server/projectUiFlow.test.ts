@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { buildProjectUiFlow } from './projectUiFlow'
+import { buildProjectUiFlow, formatProjectUiFlowMarkdown } from './projectUiFlow'
 import type { FigmaUxMap } from '../src/types/prdNode'
 
 function group(key: string, label: string, frameId = key) {
@@ -69,6 +69,9 @@ const linearMap: FigmaUxMap = {
   assert.deepEqual(flow.happyPathNodeIds, ['screen-start', 'screen-confirm', 'screen-done'])
   assert.equal(flow.edges.length, 2)
   assert.equal(flow.ambiguities.length, 0)
+  const markdown = formatProjectUiFlowMarkdown(flow)
+  assert.match(markdown, /```mermaid/u, 'flow markdown includes a Mermaid diagram')
+  assert.match(markdown, /开始页面.+点击开始.+确认页面/us, 'Mermaid/text summary preserves the primary transition')
 }
 
 {
@@ -151,4 +154,3 @@ const linearMap: FigmaUxMap = {
 }
 
 console.log('projectUiFlow tests passed')
-

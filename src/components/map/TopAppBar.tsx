@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import type { ExportDepth } from '../../lib/prdNodeDelivery'
 
 interface TopAppBarProps {
   projectName: string
@@ -28,6 +29,11 @@ interface TopAppBarProps {
   onOpenAssets?: () => void
   onOpenQa?: () => void
   qaOpenIssueCount?: number
+  exportDepth?: ExportDepth
+  exportDepthOptions?: ExportDepth[]
+  exportableCount?: number
+  exportDoneCount?: number
+  onChangeExportDepth?: (depth: ExportDepth) => void
 }
 
 function archiveLabel(archiveDirty: boolean | undefined, currentArchivePath: string | null | undefined) {
@@ -64,29 +70,50 @@ export function TopAppBar({
   onOpenAssets,
   onOpenQa,
   qaOpenIssueCount = 0,
+  exportDepth = 'all',
+  exportDepthOptions,
+  exportableCount = 0,
+  exportDoneCount = 0,
+  onChangeExportDepth,
 }: TopAppBarProps) {
   const [projectMenuOpen, setProjectMenuOpen] = useState(false)
+  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
+  const workspaceMenuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    if (!projectMenuOpen) return
+    if (!projectMenuOpen && !workspaceMenuOpen) return
     const close = (event: MouseEvent) => {
-      if (!menuRef.current?.contains(event.target as Node)) setProjectMenuOpen(false)
+      const target = event.target as Node
+      if (!menuRef.current?.contains(target)) setProjectMenuOpen(false)
+      if (!workspaceMenuRef.current?.contains(target)) setWorkspaceMenuOpen(false)
     }
     window.addEventListener('mousedown', close)
     return () => window.removeEventListener('mousedown', close)
-  }, [projectMenuOpen])
+  }, [projectMenuOpen, workspaceMenuOpen])
 
   const runProjectAction = (action: () => void) => {
     setProjectMenuOpen(false)
     action()
   }
 
+  const runWorkspaceAction = (action: () => void) => {
+    setWorkspaceMenuOpen(false)
+    action()
+  }
+
+  const hasWorkspaceActions = Boolean(
+    (onBatchGenerateFigmaDrafts && figmaDraftTotalCount > 0)
+    || onOpenAssets
+    || onOpenQa
+  )
+  const workspaceBadgeCount = figmaDraftReadyCount + qaOpenIssueCount
+
   return (
     <header className="relative z-[90] flex h-16 w-full shrink-0 items-center justify-between border-b border-outline-variant bg-surface px-lg">
       <div className="flex min-w-0 items-center gap-md">
         <span className="material-symbols-outlined text-primary">account_tree</span>
-        <h1 className="truncate font-headline-md text-headline-md font-bold text-primary">GameUX PromptForge</h1>
+        <h1 className="truncate font-headline-md text-headline-md font-bold text-primary">UX SpecForge</h1>
         <div className="mx-sm h-6 w-[1px] bg-outline-variant" />
         <div className="flex min-w-0 items-center gap-sm rounded-full border border-outline-variant bg-surface-container-high px-sm py-xs">
           <span
@@ -105,7 +132,10 @@ export function TopAppBar({
       <div className="flex items-center gap-md">
         <div ref={menuRef} className="relative">
           <button
-            onClick={() => setProjectMenuOpen((open) => !open)}
+            onClick={() => {
+              setProjectMenuOpen((open) => !open)
+              setWorkspaceMenuOpen(false)
+            }}
             className="flex min-h-[40px] items-center gap-sm rounded-lg border border-outline-variant bg-surface-container-high px-md py-sm font-label-md text-label-md text-on-surface transition-colors hover:bg-surface-variant"
           >
             <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>folder_managed</span>
@@ -192,79 +222,113 @@ export function TopAppBar({
           </button>
         )}
 
-        {onBatchGenerateFigmaDrafts && figmaDraftTotalCount > 0 ? (
-          <button
-            data-figma-draft-batch="true"
-            onClick={onBatchGenerateFigmaDrafts}
-            disabled={!canBatchGenerateFigmaDrafts || isBatchGeneratingFigmaDrafts}
-            title={
-              figmaDraftReadyCount > 0
-                ? `Generate first draft prototypes for ${figmaDraftReadyCount} Figma-bound node(s)`
-                : 'All Figma-bound nodes already have draft prototypes'
-            }
-            className={[
-              'flex items-center gap-sm rounded-lg border px-md py-sm font-label-md text-label-md transition-colors',
-              canBatchGenerateFigmaDrafts && !isBatchGeneratingFigmaDrafts
-                ? 'border-primary/50 bg-primary-container/70 text-on-primary-container hover:bg-primary-container'
-                : 'border-outline-variant bg-surface-container-high text-on-surface opacity-40 cursor-not-allowed',
-            ].join(' ')}
-          >
-            <span
-              className={['material-symbols-outlined', isBatchGeneratingFigmaDrafts ? 'animate-spin' : ''].join(' ').trim()}
-              style={{ fontSize: '18px' }}
+        {hasWorkspaceActions ? (
+          <div ref={workspaceMenuRef} className="relative">
+            <button
+              type="button"
+              onClick={() => {
+                setWorkspaceMenuOpen((open) => !open)
+                setProjectMenuOpen(false)
+              }}
+              className="flex min-h-[40px] items-center gap-sm rounded-lg border border-outline-variant bg-surface-container-high px-md py-sm font-label-md text-label-md text-on-surface transition-colors hover:bg-surface-variant"
             >
-              {isBatchGeneratingFigmaDrafts ? 'sync' : 'auto_awesome_motion'}
-            </span>
-            Figma 首稿
-            {figmaDraftReadyCount > 0 ? (
-              <span className="rounded bg-primary px-xs py-[1px] text-[10px] leading-4 text-on-primary">{figmaDraftReadyCount}</span>
+              <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>apps</span>
+              工作台
+              {workspaceBadgeCount > 0 ? (
+                <span className="rounded bg-primary px-xs py-[1px] text-[10px] leading-4 text-on-primary">{workspaceBadgeCount}</span>
+              ) : null}
+              <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>expand_more</span>
+            </button>
+
+            {workspaceMenuOpen ? (
+              <div className="absolute right-0 top-[calc(100%+8px)] z-[100] w-64 overflow-hidden rounded-lg border border-outline-variant bg-surface-container-low py-xs shadow-2xl">
+                {onBatchGenerateFigmaDrafts && figmaDraftTotalCount > 0 ? (
+                  <button
+                    data-figma-draft-batch="true"
+                    onClick={() => runWorkspaceAction(onBatchGenerateFigmaDrafts)}
+                    disabled={!canBatchGenerateFigmaDrafts || isBatchGeneratingFigmaDrafts}
+                    title={
+                      figmaDraftReadyCount > 0
+                        ? `Generate first draft prototypes for ${figmaDraftReadyCount} Figma-bound node(s)`
+                        : 'All Figma-bound nodes already have draft prototypes'
+                    }
+                    className="flex w-full items-center gap-sm px-md py-sm text-left text-label-md text-on-surface hover:bg-surface-container-high disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <span
+                      className={['material-symbols-outlined text-primary', isBatchGeneratingFigmaDrafts ? 'animate-spin' : ''].join(' ').trim()}
+                      style={{ fontSize: '17px' }}
+                    >
+                      {isBatchGeneratingFigmaDrafts ? 'sync' : 'auto_awesome_motion'}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate">Figma 首稿</span>
+                    {figmaDraftReadyCount > 0 ? (
+                      <span className="rounded bg-primary px-xs py-[1px] text-[10px] leading-4 text-on-primary">{figmaDraftReadyCount}</span>
+                    ) : null}
+                  </button>
+                ) : null}
+                {onOpenAssets ? (
+                  <button
+                    onClick={() => runWorkspaceAction(onOpenAssets)}
+                    className="flex w-full items-center gap-sm px-md py-sm text-left text-label-md text-on-surface hover:bg-surface-container-high"
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: '17px' }}>inventory_2</span>
+                    资源库
+                  </button>
+                ) : null}
+                {onOpenQa ? (
+                  <button
+                    onClick={() => runWorkspaceAction(onOpenQa)}
+                    className="flex w-full items-center gap-sm px-md py-sm text-left text-label-md text-on-surface hover:bg-surface-container-high"
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: '17px' }}>bug_report</span>
+                    <span className="min-w-0 flex-1 truncate">QA 工作台</span>
+                    {qaOpenIssueCount > 0 ? (
+                      <span className="rounded bg-error px-xs py-[1px] text-[10px] leading-4 text-on-error">{qaOpenIssueCount}</span>
+                    ) : null}
+                  </button>
+                ) : null}
+              </div>
             ) : null}
-          </button>
+          </div>
         ) : null}
 
-        {onOpenAssets && (
-          <button
-            onClick={onOpenAssets}
-            className="flex items-center gap-sm rounded-lg border border-outline-variant bg-surface-container-high px-md py-sm font-label-md text-label-md text-on-surface transition-colors hover:bg-surface-variant"
-          >
-            <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>inventory_2</span>
-            资源库
-          </button>
-        )}
-
-        {onOpenQa && (
-          <button
-            onClick={onOpenQa}
-            className="flex items-center gap-sm rounded-lg border border-outline-variant bg-surface-container-high px-md py-sm font-label-md text-label-md text-on-surface transition-colors hover:bg-surface-variant"
-          >
-            <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>bug_report</span>
-            QA 工作台
-            {qaOpenIssueCount > 0 ? (
-              <span className="rounded bg-error px-xs py-[1px] text-[10px] leading-4 text-on-error">{qaOpenIssueCount}</span>
-            ) : null}
-          </button>
-        )}
-
         {onExport && (
-          <button
-            onClick={onExport}
-            disabled={!canExport || isExporting}
-            title={!canExport ? '需要打磨的文档包确认完成后才能导出' : undefined}
-            className={[
-              'flex items-center gap-sm rounded-lg px-md py-sm font-label-md text-label-md border transition-colors',
-              canExport && !isExporting
-                ? 'bg-secondary-container text-on-secondary-container border-[#2b88ff]/30 hover:bg-secondary-container/90 cursor-pointer active:opacity-80'
-                : 'bg-surface-container-high text-on-surface border-outline-variant opacity-40 cursor-not-allowed',
-            ].join(' ')}
-          >
-            <span
-              className={['material-symbols-outlined', isExporting ? 'animate-spin' : ''].join(' ').trim()}
-              style={{ fontSize: '18px' }}
+          <div className="flex items-center gap-0 rounded-lg border border-[#2b88ff]/30 overflow-hidden">
+            <button
+              onClick={onExport}
+              disabled={!canExport || isExporting}
+              title={canExport ? `导出 ${exportableCount} 篇文档（当前：${exportDepth === 'all' ? '全部文档包' : exportDepth === 'forged' ? '含免打磨' : '仅已确认'}；已确认 ${exportDoneCount} 篇）` : '当前没有可导出的文档包，请先导入或新增节点'}
+              className={[
+                'flex items-center gap-sm px-md py-sm font-label-md text-label-md transition-colors',
+                canExport && !isExporting
+                  ? 'bg-secondary-container text-on-secondary-container hover:bg-secondary-container/90 cursor-pointer active:opacity-80'
+                  : 'bg-surface-container-high text-on-surface opacity-40 cursor-not-allowed',
+              ].join(' ')}
             >
-              {isExporting ? 'sync' : 'download'}
-            </span>
-            {isExporting ? '生成中...' : '导出制作文档'}
-          </button>
+              <span
+                className={['material-symbols-outlined', isExporting ? 'animate-spin' : ''].join(' ').trim()}
+                style={{ fontSize: '18px' }}
+              >
+                {isExporting ? 'sync' : 'download'}
+              </span>
+              {isExporting ? '生成中...' : '导出文档'}
+            </button>
+            {onChangeExportDepth && exportDepthOptions && exportDepthOptions.length > 1 && (
+              <label className="flex items-center gap-xs border-l border-[#2b88ff]/30 bg-secondary-container/60 px-sm py-sm text-label-md text-on-secondary-container">
+                <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>tune</span>
+                <select
+                  value={exportDepth}
+                  onChange={(event) => onChangeExportDepth(event.target.value as ExportDepth)}
+                  className="bg-transparent text-on-secondary-container outline-none cursor-pointer text-label-md"
+                  title="选择导出深度：是否包含尚未打磨的文档包"
+                >
+                  <option value="done">仅已确认 ({exportDoneCount})</option>
+                  <option value="forged">含免打磨</option>
+                  <option value="all">全部文档包</option>
+                </select>
+              </label>
+            )}
+          </div>
         )}
 
         {onValidatePrototype && (

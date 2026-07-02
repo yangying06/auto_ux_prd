@@ -108,7 +108,7 @@ spacing:
 
 ## Brand & Style
 
-The design system is engineered for "GameUX PromptForge," a utility designed for technical users, narrative designers, and game developers. The personality is **high-tech, utilitarian, and precise**, evoking the feeling of a sophisticated integrated development environment (IDE) combined with a creative blueprint workshop.
+The design system is engineered for "UX SpecForge," a utility designed for technical users, narrative designers, and game developers. The personality is **high-tech, utilitarian, and precise**, evoking the feeling of a sophisticated integrated development environment (IDE) combined with a creative blueprint workshop.
 
 The visual style is a hybrid of **Minimalism** and **Technical Glassmorphism**. It utilizes a deep, monochromatic base to reduce eye strain during long sessions, punctuated by vibrant functional accents that represent the flow of data and logic. The interface feels like a "digital workbench" where the primary focus is on the creation and refinement of game logic and dialogue prompts.
 

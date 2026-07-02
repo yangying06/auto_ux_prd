@@ -12,6 +12,8 @@
     {
       "identifier": "fs:allow-read-file",
       "allow": [
+        { "path": "**/*.usf" },
+        { "path": "**/*.USF" },
         { "path": "**/*.gpf" },
         { "path": "**/*.GPF" }
       ]
@@ -19,6 +21,8 @@
     {
       "identifier": "fs:allow-write-file",
       "allow": [
+        { "path": "**/*.usf" },
+        { "path": "**/*.USF" },
         { "path": "**/*.gpf" },
         { "path": "**/*.GPF" }
       ]

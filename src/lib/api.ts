@@ -15,6 +15,7 @@ import type { UXRequirementState } from '../types/uxRequirement'
 import type { MapAdjustmentOperation, PrdImportPreview, PrdNode, PrdNodeBackendContractRef, PrdNodeEvidenceRef, PrdNodeOperationSuggestion, PrdPerformanceSpec } from '../types/prdNode'
 import type { QaChatResponse, QaIssue } from '../types/qa'
 import type { AssetWorkbenchState, AudioAssetRow, EffectAssetRow, UiAssetKind, UiAssetParseResult } from '../types/assetWorkbench'
+import type { ExportDepth } from './prdNodeDelivery'
 import type { PrototypeAssetAuditIssue, PrototypeAssetManifest } from '../types/prototypeAssets'
 import type { ProjectSourceDocument, ProjectSourceFile } from '../types/archive'
 import type { ProjectBaselineScan, ProjectWorkflowState } from '../types/projectWorkflow'
@@ -509,6 +510,15 @@ export function suggestPrdNodeOperations(
 export interface SpecFolderExportResponse {
   exportDir: string
   documents: Array<{ nodeId: string; docPath: string }>
+  flow?: {
+    docPath: string
+    nodeCount: number
+    edgeCount: number
+  } | null
+  evidence?: {
+    manifestPath: string
+    documents: Array<{ nodeId: string; evidencePath: string }>
+  } | null
   assets?: {
     exportDir: string
     manifestPath: string
@@ -521,12 +531,13 @@ export interface SpecFolderExportResponse {
 export function exportSpecFolder(
   baseUrl: string,
   tree: Record<string, PrdNode>,
-  options: { includeAssets?: boolean; assetWorkbench?: AssetWorkbenchState | null } = {},
+  options: { depth?: ExportDepth; includeAssets?: boolean; assetWorkbench?: AssetWorkbenchState | null } = {},
 ) {
   return requestJson<SpecFolderExportResponse>(baseUrl, '/api/export-spec-folder', {
     method: 'POST',
     body: JSON.stringify({
       tree,
+      depth: options.depth,
       includeAssets: options.includeAssets === true,
       assetWorkbench: options.includeAssets ? options.assetWorkbench ?? null : undefined,
     }),

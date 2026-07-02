@@ -1987,6 +1987,11 @@ export function ForgeChat({
     { id: 'draft', label: '草稿 Spec', ready: Boolean(draftPrototypeSpec), title: draftPrototypeSpec?.updatedAt ?? '尚未生成草稿 Spec' },
     { id: 'standard', label: '正式 Spec', ready: Boolean(standardPrototypeSpec), title: standardPrototypeSpec?.updatedAt ?? '尚未标准化正式 Spec' },
   ]
+  const forgeProcessSteps = [
+    { id: 'evidence', label: '补证据', icon: 'add_photo_alternate', ready: messages.length > 1 || attachments.length > 0 || figmaImportProgress !== null },
+    { id: 'prototype', label: '生成预览', icon: 'view_carousel', ready: Boolean(prototypeHtml) || isGeneratingPrototype },
+    { id: 'delivery', label: '确认交付', icon: 'task_alt', ready: Boolean(standardPrototypeSpec) },
+  ]
   const figmaImportActionText = '生成草稿'
   const figmaImporterTitle = '从 Figma 提取视觉证据，并结合当前文档生成草稿预览'
   return (
@@ -2058,6 +2063,27 @@ export function ForgeChat({
               <span className="hidden font-mono text-[10px] text-on-surface-variant 2xl:inline">
                 {overallUnderstanding.confirmedCount}/{overallUnderstanding.unresolvedCount}
               </span>
+            </div>
+
+            <div className="hidden h-8 items-center gap-[2px] rounded-md border border-outline-variant/40 bg-surface-container-low px-xs xl:flex" title="Deep Forge 流程">
+              {forgeProcessSteps.map((step, index) => (
+                <div key={step.id} className="flex items-center gap-[2px]">
+                  <span
+                    className={[
+                      'flex h-6 items-center gap-[2px] rounded px-xs text-[10px] font-medium',
+                      step.ready
+                        ? 'bg-secondary-container text-on-secondary-container'
+                        : 'text-on-surface-variant',
+                    ].join(' ')}
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: '13px' }}>{step.icon}</span>
+                    {step.label}
+                  </span>
+                  {index < forgeProcessSteps.length - 1 ? (
+                    <span className="material-symbols-outlined text-on-surface-variant/50" style={{ fontSize: '13px' }}>chevron_right</span>
+                  ) : null}
+                </div>
+              ))}
             </div>
 
             <button

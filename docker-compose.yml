@@ -1,0 +1,20 @@
+services:
+  ux-specforge-web:
+    build:
+      context: .
+    image: ux-specforge:local
+    container_name: ux-specforge-web
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      LOCAL_PROXY_PORT: "8787"
+      LOCAL_PROXY_HOST: 0.0.0.0
+      PROMPTFORGE_CONFIG_DIR: /app/.config
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - ./generated:/app/generated
+      - ./.cache:/app/.cache
+      - ./.config:/app/.config
+    restart: unless-stopped

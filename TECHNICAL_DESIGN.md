@@ -1,8 +1,8 @@
-# GameUX PromptForge 技术设计文档
+# UX SpecForge 技术设计文档
 
 ## 1. 项目概述
 
-**GameUX PromptForge** 是一款面向游戏 UX 设计师和开发者的 AI 辅助需求打磨工具。通过结构化对话，将模糊的游戏交互描述逐步转化为 Cocos Creator 3.8.8 可实施的工程级 UX Prompt。
+**UX SpecForge** 是一款面向游戏 UX 设计师和开发者的 AI 辅助需求打磨工具。通过结构化对话，将模糊的游戏交互描述逐步转化为 Cocos Creator 3.8.8 可实施的工程级 UX Prompt。
 
 ### 1.1 核心价值
 
@@ -221,7 +221,7 @@ Express Server
 ```typescript
 create<AppStoreState>()(
   persist(store, {
-    name: 'gameux-promptforge-state',
+    name: 'ux-specforge-state',
     version: 2,
     partialize: (state) => ({
       requirement, messages, latestRag, settings

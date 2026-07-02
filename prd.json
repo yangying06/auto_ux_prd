@@ -1,5 +1,5 @@
 {
-  "project": "GameUX PromptForge",
+  "project": "UX SpecForge",
   "branchName": "ralph/page-level-mindmap-refinement",
   "description": "Add page-level mind map node management and AI-assisted restructuring/refinement so PRDs are split by screen/page, each page starts as pending refinement, can be edited as a node, opened as a generated local document, adjusted through a left-side AI chat, refined one page at a time, and exported as page-level spec files.",
   "userStories": [

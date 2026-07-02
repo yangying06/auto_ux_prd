@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent, type WheelEvent } from 'react'
+import { isDeliveryNode } from '../../lib/prdNodeDelivery'
 import type { PrdNode, PrdTree } from '../../types/prdNode'
 import { NodeCard } from './NodeCard'
 
@@ -55,6 +56,7 @@ interface TreeCanvasProps {
   connectionDraft?: CanvasConnectionDraft | null
   onNodeClick: (id: string) => void
   onNodeDoubleClick: (id: string) => void
+  onOpenForge?: (id: string) => void
   onCanvasBlankClick?: () => void
   onOpenStatePreview?: (nodeId: string) => void
   onAddNode?: (parentId: string | null) => void
@@ -1519,6 +1521,7 @@ export function TreeCanvas({
   connectionDraft,
   onNodeClick,
   onNodeDoubleClick,
+  onOpenForge,
   onCanvasBlankClick,
   onOpenStatePreview,
   onAddNode,
@@ -1633,6 +1636,9 @@ export function TreeCanvas({
   ), [graphBounds, layoutMode, nominalContentHeight, nominalContentWidth])
   const { contentWidth, contentHeight, renderOffsetX, renderOffsetY, fitBounds } = canvasMetrics
   const selectedPosition = selectedNodeId ? layout.byId.get(selectedNodeId) ?? null : null
+  const selectedCanForge = selectedPosition
+    ? isDeliveryNode(selectedPosition.node, sourceTree ?? tree) && (selectedPosition.node.needsPolish || selectedPosition.node.status === 'done')
+    : false
   const isConnecting = Boolean(connectionDraft)
 
   function isValidConnectionTarget(nodeId: string) {
@@ -2183,6 +2189,7 @@ export function TreeCanvas({
                 previewHtml={previewHtmlByNodeId[item.node.id] ?? null}
                 onNodeClick={handleCanvasNodeClick}
                 onNodeDoubleClick={handleCanvasNodeDoubleClick}
+                onOpenForge={onOpenForge}
                 onOpenStatePreview={onOpenStatePreview}
               />
             </div>
@@ -2194,23 +2201,54 @@ export function TreeCanvas({
         && (connectableNodeSet.size === 0 || connectableNodeSet.has(selectedPosition.node.id))
         && (onStartConnection || onOpenConnection) ? (
           <>
+            <div
+              className="absolute z-30 flex items-center gap-xs rounded-lg border border-outline-variant bg-surface-container-high/95 p-xs shadow-xl backdrop-blur"
+              style={{
+                left: selectedPosition.x + renderOffsetX,
+                top: selectedPosition.y - 48 + renderOffsetY,
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => onNodeDoubleClick(selectedPosition.node.id)}
+                className="flex h-8 items-center gap-xs rounded-md border border-outline-variant bg-surface px-sm text-label-md text-on-surface-variant transition-colors hover:border-primary hover:text-primary"
+                title="打开右侧详情"
+                aria-label="打开右侧详情"
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>dock_to_right</span>
+                详情
+              </button>
+              {selectedCanForge && onOpenForge ? (
+                <button
+                  type="button"
+                  onClick={() => onOpenForge(selectedPosition.node.id)}
+                  className="flex h-8 items-center gap-xs rounded-md border border-secondary/55 bg-secondary-container px-sm text-label-md font-medium text-on-secondary-container transition-colors hover:bg-secondary-container/90"
+                  title="进入 Deep Forge 打磨文档包"
+                  aria-label="进入 Deep Forge 打磨文档包"
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>construction</span>
+                  打磨
+                </button>
+              ) : null}
+            </div>
             <button
               type="button"
               onClick={() => handleStartConnection(selectedPosition.node.id, 'incoming')}
-              className="absolute z-30 flex h-9 w-9 items-center justify-center rounded-full border border-secondary/60 bg-secondary-container text-on-secondary-container shadow-lg transition-transform hover:scale-105 hover:border-secondary"
+              className="absolute z-30 flex h-9 items-center gap-xs rounded-full border border-secondary/60 bg-secondary-container px-sm text-label-md font-medium text-on-secondary-container shadow-lg transition-transform hover:scale-105 hover:border-secondary"
               style={{
-                left: selectedPosition.x - 48 + renderOffsetX,
+                left: selectedPosition.x - 76 + renderOffsetX,
                 top: selectedPosition.y + selectedPosition.height / 2 - 18 + renderOffsetY,
               }}
               title="连接流入界面"
               aria-label="连接流入界面"
             >
-              <span className="material-symbols-outlined" style={{ fontSize: '22px' }}>add</span>
+              <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>add</span>
+              流入
             </button>
             <button
               type="button"
               onClick={() => handleStartConnection(selectedPosition.node.id, 'outgoing')}
-              className="absolute z-30 flex h-9 w-9 items-center justify-center rounded-full border border-tertiary/60 bg-tertiary-container text-tertiary shadow-lg transition-transform hover:scale-105 hover:border-tertiary"
+              className="absolute z-30 flex h-9 items-center gap-xs rounded-full border border-tertiary/60 bg-tertiary-container px-sm text-label-md font-medium text-tertiary shadow-lg transition-transform hover:scale-105 hover:border-tertiary"
               style={{
                 left: selectedPosition.x + selectedPosition.width + 10 + renderOffsetX,
                 top: selectedPosition.y + selectedPosition.height / 2 - 18 + renderOffsetY,
@@ -2218,7 +2256,8 @@ export function TreeCanvas({
               title="连接流出界面"
               aria-label="连接流出界面"
             >
-              <span className="material-symbols-outlined" style={{ fontSize: '22px' }}>add</span>
+              <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>add</span>
+              流出
             </button>
           </>
         ) : null}

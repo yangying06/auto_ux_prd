@@ -1,10 +1,14 @@
 import {
+  LEGACY_PROJECT_ARCHIVE_EXTENSION,
+  LEGACY_PROJECT_ARCHIVE_MIME,
   PROJECT_ARCHIVE_EXTENSION,
   PROJECT_ARCHIVE_MIME,
   type ProjectArchiveOpenResult,
   type ProjectArchiveSaveResult,
 } from '../types/archive'
 import { decodeProjectArchive } from './archiveCodec'
+
+const PROJECT_ARCHIVE_FILTER_EXTENSIONS = [PROJECT_ARCHIVE_EXTENSION, LEGACY_PROJECT_ARCHIVE_EXTENSION]
 
 function isTauriRuntime() {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -36,9 +40,9 @@ export function formatProjectArchiveError(error: unknown, fallback: string): str
 
 function archiveIoError(action: string, error: unknown, path?: string | null) {
   const detail = formatProjectArchiveError(error, '')
-  const target = path ? `（${path}）` : ''
-  const suffix = detail ? `：${detail}` : ''
-  return new Error(`${action}${target}失败${suffix}`)
+  const target = path ? ` (${path})` : ''
+  const suffix = detail ? `: ${detail}` : ''
+  return new Error(`${action}${target} failed${suffix}`)
 }
 
 function ensureArchiveFilename(filename: string) {
@@ -46,9 +50,12 @@ function ensureArchiveFilename(filename: string) {
     .replace(/[<>:"/\\|?*\x00-\x1F]/g, '-')
     .replace(/\s+/g, ' ')
     .trim()
-  const fallback = `promptforge-project-${new Date().toISOString().slice(0, 10)}`
+  const fallback = `ux-specforge-project-${new Date().toISOString().slice(0, 10)}`
   const base = cleaned || fallback
-  return base.toLowerCase().endsWith(`.${PROJECT_ARCHIVE_EXTENSION}`) ? base : `${base}.${PROJECT_ARCHIVE_EXTENSION}`
+  const lowerBase = base.toLowerCase()
+  return PROJECT_ARCHIVE_FILTER_EXTENSIONS.some((extension) => lowerBase.endsWith(`.${extension}`))
+    ? base
+    : `${base}.${PROJECT_ARCHIVE_EXTENSION}`
 }
 
 function browserDownload(filename: string, bytes: Uint8Array) {
@@ -65,7 +72,7 @@ function browserPickArchiveFile() {
   return new Promise<{ bytes: Uint8Array; path: null } | null>((resolve) => {
     const input = document.createElement('input')
     input.type = 'file'
-    input.accept = `.${PROJECT_ARCHIVE_EXTENSION},application/zip,${PROJECT_ARCHIVE_MIME}`
+    input.accept = `.${PROJECT_ARCHIVE_EXTENSION},.${LEGACY_PROJECT_ARCHIVE_EXTENSION},application/zip,${PROJECT_ARCHIVE_MIME},${LEGACY_PROJECT_ARCHIVE_MIME}`
     input.style.display = 'none'
 
     const cleanup = () => input.remove()
@@ -109,14 +116,14 @@ export async function saveProjectArchiveBytes(input: {
       saveDialog = dialog.save
       writeArchiveFile = fs.writeFile
     } catch (error) {
-      throw archiveIoError('加载 Tauri 存档插件', error)
+      throw archiveIoError('Load Tauri archive plugins', error)
     }
 
     if (input.currentPath && !input.saveAs) {
       try {
         await writeArchiveFile(input.currentPath, input.bytes)
       } catch (error) {
-        throw archiveIoError('写入现有项目存档', error, input.currentPath)
+        throw archiveIoError('Write current project archive', error, input.currentPath)
       }
       return { status: 'saved', path: input.currentPath }
     }
@@ -125,17 +132,17 @@ export async function saveProjectArchiveBytes(input: {
     try {
       path = await saveDialog({
         defaultPath,
-        filters: [{ name: 'PromptForge Project', extensions: [PROJECT_ARCHIVE_EXTENSION] }],
+        filters: [{ name: 'UX SpecForge Project', extensions: PROJECT_ARCHIVE_FILTER_EXTENSIONS }],
       })
     } catch (error) {
-      throw archiveIoError('打开项目存档保存对话框', error)
+      throw archiveIoError('Open project archive save dialog', error)
     }
 
     if (!path) return { status: 'cancelled', path: null }
     try {
       await writeArchiveFile(path, input.bytes)
     } catch (error) {
-      throw archiveIoError('写入项目存档', error, path)
+      throw archiveIoError('Write project archive', error, path)
     }
     return { status: 'saved', path }
   }
@@ -143,7 +150,7 @@ export async function saveProjectArchiveBytes(input: {
   try {
     browserDownload(defaultPath, input.bytes)
   } catch (error) {
-    throw archiveIoError('下载项目存档', error, defaultPath)
+    throw archiveIoError('Download project archive', error, defaultPath)
   }
   return { status: 'saved', path: null }
 }
@@ -158,7 +165,7 @@ export async function openProjectArchiveFile(): Promise<ProjectArchiveOpenResult
     ])
     const selected = await open({
       multiple: false,
-      filters: [{ name: 'PromptForge Project', extensions: [PROJECT_ARCHIVE_EXTENSION] }],
+      filters: [{ name: 'UX SpecForge Project', extensions: PROJECT_ARCHIVE_FILTER_EXTENSIONS }],
     })
     const path = Array.isArray(selected) ? selected[0] : selected
     if (!path) {
@@ -167,7 +174,7 @@ export async function openProjectArchiveFile(): Promise<ProjectArchiveOpenResult
       try {
         picked = { bytes: await readFile(path), path }
       } catch (error) {
-        throw archiveIoError('读取项目存档', error, path)
+        throw archiveIoError('Read project archive', error, path)
       }
     }
   } else {

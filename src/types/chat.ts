@@ -101,14 +101,18 @@ export interface AiEnvironmentConfig {
   envPath: string
   values: {
     ANTHROPIC_API_KEY_PRESENT: boolean
+    ANTHROPIC_API_KEY_PREVIEW: string | null
     ANTHROPIC_BASE_URL: string
     CLAUDE_MODEL: string
     MOCK_DECOMPOSE: boolean
     FIGMA_TOKEN_PRESENT: boolean
+    FIGMA_TOKEN_PREVIEW: string | null
     LARK_CLI_BIN: string
     LARK_IDENTITY: string
+    LARK_APP_ID: string
     LARK_APP_ID_PRESENT: boolean
     LARK_APP_SECRET_PRESENT: boolean
+    LARK_APP_SECRET_PREVIEW: string | null
     LARK_TENANT_ACCESS_TOKEN_PRESENT: boolean
     LARK_USER_ACCESS_TOKEN_PRESENT: boolean
   }
@@ -116,12 +120,12 @@ export interface AiEnvironmentConfig {
 
 export interface AiEnvironmentUpdate {
   ANTHROPIC_API_KEY?: string
-  ANTHROPIC_BASE_URL: string
-  CLAUDE_MODEL: string
-  MOCK_DECOMPOSE: boolean
+  ANTHROPIC_BASE_URL?: string
+  CLAUDE_MODEL?: string
+  MOCK_DECOMPOSE?: boolean
   FIGMA_TOKEN?: string
-  LARK_CLI_BIN: string
-  LARK_IDENTITY: string
+  LARK_CLI_BIN?: string
+  LARK_IDENTITY?: string
   LARK_APP_ID?: string
   LARK_APP_SECRET?: string
   LARK_TENANT_ACCESS_TOKEN?: string

@@ -29,10 +29,31 @@ const emptyRequirement: UXRequirementState = {
   next_question: null,
 }
 
-const STORAGE_KEY = 'gameux-promptforge-state'
+const STORAGE_KEY = 'ux-specforge-state'
+const LEGACY_STORAGE_KEY = 'gameux-promptforge-state'
 const STORAGE_VERSION = 17
 const PROTOTYPE_HISTORY_LIMIT = 4
 const PRD_SECTION_KEYS = ['data', 'interaction', 'view'] as const satisfies readonly PrdNodeSectionKey[]
+
+type BrowserStorageLike = {
+  getItem: (key: string) => string | null
+  setItem: (key: string, value: string) => void
+}
+
+function migrateLegacyStorageKey() {
+  const browserWindow = (globalThis as typeof globalThis & { window?: { localStorage?: BrowserStorageLike } }).window
+  const storage = browserWindow?.localStorage
+  if (!storage) return
+  try {
+    const legacyState = storage.getItem(LEGACY_STORAGE_KEY)
+    if (!legacyState || storage.getItem(STORAGE_KEY)) return
+    storage.setItem(STORAGE_KEY, legacyState)
+  } catch {
+    // Storage can be unavailable in restricted previews; Zustand will fall back to an empty session.
+  }
+}
+
+migrateLegacyStorageKey()
 
 export interface PrototypeVersion {
   id: string

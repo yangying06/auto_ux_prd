@@ -8,8 +8,13 @@ import type { PrototypeSpec } from './prototypeSpec'
 import type { ProjectWorkflowState } from './projectWorkflow'
 
 export const PROJECT_ARCHIVE_SCHEMA_VERSION = 1
-export const PROJECT_ARCHIVE_EXTENSION = 'gpf'
-export const PROJECT_ARCHIVE_MIME = 'application/vnd.gameux.promptforge+zip'
+export const PROJECT_ARCHIVE_EXTENSION = 'usf'
+export const LEGACY_PROJECT_ARCHIVE_EXTENSION = 'gpf'
+export const PROJECT_ARCHIVE_MIME = 'application/vnd.uxspecforge.project+zip'
+export const LEGACY_PROJECT_ARCHIVE_MIME = 'application/vnd.gameux.promptforge+zip'
+export const PROJECT_ARCHIVE_APP_NAME = 'UX SpecForge'
+export const LEGACY_PROJECT_ARCHIVE_APP_NAME = 'GameUX PromptForge'
+export type ProjectArchiveAppName = typeof PROJECT_ARCHIVE_APP_NAME | typeof LEGACY_PROJECT_ARCHIVE_APP_NAME
 
 export interface ProjectSourceFile {
   path: string
@@ -74,7 +79,7 @@ export interface ProjectWorkspaceSnapshot {
 
 export interface ProjectArchiveManifest {
   schemaVersion: typeof PROJECT_ARCHIVE_SCHEMA_VERSION
-  app: 'GameUX PromptForge'
+  app: ProjectArchiveAppName
   projectName: string
   createdAt: string
   savedAt: string

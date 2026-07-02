@@ -114,7 +114,7 @@ export function MapAdjustmentPanel({ baseUrl, tree, onApply }: MapAdjustmentPane
   const [textAttachments, setTextAttachments] = useState<AdjustmentTextAttachment[]>([])
   const [isSending, setIsSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [isCollapsed, setIsCollapsed] = useState(false)
+  const [isCollapsed, setIsCollapsed] = useState(true)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   async function handleSend() {
@@ -309,16 +309,19 @@ export function MapAdjustmentPanel({ baseUrl, tree, onApply }: MapAdjustmentPane
 
   if (isCollapsed) {
     return (
-      <aside className="flex w-12 shrink-0 flex-col items-center border-r border-outline-variant bg-surface-container-low py-md">
+      <aside className="flex w-20 shrink-0 flex-col items-center border-r border-outline-variant bg-surface-container-low px-xs py-md">
         <button
           onClick={() => setIsCollapsed(false)}
-          title="展开 AI 调整拆分"
-          aria-label="展开 AI 调整拆分"
-          className="rounded p-xs text-on-surface-variant transition-colors hover:bg-surface-variant hover:text-primary"
+          title="打开使用 AI 调整"
+          aria-label="打开使用 AI 调整"
+          className="flex min-h-[180px] w-full flex-col items-center justify-center gap-sm rounded-lg border border-dashed border-primary/45 bg-primary-container/15 px-xs py-sm text-center text-primary transition-colors hover:border-primary hover:bg-primary-container/35"
         >
-          <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>chevron_right</span>
+          <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>auto_awesome</span>
+          <span className="text-label-md font-medium leading-tight text-on-surface">
+            打开使用 AI 调整
+          </span>
+          <span className="material-symbols-outlined text-on-surface-variant" style={{ fontSize: '18px' }}>chevron_right</span>
         </button>
-        <span className="material-symbols-outlined mt-sm text-primary" style={{ fontSize: '20px' }}>auto_awesome</span>
       </aside>
     )
   }

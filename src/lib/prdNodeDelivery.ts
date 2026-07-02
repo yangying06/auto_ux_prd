@@ -35,6 +35,65 @@ function textOrNull(value: string | null | undefined) {
   return trimmed ? trimmed : null
 }
 
+function compactText(value: string | null | undefined) {
+  return (value ?? '').replace(/\s+/g, ' ').trim()
+}
+
+function hasSubstantiveText(value: string | null | undefined) {
+  const text = compactText(value)
+  if (!text) return false
+  if (/^(?:untitled|undefined|null|n\/a|na|todo|tbd|未命名|待补充|暂无|无|未指定)$/iu.test(text)) return false
+  if (/^[?？!！.\-_\s]+$/u.test(text)) return false
+  return /[\p{L}\p{N}]/u.test(text)
+}
+
+function nodeHasFigmaSignal(node: PrdNode) {
+  return Boolean(
+    node.figmaPreviews?.length
+    || node.uiStates?.length
+    || node.stateTransitions?.length
+    || node.figmaUxMap,
+  )
+}
+
+function nodeHasTraceableEvidence(node: PrdNode) {
+  return Boolean(
+    node.evidenceRefs?.length
+    || node.references?.some((reference) => reference.targetNodeId || hasSubstantiveText(reference.reason) || hasSubstantiveText(reference.label))
+    || node.backendContracts?.length
+    || node.performanceSpec?.detected,
+  )
+}
+
+function nodeHasSubstantiveSections(node: PrdNode, tree: PrdTree | null | undefined) {
+  return buildDeliverySections(node, tree).some((section) =>
+    section.status !== 'missing'
+    && (
+      hasSubstantiveText(section.summary)
+      || hasSubstantiveText(section.content)
+      || section.evidenceRefs.length > 0
+      || section.sourceNodeIds.length > 0
+    ),
+  )
+}
+
+export function isExportableDeliveryNode(node: PrdNode, tree: PrdTree | null | undefined) {
+  if (!isDeliveryNode(node, tree)) return false
+  if (!hasSubstantiveText(node.label)) return false
+  if (node.label.toLocaleLowerCase() === 'untitled') return false
+
+  const hasOwnContent = hasSubstantiveText(node.summary)
+    || hasSubstantiveText(node.content)
+    || hasSubstantiveText(node.handoffGoal)
+    || hasSubstantiveText(node.qualityGate)
+    || hasSubstantiveText(node.techNotes)
+
+  return hasOwnContent
+    || nodeHasFigmaSignal(node)
+    || nodeHasTraceableEvidence(node)
+    || nodeHasSubstantiveSections(node, tree)
+}
+
 function uniqueBy<T>(items: T[], keyOf: (item: T) => string) {
   const seen = new Set<string>()
   return items.filter((item) => {
@@ -179,6 +238,45 @@ export function buildDeliverySections(node: PrdNode, tree: PrdTree | null | unde
       status,
     }
   })
+}
+
+export type ExportDepth = 'done' | 'forged' | 'all'
+
+export const EXPORT_DEPTH_ORDER: ExportDepth[] = ['done', 'forged', 'all']
+
+export function exportDepthLabel(depth: ExportDepth): string {
+  if (depth === 'done') return '仅已确认'
+  if (depth === 'forged') return '含免打磨'
+  return '全部文档包'
+}
+
+export function exportDepthHint(depth: ExportDepth): string {
+  if (depth === 'done') return '只导出已完成 Deep Forge 确认的页面 spec'
+  if (depth === 'forged') return '导出已确认 + 标记为无需打磨的可交付节点'
+  return '导出全部具备有效内容或证据的交付节点'
+}
+
+export function nodeMatchesExportDepth(node: PrdNode, depth: ExportDepth, tree?: PrdTree | null): boolean {
+  if (!isExportableDeliveryNode(node, tree)) return false
+  if (depth === 'all') return true
+  if (depth === 'forged') return node.status === 'done' || !node.needsPolish
+  return node.status === 'done'
+}
+
+export function filterDeliveryNodesByDepth(nodes: PrdNode[], depth: ExportDepth, tree?: PrdTree | null): PrdNode[] {
+  const fallbackTree = tree ?? Object.fromEntries(nodes.map((node) => [node.id, node])) as PrdTree
+  return nodes.filter((node) => nodeMatchesExportDepth(node, depth, fallbackTree))
+}
+
+export function countExportableNodesByDepth(tree: PrdTree, depth: ExportDepth): number {
+  return filterDeliveryNodesByDepth(collectDeliveryNodes(tree), depth, tree).length
+}
+
+export function pickExportDepthForCount(tree: PrdTree, fallbackDepth: ExportDepth = 'all'): ExportDepth {
+  for (const depth of EXPORT_DEPTH_ORDER) {
+    if (countExportableNodesByDepth(tree, depth) > 0) return depth
+  }
+  return fallbackDepth
 }
 
 export function hasDeliverySections(node: PrdNode, tree: PrdTree | null | undefined) {

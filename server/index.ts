@@ -4,11 +4,12 @@ import dotenv from 'dotenv'
 import express from 'express'
 import { strFromU8, unzipSync, zipSync } from 'fflate'
 import { spawn } from 'node:child_process'
-import { copyFileSync, type Dirent, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, type Dirent, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { applyPerformanceAnswerFast, formatPerformanceSpecForPrompt, formatPerformanceSpecMarkdown, normalizePerformanceSpec, resolveNodePerformanceSpec } from '../src/lib/performanceOrchestration'
 import { defaultAudienceForSpecLens, formatSectionTitle, formatSpecLens, hasNodeSections, normalizeLegacyAudience, normalizeNodeLensFields, normalizeSectionKeyForLens, normalizeSpecLensValue, resolveNodeAudience, resolveNodeSpecLens, specLensFromLegacyAudience } from '../src/lib/prdNodeLens'
-import { buildDeliverySections, collectBackendContracts, collectDeliveryEvidence, collectDeliveryNodes } from '../src/lib/prdNodeDelivery'
+import { buildDeliverySections, collectBackendContracts, collectDeliveryEvidence, collectDeliveryNodes, filterDeliveryNodesByDepth, type ExportDepth } from '../src/lib/prdNodeDelivery'
 import { buildUiOnlyPrototypeInstruction, isUiOnlyPrototypeFeedback } from '../src/lib/nodeChatIntent'
 import { formatPrototypeSpecForPrompt } from '../src/lib/prototypeSpec'
 import { applyPrototypeEdit, normalizeGeneratedPrototypeHtml, normalizePrototypeHtml } from '../src/lib/prototypeUtils'
@@ -33,12 +34,36 @@ import { buildProjectUiFlow, formatProjectUiFlowMarkdown } from './projectUiFlow
 import type { FigmaNumericTextSlot } from './figmaNumericText'
 import type { ProjectWorkflowState } from '../src/types/projectWorkflow'
 
+const LEGACY_SERVER_ENV_FILE_PATH = path.resolve(process.cwd(), 'server', '.env')
+const USER_CONFIG_DIR_NAME = 'UX SpecForge'
+const LEGACY_USER_CONFIG_DIR_NAME = 'GameUX PromptForge'
+
+function resolveUserConfigDir() {
+  if (process.env.UX_SPECFORGE_CONFIG_DIR?.trim()) return path.resolve(process.env.UX_SPECFORGE_CONFIG_DIR.trim())
+  if (process.env.PROMPTFORGE_CONFIG_DIR?.trim()) return path.resolve(process.env.PROMPTFORGE_CONFIG_DIR.trim())
+  const baseDir = process.env.APPDATA?.trim()
+    ? process.env.APPDATA.trim()
+    : path.join(os.homedir(), '.config')
+  const userConfigDir = path.join(baseDir, USER_CONFIG_DIR_NAME)
+  const legacyUserConfigDir = path.join(baseDir, LEGACY_USER_CONFIG_DIR_NAME)
+  if (!existsSync(path.join(userConfigDir, '.env')) && existsSync(path.join(legacyUserConfigDir, '.env'))) {
+    return legacyUserConfigDir
+  }
+  return userConfigDir
+}
+
+const USER_ENV_FILE_PATH = path.join(resolveUserConfigDir(), '.env')
+
 dotenv.config()
-dotenv.config({ path: 'server/.env' })
+dotenv.config({ path: LEGACY_SERVER_ENV_FILE_PATH, override: true })
+dotenv.config({ path: USER_ENV_FILE_PATH, override: true })
 
 const app = express()
 const port = Number(process.env.LOCAL_PROXY_PORT ?? 8787)
-const ENV_FILE_PATH = path.resolve(process.cwd(), '.env')
+const host = process.env.LOCAL_PROXY_HOST ?? '127.0.0.1'
+const ENV_FILE_PATH = USER_ENV_FILE_PATH
+const CLIENT_DIST_DIR = path.resolve(process.cwd(), 'dist')
+const STATIC_WEB_ENABLED = process.env.DISABLE_STATIC_WEB !== 'true'
 const DEFAULT_ENV_CONFIG = {
   ANTHROPIC_API_KEY: '',
   ANTHROPIC_BASE_URL: 'https://litellm.wenext.technology/',
@@ -52,15 +77,26 @@ const DEFAULT_ENV_CONFIG = {
   LARK_TENANT_ACCESS_TOKEN: '',
   LARK_USER_ACCESS_TOKEN: '',
 } as const
+
+function envInt(name: string, fallback: number, min: number, max: number) {
+  const parsed = Number.parseInt(process.env[name] ?? '', 10)
+  const value = Number.isFinite(parsed) ? parsed : fallback
+  return Math.min(max, Math.max(min, value))
+}
+
 let model = process.env.CLAUDE_MODEL ?? 'claude-sonnet-4-6'
 const SESSION_CLEANUP_DELAY_MS = 5 * 60 * 1000
 const DECOMPOSITION_HEARTBEAT_MS = 8000
-const DECOMPOSITION_CALL_TIMEOUT_MS = Number.parseInt(process.env.DECOMPOSITION_CALL_TIMEOUT_MS ?? '180000', 10)
-const DECOMPOSITION_BRANCH_CONCURRENCY = 2
+const DECOMPOSITION_CALL_TIMEOUT_MS = envInt('DECOMPOSITION_CALL_TIMEOUT_MS', 180000, 30000, 900000)
+const DECOMPOSITION_L1_CONCURRENCY = envInt('DECOMPOSITION_L1_CONCURRENCY', 3, 1, 6)
+const DECOMPOSITION_BRANCH_CONCURRENCY = envInt('DECOMPOSITION_BRANCH_CONCURRENCY', 2, 1, 6)
+const DECOMPOSITION_L1_REDUCER_MAX_CANDIDATES = envInt('DECOMPOSITION_L1_REDUCER_MAX_CANDIDATES', 48, 8, 120)
+const DECOMPOSITION_L1_REDUCER_CONTEXT_CHARS = envInt('DECOMPOSITION_L1_REDUCER_CONTEXT_CHARS', 36000, 8000, 120000)
 const LARGE_PRD_DECOMPOSE_THRESHOLD = 30 * 1024
-const LARGE_PRD_SLICE_TARGET_LENGTH = 12 * 1024
+const LARGE_PRD_SLICE_TARGET_LENGTH = envInt('LARGE_PRD_SLICE_TARGET_LENGTH', 16 * 1024, 6 * 1024, 64 * 1024)
 const SOURCE_OUTLINE_ROOT_ID = 'SOURCE_OUTLINE_ROOT'
 const SPEC_EXPORT_ROOT = path.resolve(process.cwd(), 'generated', 'specs')
+const SPEC_UI_FLOW_DOC_PATH = 'UI-FLOW.md'
 const ASSET_WORKBENCH_CACHE_ROOT = path.resolve(process.cwd(), '.cache')
 const FIGMA_ASSET_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'figma-assets')
 const FIGMA_INTERMEDIATE_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'figma-intermediates')
@@ -74,7 +110,7 @@ const figmaApiBaseUrl = (process.env.FIGMA_API_BASE_URL ?? 'https://api.figma.co
 const figma2PrefabBaseUrl = (process.env.FIGMA2PREFAB_BASE_URL ?? 'http://43.134.44.85:3000').replace(/\/+$/, '')
 const figma2PrefabConvertPath = process.env.FIGMA2PREFAB_CONVERT_PATH ?? '/api/convert'
 const figma2PrefabProvider = process.env.FIGMA2PREFAB_PROVIDER?.trim()
-let figmaToken = process.env.FIGMA_TOKEN ?? process.env.FIGMA_ACCESS_TOKEN ?? ''
+let figmaToken = configuredFigmaTokenFromEnv()
 const FIGMA2PREFAB_POLL_INTERVAL_MS = Number.parseInt(process.env.FIGMA2PREFAB_POLL_INTERVAL_MS ?? '2500', 10)
 const FIGMA2PREFAB_TIMEOUT_MS = Number.parseInt(process.env.FIGMA2PREFAB_TIMEOUT_MS ?? '600000', 10)
 const FIGMA_ASSET_BUNDLE_TTL_MS = Number.parseInt(process.env.FIGMA_ASSET_BUNDLE_TTL_MS ?? `${30 * 60 * 1000}`, 10)
@@ -109,7 +145,7 @@ let openAiBaseUrl = (process.env.OPENAI_BASE_URL ?? process.env.ANTHROPIC_BASE_U
 
 function reloadAiRuntimeConfig() {
   model = process.env.CLAUDE_MODEL ?? 'claude-sonnet-4-6'
-  figmaToken = process.env.FIGMA_TOKEN ?? process.env.FIGMA_ACCESS_TOKEN ?? ''
+  figmaToken = configuredFigmaTokenFromEnv()
   anthropic = process.env.ANTHROPIC_API_KEY
     ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL })
     : null
@@ -520,7 +556,7 @@ interface ProjectKnowledgeSearchRequest {
   limit?: number
 }
 
-const systemPrompt = `你是 GameUX PromptForge 的需求质量检查员。
+const systemPrompt = `你是 UX SpecForge 的需求质量检查员。
 你的任务是把模糊的 UX 交互需求，整理成可直接交给 H5、Android、iOS 或游戏客户端实现的提示词。
 每轮最多问一个高价值追问，并且只在它真正阻塞实现时追问。
 当 completion_rate 达到 60 或更高时，停止确认式提问，直接在 reply 中输出最终跨平台交互实现提示词草案。
@@ -1935,7 +1971,7 @@ function normalizeDecompositionSources(body: DecompositionSourceRequest): Normal
 }
 
 function getConfiguredFigmaToken() {
-  return figmaToken || process.env.FIGMA_TOKEN || process.env.FIGMA_ACCESS_TOKEN || ''
+  return figmaToken || configuredFigmaTokenFromEnv()
 }
 
 function compactFigmaText(value: string | null | undefined, maxLength = 180) {
@@ -4291,6 +4327,22 @@ function prdFallbackSectionsForNode(node: PrdNode): PrdNode['sections'] {
   }
 }
 
+function isLocalFallbackPrdNode(node: PrdNode) {
+  if (node.sourceKind && node.sourceKind !== 'prd') return false
+  const text = [
+    node.summary,
+    node.content,
+    node.techNotes,
+    node.handoffGoal,
+    node.qualityGate,
+  ].filter((value): value is string => Boolean(value?.trim())).join('\n')
+  return text.includes('AI 通读原文失败')
+    || text.includes('AI 分片通读未返回页面节点')
+    || text.includes('系统先保留该页面候选')
+    || text.includes('本地候选兜底')
+    || text.includes('AI 未能在超时时间内完成这一轮 PRD 通读')
+}
+
 function mergedSourceLabel(...values: Array<string | null | undefined>) {
   return uniqueTextBlocks(values).join('；') || null
 }
@@ -4390,22 +4442,29 @@ function bestFigmaNodeForPrdNode(prdNode: PrdNode, figmaNodes: PrdNode[], usedFi
 }
 
 function mergeFigmaNodeWithPrdNode(figmaNode: PrdNode, prdNode: PrdNode): PrdNode {
+  const prdIsLocalFallback = isLocalFallbackPrdNode(prdNode)
   const prdSections = prdFallbackSectionsForNode(prdNode)
   const content = uniqueTextBlocks([
     figmaNode.content,
-    prdNode.content ? `## PRD 拆解补充\n\n${prdNode.content}` : null,
+    prdNode.content
+      ? `${prdIsLocalFallback ? '## PRD 候选兜底' : '## PRD 拆解补充'}\n\n${prdNode.content}`
+      : null,
   ]).join('\n\n')
 
   return {
     ...figmaNode,
-    summary: prdNode.summary || figmaNode.summary,
+    summary: prdIsLocalFallback ? figmaNode.summary : (prdNode.summary || figmaNode.summary),
     content,
     extractedFrom: mergedSourceLabel(figmaNode.extractedFrom, prdNode.extractedFrom),
     techNotes: mergedSourceLabel(figmaNode.techNotes, prdNode.techNotes),
     sections: mergeNodeSections(figmaNode.sections, prdSections),
     backendContracts: uniqueBackendContracts(figmaNode.backendContracts, prdNode.backendContracts),
-    handoffGoal: mergeTextValues(prdNode.handoffGoal, figmaNode.handoffGoal),
-    qualityGate: mergeTextValues(prdNode.qualityGate, figmaNode.qualityGate),
+    handoffGoal: prdIsLocalFallback
+      ? mergeTextValues(figmaNode.handoffGoal, prdNode.handoffGoal)
+      : mergeTextValues(prdNode.handoffGoal, figmaNode.handoffGoal),
+    qualityGate: prdIsLocalFallback
+      ? mergeTextValues(figmaNode.qualityGate, prdNode.qualityGate)
+      : mergeTextValues(prdNode.qualityGate, figmaNode.qualityGate),
     evidenceRefs: uniqueEvidenceRefs(figmaNode.evidenceRefs, prdNode.evidenceRefs),
   }
 }
@@ -4883,10 +4942,6 @@ function decompositionErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error)
 }
 
-function isDecompositionTimeoutMessage(message: string) {
-  return message.includes('秒仍未返回')
-}
-
 function appendDecompositionWarning(session: DecompositionSession, warning: string) {
   session.branchErrors = [...(session.branchErrors ?? []), warning]
   session.error = `部分自动拆解未完成，但已保留可用导图：${session.branchErrors.join('；')}`
@@ -4983,6 +5038,91 @@ function mergeLargePrdCandidates(candidates: PrdNode[]) {
   })))
 }
 
+function formatLargeL1CandidateForReducer(node: PrdNode, index: number) {
+  const evidence = (node.evidenceRefs ?? [])
+    .slice(0, 3)
+    .map((ref) => `- ${ref.sourceLabel}${ref.quote ? `：“${compactExcerpt(ref.quote, 160)}”` : ''}`)
+    .join('\n')
+
+  return [
+    `### 候选 ${index + 1}：${node.label}`,
+    `- 原文位置：${node.extractedFrom ?? '未标注'}`,
+    `- 摘要：${compactExcerpt(node.summary, 240)}`,
+    node.techNotes ? `- 技术备注：${compactExcerpt(node.techNotes, 220)}` : null,
+    evidence ? `- 证据：\n${evidence}` : null,
+    '',
+    '正文：',
+    compactExcerpt(node.content, 900),
+  ].filter(Boolean).join('\n')
+}
+
+function buildLargeL1ReducerPrompt(candidates: PrdNode[], projectWorkflowContext: string) {
+  const blocks: string[] = []
+  let usedChars = 0
+
+  for (const [index, candidate] of candidates.slice(0, DECOMPOSITION_L1_REDUCER_MAX_CANDIDATES).entries()) {
+    const block = formatLargeL1CandidateForReducer(candidate, index)
+    if (blocks.length > 0 && usedChars + block.length > DECOMPOSITION_L1_REDUCER_CONTEXT_CHARS) break
+    blocks.push(block)
+    usedChars += block.length
+  }
+
+  return [
+    projectWorkflowContext,
+    '',
+    '下面是多个 PRD 切片分析员并行阅读后输出的页面/界面/弹窗候选。你的任务是做最终归并：',
+    '- 合并同义、同页面、同弹窗或同一界面不同状态的候选。',
+    '- 保留真实玩家会看到、适合后续逐页打磨的页面/界面/弹窗。',
+    '- 不要新增候选里没有原文依据的页面，不要输出按钮、字段、奖励条目等内部细节节点。',
+    '- 每个最终节点必须带清晰原文依据、范围边界、需澄清点，最多 8 个。',
+    '- 所有展示给用户的文字必须是中文；ID、路径、字段名、枚举值可以保留英文。',
+    '',
+    `候选数量：${candidates.length}；本轮送入汇总：${blocks.length}。`,
+    '',
+    blocks.join('\n\n'),
+  ].filter(Boolean).join('\n')
+}
+
+async function reduceLargePrdCandidates(
+  candidates: PrdNode[],
+  session: DecompositionSession,
+  claude: Anthropic,
+  projectWorkflowContext: string,
+) {
+  try {
+    const response = await withDecompositionProgress(session, '正在汇总并归并页面线索', () =>
+      claude.messages.create({
+        model,
+        max_tokens: 4000,
+        system: decompositionL1SystemPrompt,
+        tools: [decomposePrdTopLevelTool],
+        tool_choice: { type: 'tool', name: 'decompose_prd' },
+        messages: [
+          {
+            role: 'user',
+            content: buildLargeL1ReducerPrompt(candidates, projectWorkflowContext),
+          },
+        ],
+      })
+    )
+
+    const toolUse = response.content.find(
+      (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === 'decompose_prd'
+    )
+    if (!toolUse) throw new Error('AI 汇总阶段未返回导图节点分析结果')
+
+    const raw = (toolUse.input as { nodes?: unknown }).nodes ?? toolUse.input
+    const nodes = normalizeDecompositionNodes(raw)
+    if (nodes.length > 0) return normalizeTopLevelInterfaceNodes(nodes)
+
+    appendDecompositionWarning(session, 'AI 汇总阶段返回空页面节点，已改用本地归并切片候选。')
+  } catch (err) {
+    appendDecompositionWarning(session, `AI 汇总页面线索失败，已改用本地归并切片候选：${decompositionErrorMessage(err)}`)
+  }
+
+  return mergeLargePrdCandidates(candidates)
+}
+
 async function decomposeLargeL1(
   mdText: string,
   session: DecompositionSession,
@@ -4990,16 +5130,18 @@ async function decomposeLargeL1(
   imageBlocks: Anthropic.ImageBlockParam[] = [],
 ) {
   const slices = buildPrdSourceSlices(mdText)
-  const candidates: PrdNode[] = []
+  const sliceResults: PrdNode[][] = Array.from({ length: slices.length }, () => [])
   const projectWorkflowContext = [
     formatProjectWorkflowForDecomposition(session.projectWorkflow),
     buildPrdImageEvidenceInstruction(imageBlocks, '整份 PRD；每个大文档分片都需要结合图片证据理解正文'),
   ].filter(Boolean).join('\n\n')
-  let consecutiveFailures = 0
+  let completedSlices = 0
+  let failedSlices = 0
 
-  for (const [index, slice] of slices.entries()) {
+  session.currentStep = `正在并行通读原文（0/${slices.length}，并发 ${DECOMPOSITION_L1_CONCURRENCY}）`
+  await runWithConcurrency(slices.map((slice, index) => ({ slice, index })), DECOMPOSITION_L1_CONCURRENCY, async ({ slice, index }) => {
     try {
-      const response = await withDecompositionProgress(session, '正在通读原文并建立结构', () =>
+      const response = await withDecompositionProgress(session, `正在并行通读原文 ${index + 1}/${slices.length}`, () =>
         claude.messages.create({
           model,
           max_tokens: 2200,
@@ -5021,23 +5163,29 @@ async function decomposeLargeL1(
       const toolUse = response.content.find(
         (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === 'decompose_prd'
       )
-      if (!toolUse) continue
+      if (!toolUse) return
 
       const raw = (toolUse.input as { nodes?: unknown }).nodes ?? toolUse.input
-      candidates.push(...normalizeDecompositionNodes(raw).map((node) => ({
+      sliceResults[index] = normalizeDecompositionNodes(raw).map((node) => ({
         ...node,
         extractedFrom: node.extractedFrom ?? slice.label,
-      })))
-      consecutiveFailures = 0
+      }))
     } catch (err) {
       const message = decompositionErrorMessage(err)
-      consecutiveFailures += 1
+      failedSlices += 1
       appendDecompositionWarning(session, `原文切片 ${index + 1}/${slices.length}（${slice.label}）AI 通读失败：${message}`)
-      if (isDecompositionTimeoutMessage(message) || consecutiveFailures >= 2) {
-        appendDecompositionWarning(session, '已停止继续通读剩余切片，改用已获得线索或本地页面候选兜底。')
-        break
+    } finally {
+      completedSlices += 1
+      const candidateCount = sliceResults.reduce((sum, nodes) => sum + nodes.length, 0)
+      if (session.status === 'running') {
+        session.currentStep = `正在并行通读原文（已完成 ${completedSlices}/${slices.length}，获得 ${candidateCount} 个候选）`
       }
     }
+  })
+
+  const candidates = sliceResults.flat()
+  if (failedSlices > 0) {
+    appendDecompositionWarning(session, `大 PRD 并行通读完成：${slices.length - failedSlices}/${slices.length} 个切片成功，获得 ${candidates.length} 个候选。`)
   }
 
   if (candidates.length === 0) {
@@ -5049,7 +5197,7 @@ async function decomposeLargeL1(
     }
   }
 
-  return withDecompositionProgress(session, '正在归并页面线索', async () => mergeLargePrdCandidates(candidates))
+  return reduceLargePrdCandidates(candidates, session, claude, projectWorkflowContext)
 }
 
 function sectionTextForHeading(mdText: string, heading: MarkdownHeading, headings: MarkdownHeading[]) {
@@ -5515,7 +5663,12 @@ async function runDecompositionJob(
     let prdPageNodes: PrdNode[] = []
     if (rawPrdText?.trim() && anthropic) {
       try {
-        prdPageNodes = discardImportedReferences(await decomposeL1(rawPrdText, activeSession, imageBlocks))
+        const decomposedPrdNodes = discardImportedReferences(await decomposeL1(rawPrdText, activeSession, imageBlocks))
+        const fallbackPrdNodes = decomposedPrdNodes.filter(isLocalFallbackPrdNode)
+        prdPageNodes = decomposedPrdNodes.filter((node) => !isLocalFallbackPrdNode(node))
+        if (fallbackPrdNodes.length > 0 && prdPageNodes.length === 0) {
+          appendDecompositionWarning(activeSession, `PRD 页面补充拆解只返回了 ${fallbackPrdNodes.length} 个本地候选兜底节点；本次以 Figma 确定性界面节点为准，并保留本地 PRD 对齐补充。`)
+        }
       } catch (err) {
         appendDecompositionWarning(activeSession, `PRD 页面补充拆解失败，已保留 Figma 界面节点：${decompositionErrorMessage(err)}`)
       }
@@ -5568,6 +5721,8 @@ async function runDecompositionJob(
 void decomposeBranch
 
 const allowedOrigins = new Set([
+  `http://127.0.0.1:${port}`,
+  `http://localhost:${port}`,
   'http://127.0.0.1:5173',
   'http://localhost:5173',
   'http://127.0.0.1:5174',
@@ -5603,6 +5758,43 @@ function normalizeEnvField(value: unknown, fallback: string) {
   return value.trim()
 }
 
+function stripEnvValueQuotes(value: string) {
+  const trimmed = value.trim()
+  if (trimmed.length < 2) return trimmed
+  if (trimmed.length >= 4 && trimmed.startsWith('\\"') && trimmed.endsWith('\\"')) {
+    return trimmed.slice(2, -2).trim()
+  }
+  if (trimmed.length >= 4 && trimmed.startsWith("\\'") && trimmed.endsWith("\\'")) {
+    return trimmed.slice(2, -2).trim()
+  }
+  const first = trimmed[0]
+  const last = trimmed[trimmed.length - 1]
+  if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+    return trimmed.slice(1, -1).trim()
+  }
+  return trimmed
+}
+
+function normalizeSecretEnvField(value: unknown, fallback: string) {
+  return stripEnvValueQuotes(normalizeEnvField(value, fallback))
+}
+
+function normalizeFigmaTokenField(value: unknown, fallback: string) {
+  return stripEnvValueQuotes(normalizeSecretEnvField(value, fallback).replace(/^Bearer\s+/iu, '').trim())
+}
+
+function firstConfiguredSecret(...values: Array<string | undefined>) {
+  for (const value of values) {
+    const normalized = normalizeSecretEnvField(value, '')
+    if (normalized) return normalized
+  }
+  return ''
+}
+
+function configuredFigmaTokenFromEnv() {
+  return normalizeFigmaTokenField(firstConfiguredSecret(process.env.FIGMA_TOKEN, process.env.FIGMA_ACCESS_TOKEN), '')
+}
+
 function toMockDecomposeValue(value: unknown, fallback: string) {
   if (typeof value === 'boolean') return value ? 'true' : 'false'
   if (typeof value !== 'string') return fallback === 'true' ? 'true' : 'false'
@@ -5611,6 +5803,33 @@ function toMockDecomposeValue(value: unknown, fallback: string) {
 
 function hasOwnEnvField(payload: AiEnvironmentUpdate, key: keyof typeof DEFAULT_ENV_CONFIG) {
   return Object.prototype.hasOwnProperty.call(payload, key)
+}
+
+function writeManagedEnvFile(filePath: string, values: Record<keyof typeof DEFAULT_ENV_CONFIG, string>) {
+  mkdirSync(path.dirname(filePath), { recursive: true })
+  const existing = existsSync(filePath) ? readFileSync(filePath, 'utf8') : ''
+  const lines = existing ? existing.split(/\r?\n/u) : []
+  const seen = new Set<string>()
+  const nextLines = lines.map((line) => {
+    const match = line.match(/^([A-Z0-9_]+)=/u)
+    const key = match?.[1] as keyof typeof DEFAULT_ENV_CONFIG | undefined
+    if (!key || !Object.prototype.hasOwnProperty.call(values, key)) return line
+    seen.add(key)
+    return `${key}=${values[key]}`
+  })
+
+  for (const key of Object.keys(values) as Array<keyof typeof DEFAULT_ENV_CONFIG>) {
+    if (!seen.has(key)) nextLines.push(`${key}=${values[key]}`)
+  }
+
+  writeFileSync(filePath, `${nextLines.join('\n').replace(/\n+$/u, '')}\n`, 'utf8')
+}
+
+function previewSecret(value: string | undefined) {
+  const trimmed = value?.trim()
+  if (!trimmed) return null
+  const visible = trimmed.slice(-4)
+  return `${'*'.repeat(Math.max(6, Math.min(12, trimmed.length - visible.length)))}${visible}`
 }
 
 interface LarkCliRunResult {
@@ -6002,19 +6221,24 @@ function buildLarkImportText(options: {
 }
 
 function buildAiEnvironmentStatus() {
+  const configuredFigmaToken = getConfiguredFigmaToken()
   return {
     aiConfigured: Boolean(process.env.ANTHROPIC_API_KEY?.trim()),
     envPath: ENV_FILE_PATH,
     values: {
       ANTHROPIC_API_KEY_PRESENT: Boolean(process.env.ANTHROPIC_API_KEY?.trim()),
+      ANTHROPIC_API_KEY_PREVIEW: previewSecret(process.env.ANTHROPIC_API_KEY),
       ANTHROPIC_BASE_URL: readEnvValue('ANTHROPIC_BASE_URL'),
       CLAUDE_MODEL: readEnvValue('CLAUDE_MODEL'),
       MOCK_DECOMPOSE: readEnvValue('MOCK_DECOMPOSE') === 'true',
-      FIGMA_TOKEN_PRESENT: Boolean(process.env.FIGMA_TOKEN?.trim()),
+      FIGMA_TOKEN_PRESENT: Boolean(configuredFigmaToken),
+      FIGMA_TOKEN_PREVIEW: previewSecret(configuredFigmaToken),
       LARK_CLI_BIN: readEnvValue('LARK_CLI_BIN'),
       LARK_IDENTITY: readEnvValue('LARK_IDENTITY'),
+      LARK_APP_ID: process.env.LARK_APP_ID ?? DEFAULT_ENV_CONFIG.LARK_APP_ID,
       LARK_APP_ID_PRESENT: Boolean(process.env.LARK_APP_ID?.trim()),
       LARK_APP_SECRET_PRESENT: Boolean(process.env.LARK_APP_SECRET?.trim()),
+      LARK_APP_SECRET_PREVIEW: previewSecret(process.env.LARK_APP_SECRET),
       LARK_TENANT_ACCESS_TOKEN_PRESENT: Boolean(process.env.LARK_TENANT_ACCESS_TOKEN?.trim()),
       LARK_USER_ACCESS_TOKEN_PRESENT: Boolean(process.env.LARK_USER_ACCESS_TOKEN?.trim()),
     },
@@ -6029,8 +6253,8 @@ app.post('/api/environment', (req, res) => {
   const payload = (req.body ?? {}) as AiEnvironmentUpdate
   const nextEnv = {
     ANTHROPIC_API_KEY: hasOwnEnvField(payload, 'ANTHROPIC_API_KEY')
-      ? normalizeEnvField(payload.ANTHROPIC_API_KEY, '')
-      : (process.env.ANTHROPIC_API_KEY ?? ''),
+      ? normalizeSecretEnvField(payload.ANTHROPIC_API_KEY, '')
+      : normalizeSecretEnvField(process.env.ANTHROPIC_API_KEY, ''),
     ANTHROPIC_BASE_URL: hasOwnEnvField(payload, 'ANTHROPIC_BASE_URL')
       ? (normalizeEnvField(payload.ANTHROPIC_BASE_URL, DEFAULT_ENV_CONFIG.ANTHROPIC_BASE_URL) || DEFAULT_ENV_CONFIG.ANTHROPIC_BASE_URL)
       : readEnvValue('ANTHROPIC_BASE_URL'),
@@ -6041,8 +6265,8 @@ app.post('/api/environment', (req, res) => {
       ? toMockDecomposeValue(payload.MOCK_DECOMPOSE, DEFAULT_ENV_CONFIG.MOCK_DECOMPOSE)
       : readEnvValue('MOCK_DECOMPOSE'),
     FIGMA_TOKEN: hasOwnEnvField(payload, 'FIGMA_TOKEN')
-      ? normalizeEnvField(payload.FIGMA_TOKEN, '')
-      : (process.env.FIGMA_TOKEN ?? ''),
+      ? normalizeFigmaTokenField(payload.FIGMA_TOKEN, '')
+      : configuredFigmaTokenFromEnv(),
     LARK_CLI_BIN: hasOwnEnvField(payload, 'LARK_CLI_BIN')
       ? (normalizeEnvField(payload.LARK_CLI_BIN, DEFAULT_ENV_CONFIG.LARK_CLI_BIN) || DEFAULT_ENV_CONFIG.LARK_CLI_BIN)
       : readEnvValue('LARK_CLI_BIN'),
@@ -6053,18 +6277,14 @@ app.post('/api/environment', (req, res) => {
       ? normalizeEnvField(payload.LARK_APP_ID, '')
       : (process.env.LARK_APP_ID ?? ''),
     LARK_APP_SECRET: hasOwnEnvField(payload, 'LARK_APP_SECRET')
-      ? normalizeEnvField(payload.LARK_APP_SECRET, '')
-      : (process.env.LARK_APP_SECRET ?? ''),
+      ? normalizeSecretEnvField(payload.LARK_APP_SECRET, '')
+      : normalizeSecretEnvField(process.env.LARK_APP_SECRET, ''),
     LARK_TENANT_ACCESS_TOKEN: hasOwnEnvField(payload, 'LARK_TENANT_ACCESS_TOKEN')
-      ? normalizeEnvField(payload.LARK_TENANT_ACCESS_TOKEN, '')
-      : (process.env.LARK_TENANT_ACCESS_TOKEN ?? ''),
+      ? normalizeSecretEnvField(payload.LARK_TENANT_ACCESS_TOKEN, '')
+      : normalizeSecretEnvField(process.env.LARK_TENANT_ACCESS_TOKEN, ''),
     LARK_USER_ACCESS_TOKEN: hasOwnEnvField(payload, 'LARK_USER_ACCESS_TOKEN')
-      ? normalizeEnvField(payload.LARK_USER_ACCESS_TOKEN, '')
-      : (process.env.LARK_USER_ACCESS_TOKEN ?? ''),
-  }
-
-  if (!nextEnv.ANTHROPIC_API_KEY) {
-    return void res.status(400).json({ error: '请先填写 ANTHROPIC_API_KEY。' })
+      ? normalizeSecretEnvField(payload.LARK_USER_ACCESS_TOKEN, '')
+      : normalizeSecretEnvField(process.env.LARK_USER_ACCESS_TOKEN, ''),
   }
 
   for (const [key, value] of Object.entries(nextEnv)) {
@@ -6072,21 +6292,7 @@ app.post('/api/environment', (req, res) => {
   }
   reloadAiRuntimeConfig()
 
-  const fileBody = [
-    `ANTHROPIC_API_KEY=${nextEnv.ANTHROPIC_API_KEY}`,
-    `ANTHROPIC_BASE_URL=${nextEnv.ANTHROPIC_BASE_URL}`,
-    `CLAUDE_MODEL=${nextEnv.CLAUDE_MODEL}`,
-    `MOCK_DECOMPOSE=${nextEnv.MOCK_DECOMPOSE}`,
-    `FIGMA_TOKEN=${nextEnv.FIGMA_TOKEN}`,
-    `LARK_CLI_BIN=${nextEnv.LARK_CLI_BIN}`,
-    `LARK_IDENTITY=${nextEnv.LARK_IDENTITY}`,
-    `LARK_APP_ID=${nextEnv.LARK_APP_ID}`,
-    `LARK_APP_SECRET=${nextEnv.LARK_APP_SECRET}`,
-    `LARK_TENANT_ACCESS_TOKEN=${nextEnv.LARK_TENANT_ACCESS_TOKEN}`,
-    `LARK_USER_ACCESS_TOKEN=${nextEnv.LARK_USER_ACCESS_TOKEN}`,
-    '',
-  ].join('\n')
-  writeFileSync(ENV_FILE_PATH, fileBody, 'utf8')
+  writeManagedEnvFile(ENV_FILE_PATH, nextEnv)
 
   res.json(buildAiEnvironmentStatus())
 })
@@ -6315,7 +6521,7 @@ app.post('/api/map-adjust', async (req, res) => {
   const response = await anthropic.messages.create({
     model,
     max_tokens: 2048,
-    system: `你是 GameUX PromptForge 的页面级导图调整助手。\n只给出建议，不直接修改导图。\n必须返回 JSON：{"reply":"中文说明","operations":[]}。\noperations 只能包含 create_node/update_node/move_content/add_reference，严禁返回 delete_node。\n所有调整必须基于原有文档节点增补或修正：不要删除现有节点，不要用空内容或新内容覆盖原正文；需要拆分时创建新节点并用 move_content 表示“复制/补充到目标节点”的内容，原节点内容必须保留。新增页面默认 status 为 pending_refine；不要拆按钮/字段级节点；跨页面关系用 add_reference。MVC 视角必须写入 specLens；audience 只表示下游角色。\n如果用户上传的是 API 示例、mock 数据、请求/响应字段或服务端结算规则，不要把接口拆成页面节点；应优先对相关业务节点返回 update_node，并把接口契约写入 patch.backendContracts，同时把字段/状态来源补入 patch.sections.data，把调用时机/响应表现补入 patch.sections.interaction。无法可靠匹配节点时，只在 reply 中提示用户选中具体节点后走节点补充资料入口，不要编造节点映射。`,
+    system: `你是 UX SpecForge 的页面级导图调整助手。\n只给出建议，不直接修改导图。\n必须返回 JSON：{"reply":"中文说明","operations":[]}。\noperations 只能包含 create_node/update_node/move_content/add_reference，严禁返回 delete_node。\n所有调整必须基于原有文档节点增补或修正：不要删除现有节点，不要用空内容或新内容覆盖原正文；需要拆分时创建新节点并用 move_content 表示“复制/补充到目标节点”的内容，原节点内容必须保留。新增页面默认 status 为 pending_refine；不要拆按钮/字段级节点；跨页面关系用 add_reference。MVC 视角必须写入 specLens；audience 只表示下游角色。\n如果用户上传的是 API 示例、mock 数据、请求/响应字段或服务端结算规则，不要把接口拆成页面节点；应优先对相关业务节点返回 update_node，并把接口契约写入 patch.backendContracts，同时把字段/状态来源补入 patch.sections.data，把调用时机/响应表现补入 patch.sections.interaction。无法可靠匹配节点时，只在 reply 中提示用户选中具体节点后走节点补充资料入口，不要编造节点映射。`,
     messages: [
       { role: 'user', content: buildContentWithImages(`当前导图：\n${treeSummary}\n\n用户对话：\n${messages.map((message) => `${message.role}: ${extractText(message.content)}`).join('\n')}`, imageBlocks) },
     ],
@@ -6369,7 +6575,7 @@ ${messages.map((message) => `${message.role}: ${extractText(message.content)}`).
   const response = await anthropic.messages.create({
     model,
     max_tokens: 2048,
-    system: `你是 GameUX PromptForge 的 QA 缺陷确认助手。
+    system: `你是 UX SpecForge 的 QA 缺陷确认助手。
 你的目标是通过对话把 QA 的零散描述和引用界面节点整理为可以直接推送给程序同学处理的缺陷单。
 
 规则：
@@ -6611,7 +6817,7 @@ app.post('/api/prd-node-suggestions', async (req, res) => {
     ...normalizedSources.map((source) => `## ${source.sourceKind === 'upload' ? '上传资料' : '用户补充'}：${source.name}\n${source.text}`),
   ].filter(Boolean).join('\n\n')
   const suggestionSystemPrompt = [
-    '你是 GameUX PromptForge 的导图节点补齐助手。你只能生成待用户确认的 create/update 建议，不能声称已经修改导图。',
+    '你是 UX SpecForge 的导图节点补齐助手。你只能生成待用户确认的 create/update 建议，不能声称已经修改导图。',
     '必须返回 JSON：{"reply":"中文说明","suggestions":[]}。suggestions 最多 5 条，每条包含 id、operation(create/update)、targetNodeId、parentId、patch、rationale、confidence、evidenceRefs。',
     'MVC 分类必须按证据维度：model=领域事实/数据/配置/状态/规则；control=流程编排/API/命令/校验/请求响应/状态流转；view=UI 布局/文案/动画/视觉反馈。禁止因为关键词出现就归类。',
     '新增或更新 MVC 视角时，patch.specLens 必须使用 model/control/view；patch.audience 只表示下游角色，优先使用 client/server/config/api/acceptance/mixed，不要再用 audience 承载 MVC。',
@@ -6912,7 +7118,7 @@ app.post('/api/reference-image-classification', async (req, res) => {
   const response = await anthropic.messages.create({
     model,
     max_tokens: 800,
-    system: `你是 GameUX PromptForge 的图片证据分类器。你必须只根据图片内容和文件名，把图片归入且只归入一个类别：
+    system: `你是 UX SpecForge 的图片证据分类器。你必须只根据图片内容和文件名，把图片归入且只归入一个类别：
 - layout_reference：布局参考，重点是界面结构、层级、排版、控件分组、间距或信息架构。
 - asset_reuse：素材复用，重点是可复用的图标、角色、道具、背景、纹理、视觉素材。
 - state_screenshot：状态截图，重点是同一界面的特定状态、弹窗、加载、禁用、选中、错误、奖励领取等状态。
@@ -7303,7 +7509,7 @@ function buildCreatePrototypePrompt(requirementState: UXRequirementState, hasIma
   const instructionSection = instruction?.trim()
     ? `\n## 本轮原型生成要求\n${instruction.trim()}\n`
     : ''
-  return `你是 GameUX PromptForge 的游戏 UX 原型生成专家。根据以下 UX 需求状态${hasImages ? '和参考图' : ''}，生成一个可直接预览的自包含 HTML 原型。
+  return `你是 UX SpecForge 的游戏 UX 原型生成专家。根据以下 UX 需求状态${hasImages ? '和参考图' : ''}，生成一个可直接预览的自包含 HTML 原型。
 
 ${buildPrototypeSpec(requirementState)}${buildFigmaAssetUsageSection(requirementState)}${buildPrototypeAssetManifestSection(assetManifest)}
 ${instructionSection}${hasImages ? `\n${buildScreenshotFidelitySection()}` : ''}${buildFigmaEvidencePolicySection(hasImages)}${focusSection}
@@ -7334,7 +7540,7 @@ function buildUpdatePrototypePrompt(requirementState: UXRequirementState, curren
     ? `\n## 当前变体历史修改指令\n${history.map((item, index) => `${index + 1}. ${item}`).join('\n')}\n`
     : ''
   const focusSection = focus ? `\n## 本次更新侧重\n${focus}\n` : ''
-  return `你是 GameUX PromptForge 的原型迭代代理。请根据用户的修改说明，对当前 HTML 原型做最小必要修改。
+  return `你是 UX SpecForge 的原型迭代代理。请根据用户的修改说明，对当前 HTML 原型做最小必要修改。
 
 ${buildPrototypeSpec(requirementState)}${buildFigmaAssetUsageSection(requirementState)}${buildPrototypeAssetManifestSection(assetManifest)}${buildFigmaEvidencePolicySection(hasImages)}${historySection}${focusSection}
 
@@ -7485,7 +7691,11 @@ async function fetchFigmaJson<T>(url: string, token: string, label: string): Pro
     },
   })
   if (!response.ok) {
-    throw new Error(`${label}：HTTP ${response.status}${await readResponseSnippet(response)}`)
+    const snippet = await readResponseSnippet(response)
+    const authHint = response.status === 401 || response.status === 403
+      ? '。请在环境配置中重新粘贴有效的 Figma Personal Access Token，并确认该 token 所属账号能访问目标文件。不要带 Bearer 前缀或引号。'
+      : ''
+    throw new Error(`${label}：HTTP ${response.status}${snippet}${authHint}`)
   }
   return await response.json() as T
 }
@@ -10080,7 +10290,7 @@ function findNodeStateLabel(node: PrdNode | null | undefined, stateId: string | 
   return node.uiStates?.find((state) => state.id === stateId)?.label ?? null
 }
 
-function formatStateTransitionLine(transition: PrdStateTransition, tree?: Record<string, PrdNode> | null) {
+function formatStateTransitionLine(transition: PrdStateTransition, tree?: Record<string, PrdNode> | null, options: { includeEvidence?: boolean } = {}) {
   const source = tree?.[transition.sourceNodeId]
   const target = tree?.[transition.targetNodeId]
   const sourceLabel = source?.label ?? transition.sourceNodeId
@@ -10095,7 +10305,7 @@ function formatStateTransitionLine(transition: PrdStateTransition, tree?: Record
   return [
     `- ${sourceLabel}${sourceState ? `「${sourceState}」` : ''} -> ${targetLabel}${targetState ? `「${targetState}」` : ''}`,
     `  ${[trigger, condition, effect, transitionSource, `置信度：${transition.confidence}%`].filter(Boolean).join('；')}`,
-    evidence ? `  ${evidence}` : null,
+    options.includeEvidence !== false && evidence ? `  ${evidence}` : null,
   ].filter(Boolean).join('\n')
 }
 
@@ -10106,13 +10316,14 @@ function collectIncomingStateTransitions(node: PrdNode, tree?: Record<string, Pr
     .flatMap((source) => (source.stateTransitions ?? []).filter((transition) => transition.targetNodeId === node.id))
 }
 
-function formatFigmaStateSemanticsMarkdown(node: PrdNode, tree?: Record<string, PrdNode> | null) {
+function formatFigmaStateSemanticsMarkdown(node: PrdNode, tree?: Record<string, PrdNode> | null, options: { includeEvidence?: boolean } = {}) {
+  const includeEvidence = options.includeEvidence !== false
   const lines: string[] = []
   if (node.figmaUxMap) {
     lines.push('## Figma UX Map 审阅摘要', '')
     lines.push(`- Screen：${node.figmaUxMap.screenLabel}（${node.figmaUxMap.screenId}）`)
     lines.push(`- 审阅来源：${node.figmaUxMap.reviewSource}，总体置信度 ${node.figmaUxMap.reviewConfidence}%`)
-    if (node.figmaUxMap.sourceFrameIds.length) lines.push(`- 来源 Frames：${node.figmaUxMap.sourceFrameIds.join(', ')}`)
+    if (includeEvidence && node.figmaUxMap.sourceFrameIds.length) lines.push(`- 来源 Frames：${node.figmaUxMap.sourceFrameIds.join(', ')}`)
     if (node.figmaUxMap.transitionIds.length) lines.push(`- 相关流转：${node.figmaUxMap.transitionIds.join(', ')}`)
     if (node.figmaUxMap.ambiguityIds.length) lines.push(`- 待确认项：${node.figmaUxMap.ambiguityIds.join(', ')}`)
     if (node.figmaUxMap.notes.length) lines.push(`- 审阅备注：${node.figmaUxMap.notes.join('；')}`)
@@ -10132,18 +10343,245 @@ function formatFigmaStateSemanticsMarkdown(node: PrdNode, tree?: Record<string, 
   if (outgoing.length || incoming.length) {
     lines.push('', '## Figma 状态/界面流转', '')
     if (outgoing.length) {
-      lines.push('### 流出', ...outgoing.map((transition) => formatStateTransitionLine(transition, tree)))
+      lines.push('### 流出', ...outgoing.map((transition) => formatStateTransitionLine(transition, tree, { includeEvidence })))
     }
     if (incoming.length) {
-      lines.push('', '### 流入', ...incoming.map((transition) => formatStateTransitionLine(transition, tree)))
+      lines.push('', '### 流入', ...incoming.map((transition) => formatStateTransitionLine(transition, tree, { includeEvidence })))
     }
   }
 
   return lines.join('\n').trim()
 }
 
-function generateMarkdown(node: PrdNode, tree?: Record<string, PrdNode>): string {
+interface SourceDetailBlock {
+  title: string
+  body: string
+  origin: string
+}
+
+interface EvidenceExportDoc {
+  nodeId: string
+  docPath: string
+  evidencePath: string
+}
+
+interface UiFlowExportEdge {
+  sourceNodeId: string
+  targetNodeId: string
+  label: string
+  reason: string | null
+  source: string
+}
+
+interface UiFlowExportDoc {
+  docPath: string
+  markdown: string
+  nodeCount: number
+  edgeCount: number
+}
+
+interface RenderableNodeSection {
+  key: PrdNodeSectionKey
+  section: NonNullable<NonNullable<PrdNode['sections']>[PrdNodeSectionKey]>
+  sectionContent: string
+}
+
+function normalizeMarkdownBody(content: string) {
+  return content
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function sourceDetailTitle(title: string) {
+  return /原文|摘录|证据引用|折叠来源/.test(title)
+}
+
+function splitMarkdownSections(content: string) {
+  const sections: Array<{ heading: string | null; marker: string | null; body: string }> = []
+  const lines = content.split(/\r?\n/)
+  let currentHeading: string | null = null
+  let currentMarker: string | null = null
+  let currentBody: string[] = []
+
+  const flush = () => {
+    const body = currentBody.join('\n').trim()
+    if (currentHeading || body) sections.push({ heading: currentHeading, marker: currentMarker, body })
+    currentBody = []
+  }
+
+  for (const line of lines) {
+    const heading = /^(#{1,4})\s+(.+)$/.exec(line.trim())
+    if (heading) {
+      flush()
+      currentMarker = heading[1]
+      currentHeading = heading[2].trim()
+    } else {
+      currentBody.push(line)
+    }
+  }
+  flush()
+
+  return sections
+}
+
+function extractSourceBlocks(content: string | null | undefined, origin: string): { visible: string; sourceBlocks: SourceDetailBlock[] } {
+  const normalized = normalizeMarkdownBody(content ?? '')
+  if (!normalized) return { visible: '', sourceBlocks: [] }
+
+  const sections = splitMarkdownSections(normalized)
+  if (!sections.some((section) => section.heading && sourceDetailTitle(section.heading))) {
+    return { visible: normalized, sourceBlocks: [] }
+  }
+
+  const visible: string[] = []
+  const sourceBlocks: SourceDetailBlock[] = []
+
+  for (const section of sections) {
+    if (section.heading && sourceDetailTitle(section.heading)) {
+      if (section.body) sourceBlocks.push({ title: section.heading, body: section.body, origin })
+      continue
+    }
+    if (section.heading) visible.push(`${section.marker ?? '##'} ${section.heading}`)
+    if (section.body) visible.push(section.body)
+  }
+
+  return {
+    visible: visible.join('\n\n').trim(),
+    sourceBlocks,
+  }
+}
+
+function evidenceExportPathFor(node: PrdNode) {
+  return `evidence/by-node/${sanitizeNodeId(node.id)}-${sanitizeLabel(node.label)}.md`
+}
+
+function markdownRelativeLink(fromDocPath: string | null | undefined, targetPath: string) {
+  const from = (fromDocPath ?? '').replace(/\\/g, '/').trim()
+  const target = targetPath.replace(/\\/g, '/').trim()
+  const fromDir = from ? path.posix.dirname(from) : '.'
+  const relative = path.posix.relative(fromDir, target)
+  return relative || path.posix.basename(target)
+}
+
+function localEvidenceKey(ref: PrdNodeEvidenceRef) {
+  return `${ref.sourceKind}:${ref.sourceLabel}:${ref.quote ?? ''}`
+}
+
+function uniqueLocalEvidenceRefs(refs: PrdNodeEvidenceRef[]) {
+  const seen = new Set<string>()
+  return refs.filter((ref) => {
+    const key = localEvidenceKey(ref)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function evidenceRefLine(ref: PrdNodeEvidenceRef) {
+  return `- [${ref.sourceKind}] ${ref.sourceLabel}${ref.quote ? `：${ref.quote}` : ''}`
+}
+
+function collectSourceBlocksForEvidence(node: PrdNode, tree?: Record<string, PrdNode> | null) {
+  const blocks: SourceDetailBlock[] = []
+  blocks.push(...extractSourceBlocks(node.content, '节点正文').sourceBlocks)
+  for (const section of buildDeliverySections(node, tree)) {
+    blocks.push(...extractSourceBlocks(section.content, `${section.title} 规格`).sourceBlocks)
+  }
+  return blocks
+}
+
+function collectOpenQuestionsForEvidence(node: PrdNode, tree?: Record<string, PrdNode> | null) {
+  const questions = [
+    ...(node.sections ? Object.values(node.sections).flatMap((section) => section?.openQuestions ?? []) : []),
+    ...buildDeliverySections(node, tree).flatMap((section) => section.openQuestions),
+  ].map((item) => item.trim()).filter(Boolean)
+  return Array.from(new Set(questions))
+}
+
+function isExportFallbackSummary(value: string | null | undefined) {
+  const text = value?.trim() ?? ''
+  return Boolean(text)
+    && (
+      text.includes('AI 通读原文失败')
+      || text.includes('AI 分片通读未返回页面节点')
+      || text.includes('系统先保留该页面候选')
+      || text.includes('本地候选兜底')
+      || text.includes('AI 未能在超时时间内完成')
+    )
+}
+
+function exportSummaryForNode(node: PrdNode) {
+  if (!isExportFallbackSummary(node.summary)) return node.summary || '未填写'
+  const figmaCount = node.figmaPreviews?.length ?? node.uiStates?.length ?? 0
+  if (figmaCount > 0 || node.figmaUxMap) {
+    return `来自 Figma 的确定性界面节点，包含 ${Math.max(1, figmaCount)} 个界面状态；PRD 失败/兜底信息已移入证据链，业务规则需后续打磨确认。`
+  }
+  return node.handoffGoal ?? '该节点缺少稳定摘要，请先补齐页面范围、交互目标和验收口径。'
+}
+
+function generateEvidenceMarkdown(node: PrdNode, tree?: Record<string, PrdNode>, options: { docPath?: string | null; evidencePath?: string | null } = {}) {
+  const sourceBlocks = collectSourceBlocksForEvidence(node, tree)
+  const evidenceRefs = uniqueLocalEvidenceRefs(collectDeliveryEvidence(node, tree))
+  const openQuestions = collectOpenQuestionsForEvidence(node, tree)
+  const visibleContent = extractSourceBlocks(node.content, '节点正文').visible
+  const specLink = options.docPath && options.evidencePath
+    ? markdownRelativeLink(options.evidencePath, options.docPath)
+    : options.docPath
+
+  const lines = [
+    `# 证据链：${node.label}`,
+    '',
+    '> 本文件用于审计和复盘推导来源。实现 AI 默认只需要阅读对应主规格文档；当规格与 PRD/Figma/用户补充发生争议时，再回到这里检查证据。',
+    '',
+    '## 对应规格',
+    '',
+    `- 节点编号：${node.id}`,
+    `- 节点类型：${formatNodeType(node.type)}`,
+    specLink ? `- 主规格文档：[${options.docPath}](${specLink})` : null,
+    node.extractedFrom ? `- 原文位置：${node.extractedFrom}` : '- 原文位置：未定位',
+    '',
+    '## AI 整理结论快照',
+    '',
+    `- AI 接力目标：${node.handoffGoal ?? '未指定'}`,
+    `- 质量门槛：${node.qualityGate ?? '未指定'}`,
+    `- 需求摘要：${node.summary || '未填写'}`,
+    visibleContent ? ['', '### 整理说明', '', visibleContent] : null,
+  ].flat().filter((item): item is string => typeof item === 'string')
+
+  if (sourceBlocks.length) {
+    lines.push('', '## 原文 / 来源片段')
+    for (const block of sourceBlocks) {
+      lines.push('', `### ${block.origin} / ${block.title}`, '', block.body)
+    }
+  } else {
+    lines.push('', '## 原文 / 来源片段', '', '暂无可单独抽离的原文片段。')
+  }
+
+  lines.push('', '## 证据引用', '')
+  if (evidenceRefs.length) {
+    lines.push(...evidenceRefs.map(evidenceRefLine))
+  } else {
+    lines.push('暂无结构化证据引用。')
+  }
+
+  const figmaEvidenceMarkdown = formatFigmaStateSemanticsMarkdown(node, tree, { includeEvidence: true })
+  if (figmaEvidenceMarkdown) {
+    lines.push('', '## Figma / 状态流转推导', '', figmaEvidenceMarkdown)
+  }
+
+  if (openQuestions.length) {
+    lines.push('', '## 待确认 / 可能误读点', '', ...openQuestions.map((item) => `- ${item}`))
+  }
+
+  return lines.join('\n')
+}
+
+function generateMarkdown(node: PrdNode, tree?: Record<string, PrdNode>, options: { evidencePath?: string | null; includeInlineEvidence?: boolean } = {}): string {
+  const includeInlineEvidence = options.includeInlineEvidence ?? !options.evidencePath
+  const nodeSource = extractSourceBlocks(node.content, '节点正文')
+  const nodeContent = nodeSource.visible || (includeInlineEvidence ? node.content : '')
   const statusLabel = node.status === 'done' ? '已完成' : node.status === 'pending_refine' || node.needsPolish ? '待打磨' : '无需打磨'
+  const exportSummary = exportSummaryForNode(node)
   const lines = [
     `# ${node.label}`,
     '',
@@ -10154,7 +10592,6 @@ function generateMarkdown(node: PrdNode, tree?: Record<string, PrdNode>): string
     `**规格视角：** ${formatSpecLens(resolveNodeSpecLens(node))}`,
     `**完成状态：** ${statusLabel}`,
     `**打磨要求：** ${node.needsPolish ? '需要 Deep Forge 确认' : '无需 Deep Forge 确认'}`,
-    `**原文位置：** ${node.extractedFrom ?? '未定位'}`,
     '',
     '## AI 接力目标',
     '',
@@ -10166,24 +10603,41 @@ function generateMarkdown(node: PrdNode, tree?: Record<string, PrdNode>): string
     '',
     '## 需求摘要',
     '',
-    node.summary,
+    exportSummary,
     '',
     '## 详细内容',
     '',
-    node.content,
+    nodeContent || '未补充详细内容。',
   ]
+  if (options.evidencePath) {
+    lines.push('', '## 追溯', '', `证据链文件：${options.evidencePath}`)
+  }
   if (hasNodeSections(node.sections)) {
-    lines.push('', '## 页面规格视角')
+    const renderableSections: RenderableNodeSection[] = []
     for (const key of ['view', 'interaction', 'data'] as const) {
       const section = node.sections?.[key]
       if (!section?.summary && !section?.content && !section?.evidenceRefs?.length && !section?.openQuestions?.length) continue
+      const sectionContent = extractSourceBlocks(section.content, `${section.title ?? formatSectionTitle(key)} 规格`).visible
+      const shouldRenderSection = Boolean(
+        section.summary
+        || sectionContent
+        || section.openQuestions?.length
+        || (includeInlineEvidence && section.evidenceRefs?.length),
+      )
+      if (shouldRenderSection) renderableSections.push({ key, section, sectionContent })
+    }
+
+    if (renderableSections.length) {
+      lines.push('', '## 页面规格视角')
+    }
+    for (const { key, section, sectionContent } of renderableSections) {
       lines.push('', `### ${section.title ?? formatSectionTitle(key)}`)
       if (section.summary) lines.push('', section.summary)
-      if (section.content) lines.push('', section.content)
-      if (section.evidenceRefs?.length) {
+      if (sectionContent) lines.push('', sectionContent)
+      if (includeInlineEvidence && section.evidenceRefs?.length) {
         lines.push('', '#### 证据引用')
         for (const ref of section.evidenceRefs) {
-          lines.push(`- [${ref.sourceKind}] ${ref.sourceLabel}${ref.quote ? `：${ref.quote}` : ''}`)
+          lines.push(evidenceRefLine(ref))
         }
       }
       if (section.openQuestions?.length) {
@@ -10192,17 +10646,29 @@ function generateMarkdown(node: PrdNode, tree?: Record<string, PrdNode>): string
     }
   }
   if (tree) {
-    const foldedSections = buildDeliverySections(node, tree).filter((section) => section.sourceNodeIds.length > 0)
+    const foldedSections = buildDeliverySections(node, tree)
+      .filter((section) => section.sourceNodeIds.length > 0)
+      .map((section) => {
+        const sectionContent = extractSourceBlocks(section.content, `${section.title} 规格`).visible
+        const shouldRenderSection = Boolean(
+          section.summary
+          || sectionContent
+          || section.openQuestions.length
+          || (includeInlineEvidence && section.evidenceRefs.length),
+        )
+        return shouldRenderSection ? { section, sectionContent } : null
+      })
+      .filter((item): item is { section: ReturnType<typeof buildDeliverySections>[number]; sectionContent: string } => Boolean(item))
     if (foldedSections.length) {
       lines.push('', '## 折叠子节点补充')
-      for (const section of foldedSections) {
-        lines.push('', `### ${section.title}`, '', `> 来源节点：${section.sourceNodeIds.join(', ')}`)
+      for (const { section, sectionContent } of foldedSections) {
+        lines.push('', `### ${section.title}`)
         if (section.summary) lines.push('', section.summary)
-        if (section.content) lines.push('', section.content)
-        if (section.evidenceRefs.length) {
+        if (sectionContent) lines.push('', sectionContent)
+        if (includeInlineEvidence && section.evidenceRefs.length) {
           lines.push('', '#### 证据引用')
           for (const ref of section.evidenceRefs) {
-            lines.push(`- [${ref.sourceKind}] ${ref.sourceLabel}${ref.quote ? `：${ref.quote}` : ''}`)
+            lines.push(evidenceRefLine(ref))
           }
         }
         if (section.openQuestions.length) lines.push('', '#### 需澄清点', ...section.openQuestions.map((item) => `- ${item}`))
@@ -10210,7 +10676,7 @@ function generateMarkdown(node: PrdNode, tree?: Record<string, PrdNode>): string
     }
   }
 
-  const figmaStateMarkdown = formatFigmaStateSemanticsMarkdown(node, tree)
+  const figmaStateMarkdown = formatFigmaStateSemanticsMarkdown(node, tree, { includeEvidence: includeInlineEvidence })
   if (figmaStateMarkdown) {
     lines.push('', figmaStateMarkdown)
   }
@@ -10233,20 +10699,20 @@ function generateMarkdown(node: PrdNode, tree?: Record<string, PrdNode>): string
       if (contract.targetNodeId) lines.push(`- 目标节点：${contract.targetNodeId}`)
       if (contract.summary) lines.push(`- 说明：${contract.summary}`)
       if (contract.fields?.length) lines.push(`- 字段：${contract.fields.join('、')}`)
-      if (contract.evidenceRefs?.length) {
+      if (includeInlineEvidence && contract.evidenceRefs?.length) {
         lines.push('', '#### 证据引用')
         for (const ref of contract.evidenceRefs) {
-          lines.push(`- [${ref.sourceKind}] ${ref.sourceLabel}${ref.quote ? `：${ref.quote}` : ''}`)
+          lines.push(evidenceRefLine(ref))
         }
       }
     }
   }
 
   const evidenceRefs = collectDeliveryEvidence(node, tree)
-  if (evidenceRefs.length) {
+  if (includeInlineEvidence && evidenceRefs.length) {
     lines.push('', '## 汇总证据')
     for (const ref of evidenceRefs) {
-      lines.push(`- [${ref.sourceKind}] ${ref.sourceLabel}${ref.quote ? `：${ref.quote}` : ''}`)
+      lines.push(evidenceRefLine(ref))
     }
   }
 
@@ -10278,7 +10744,13 @@ function exportedPathFor(node: PrdNode, tree: Record<string, PrdNode>, pathByNod
   return pathByNodeId.get(node.id) ?? buildNodePath(node.id, tree)
 }
 
-function generateIndexMarkdown(exportedNodes: PrdNode[], tree: Record<string, PrdNode>, pathByNodeId: Map<string, string>) {
+function generateIndexMarkdown(
+  exportedNodes: PrdNode[],
+  tree: Record<string, PrdNode>,
+  pathByNodeId: Map<string, string>,
+  evidenceDocs: EvidenceExportDoc[] = [],
+  options: { uiFlowPath?: string | null } = {},
+) {
   const sorted = [...exportedNodes].sort((a, b) => exportedPathFor(a, tree, pathByNodeId).localeCompare(exportedPathFor(b, tree, pathByNodeId)))
   const byAudience = sorted.reduce<Record<string, PrdNode[]>>((groups, node) => {
     const key = formatAudience(resolveNodeAudience(node))
@@ -10289,7 +10761,7 @@ function generateIndexMarkdown(exportedNodes: PrdNode[], tree: Record<string, Pr
   const fileTreeLines = sorted.map((node) => {
     const path = exportedPathFor(node, tree, pathByNodeId)
     const indent = '  '.repeat(Math.max(0, pathDepth(path) - 1))
-    return `${indent}- [${path}](${path}) - ${node.summary}`
+    return `${indent}- [${path}](${path}) - ${exportSummaryForNode(node)}`
   })
 
   const audienceLines = Object.entries(byAudience).flatMap(([audience, nodes]) => [
@@ -10297,7 +10769,7 @@ function generateIndexMarkdown(exportedNodes: PrdNode[], tree: Record<string, Pr
     '',
     ...nodes.map((node) => {
       const path = exportedPathFor(node, tree, pathByNodeId)
-      return `- [${path}](${path}): ${node.handoffGoal ?? node.summary}`
+      return `- [${path}](${path}): ${node.handoffGoal ?? exportSummaryForNode(node)}`
     }),
     '',
   ])
@@ -10305,17 +10777,37 @@ function generateIndexMarkdown(exportedNodes: PrdNode[], tree: Record<string, Pr
   const topLevelLines = Object.values(tree)
     .filter((node) => node.parentId === SOURCE_OUTLINE_ROOT_ID || (node.parentId === null && node.id !== SOURCE_OUTLINE_ROOT_ID))
     .sort((a, b) => a.order - b.order)
-    .map((node) => `- **${node.label}**：${node.summary}`)
+    .map((node) => `- **${node.label}**：${exportSummaryForNode(node)}`)
+
+  const evidenceLines = evidenceDocs.length
+    ? [
+        '## 证据链附件',
+        '',
+        '- [证据链总索引](evidence/EVIDENCE-INDEX.md)',
+        '- 每篇主规格文档只保留追溯链接；PRD/Figma/用户补充证据集中放在 `evidence/by-node/`。',
+        '',
+      ]
+    : []
+  const uiFlowLines = options.uiFlowPath
+    ? [
+        '## 全局交互图',
+        '',
+        `- [UI 交互流](${options.uiFlowPath})：汇总导出页面、跨页面引用、状态流转和待补齐连接。`,
+        '',
+      ]
+    : []
 
   return [
     '# PRD 文档包索引',
     '',
-    '> 本索引由 GameUX PromptForge 自动生成。目标是让后续 AI Agent 按职责读取局部文档，而不是一次性吞下完整 PRD。',
+    '> 本索引由 UX SpecForge 自动生成。主规格文档面向后续实现 AI；证据链附件用于审计和复盘推导。',
     '',
+    ...uiFlowLines,
     '## 文件树',
     '',
     ...fileTreeLines,
     '',
+    ...evidenceLines,
     '## 按角色快速导航',
     '',
     ...audienceLines,
@@ -10327,8 +10819,157 @@ function generateIndexMarkdown(exportedNodes: PrdNode[], tree: Record<string, Pr
     '',
     '1. 先阅读本索引和 `01-overview.md`（如存在）建立全局认知。',
     '2. 根据任务角色只读取相关目录，例如客户端任务优先读取 `client/` 与相关 `api/` 文档。',
-    '3. 发现 `[需澄清]`、`[待验证]` 时先向用户确认，不要自行补规则。',
+    '3. 实现 AI 默认阅读主规格文档；只有需要证明推导是否正确时，再打开 `evidence/` 下的证据链文件。',
+    '4. 发现 `[需澄清]`、`[待验证]` 时先向用户确认，不要自行补规则。',
   ].join('\n')
+}
+
+function generateEvidenceIndexMarkdown(evidenceDocs: EvidenceExportDoc[], tree: Record<string, PrdNode>) {
+  const lines = [
+    '# 证据链总索引',
+    '',
+    '> 证据文件用于审计 UX SpecForge 的拆分和 AI 推导。实现任务优先阅读主规格文档；当规格有争议时，再回到对应证据文件核对。',
+    '',
+    '## 节点证据',
+    '',
+  ]
+
+  for (const doc of evidenceDocs) {
+    const node = tree[doc.nodeId]
+    const label = node?.label ?? doc.nodeId
+    const evidenceCount = node ? collectDeliveryEvidence(node, tree).length : 0
+    const sourceCount = node ? collectSourceBlocksForEvidence(node, tree).length : 0
+    lines.push(`- [${label}](by-node/${path.posix.basename(doc.evidencePath)})：主规格 [${doc.docPath}](../${doc.docPath})；结构化证据 ${evidenceCount} 条，来源片段 ${sourceCount} 段`)
+  }
+
+  if (!evidenceDocs.length) lines.push('暂无证据文件。')
+  return lines.join('\n')
+}
+
+function compactFlowText(value: string | null | undefined, maxLength = 160) {
+  const text = (value ?? '').replace(/\s+/g, ' ').trim()
+  if (!text) return ''
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text
+}
+
+function tableCell(value: string | null | undefined, maxLength = 180) {
+  return compactFlowText(value, maxLength).replace(/\|/g, '\\|') || '-'
+}
+
+function mermaidLabel(value: string | null | undefined, maxLength = 60) {
+  return compactFlowText(value, maxLength)
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+}
+
+function collectUiFlowExportEdges(exportedNodes: PrdNode[]) {
+  const exportedIds = new Set(exportedNodes.map((node) => node.id))
+  const edges: UiFlowExportEdge[] = []
+  const seen = new Set<string>()
+
+  const pushEdge = (edge: UiFlowExportEdge) => {
+    if (!exportedIds.has(edge.sourceNodeId) || !exportedIds.has(edge.targetNodeId)) return
+    if (edge.sourceNodeId === edge.targetNodeId) return
+    const key = `${edge.sourceNodeId}->${edge.targetNodeId}|${edge.label}|${edge.source}`
+    if (seen.has(key)) return
+    seen.add(key)
+    edges.push(edge)
+  }
+
+  for (const node of exportedNodes) {
+    for (const reference of node.references ?? []) {
+      if (!reference.targetNodeId) continue
+      pushEdge({
+        sourceNodeId: node.id,
+        targetNodeId: reference.targetNodeId,
+        label: compactFlowText(reference.label, 80) || '进入目标界面',
+        reason: reference.reason ?? null,
+        source: '跨页面引用',
+      })
+    }
+
+    for (const transition of node.stateTransitions ?? []) {
+      pushEdge({
+        sourceNodeId: transition.sourceNodeId,
+        targetNodeId: transition.targetNodeId,
+        label: compactFlowText(transition.trigger ?? transition.effect ?? transition.condition, 80) || '状态流转',
+        reason: formatStateTransitionLine(transition, Object.fromEntries(exportedNodes.map((item) => [item.id, item]))),
+        source: transition.source ?? '状态流转',
+      })
+    }
+  }
+
+  return edges
+}
+
+function generateUiFlowMarkdown(exportedNodes: PrdNode[], tree: Record<string, PrdNode>, pathByNodeId: Map<string, string>, evidenceDocs: EvidenceExportDoc[]) {
+  const sorted = [...exportedNodes].sort((a, b) => a.level - b.level || a.order - b.order || a.id.localeCompare(b.id))
+  const edges = collectUiFlowExportEdges(sorted)
+  const nodeAlias = new Map(sorted.map((node, index) => [node.id, `N${index + 1}`]))
+  const evidenceByNodeId = new Map(evidenceDocs.map((doc) => [doc.nodeId, doc.evidencePath]))
+  const connectedIds = new Set(edges.flatMap((edge) => [edge.sourceNodeId, edge.targetNodeId]))
+  const disconnected = sorted.filter((node) => !connectedIds.has(node.id))
+
+  const mermaidLines = [
+    'flowchart LR',
+    ...sorted.map((node) => `  ${nodeAlias.get(node.id)}["${mermaidLabel(node.label)}"]`),
+    ...(edges.length
+      ? edges.map((edge) => `  ${nodeAlias.get(edge.sourceNodeId)} -->|"${mermaidLabel(edge.label, 36)}"| ${nodeAlias.get(edge.targetNodeId)}`)
+      : ['  %% 暂无明确跨页面流转边；请在 Deep Forge 中补充触发动作或 Figma 连接线。']),
+  ]
+
+  const nodeRows = sorted.map((node) => {
+    const docPath = exportedPathFor(node, tree, pathByNodeId)
+    const evidencePath = evidenceByNodeId.get(node.id)
+    return `| ${tableCell(node.label)} | [${tableCell(docPath, 90)}](${docPath}) | ${evidencePath ? `[证据](${evidencePath})` : '-'} | ${tableCell(exportSummaryForNode(node))} |`
+  })
+
+  const edgeRows = edges.map((edge) => {
+    const source = tree[edge.sourceNodeId]?.label ?? edge.sourceNodeId
+    const target = tree[edge.targetNodeId]?.label ?? edge.targetNodeId
+    return `| ${tableCell(source)} | ${tableCell(edge.label)} | ${tableCell(target)} | ${tableCell(edge.source, 40)} | ${tableCell(edge.reason, 220)} |`
+  })
+
+  return {
+    docPath: SPEC_UI_FLOW_DOC_PATH,
+    nodeCount: sorted.length,
+    edgeCount: edges.length,
+    markdown: [
+      '# UI 交互流',
+      '',
+      '> 本文件是导出包的全局交互入口。它只汇总当前导图中已有的页面、Figma 状态流转、跨页面引用和证据链，不补造缺失流程。',
+      '',
+      '## 总览',
+      '',
+      `- 页面节点：${sorted.length}`,
+      `- 已识别流转：${edges.length}`,
+      `- 未接入流转的页面：${disconnected.length}`,
+      '',
+      '## Mermaid 流程图',
+      '',
+      '```mermaid',
+      ...mermaidLines,
+      '```',
+      '',
+      '## 页面节点',
+      '',
+      '| 页面 | 规格文档 | 证据链 | 摘要 |',
+      '|---|---|---|---|',
+      ...(nodeRows.length ? nodeRows : ['| - | - | - | - |']),
+      '',
+      '## 交互流转',
+      '',
+      '| 起点 | 触发 / 动作 | 终点 | 来源 | 证据摘要 |',
+      '|---|---|---|---|---|',
+      ...(edgeRows.length ? edgeRows : ['| - | - | - | - | 当前导图尚未提供可追溯的跨页面流转。 |']),
+      '',
+      '## 待补齐连接',
+      '',
+      ...(disconnected.length
+        ? disconnected.map((node) => `- ${node.label}：未发现明确流入或流出，需要在 Figma 连线、PRD 步骤或节点引用中补充。`)
+        : ['- 暂无。']),
+    ].join('\n'),
+  } satisfies UiFlowExportDoc
 }
 
 interface AssetExportSummary {
@@ -10610,7 +11251,7 @@ function writeProjectAssetExports(assetWorkbench: unknown): AssetExportSummary {
     manifestLines: [
       '# 项目素材导出清单',
       '',
-      '> 本清单由 GameUX PromptForge 自动生成。素材路径均相对于当前 spec 导出目录。',
+      '> 本清单由 UX SpecForge 自动生成。素材路径均相对于当前 spec 导出目录。',
     ],
     skippedLines: [],
   }
@@ -10657,27 +11298,97 @@ function resolveGeneratedSpecPath(docPath: string) {
   return { resolved, relative: safeRelative }
 }
 
-function writeSpecFolder(tree: Record<string, PrdNode>, options: { includeAssets?: boolean; assetWorkbench?: unknown } = {}) {
-  const pageNodes = collectDeliveryNodes(tree).filter((node) => node.status === 'done')
-  if (!pageNodes.length) throw new Error('没有找到已确认的页面 spec 节点')
+function normalizeExportDepth(value: unknown): ExportDepth {
+  if (value === 'forged' || value === 'all' || value === 'done') return value
+  return 'done'
+}
+
+function resetSpecExportRoot() {
+  rmSync(SPEC_EXPORT_ROOT, { recursive: true, force: true })
   mkdirSync(SPEC_EXPORT_ROOT, { recursive: true })
+}
+
+function writeSpecFolder(tree: Record<string, PrdNode>, options: { depth?: ExportDepth; includeAssets?: boolean; assetWorkbench?: unknown } = {}) {
+  const depth = normalizeExportDepth(options.depth)
+  const pageNodes = filterDeliveryNodesByDepth(collectDeliveryNodes(tree), depth, tree)
+  if (!pageNodes.length) throw new Error('没有找到可导出的页面 spec 节点，请降低导出深度或先打磨至少一个节点')
+  resetSpecExportRoot()
   const pathByNodeId = new Map<string, string>()
   const documents: Array<{ nodeId: string; docPath: string }> = []
   for (const node of pageNodes) {
     const relativePath = uniqueExportPath(buildNodePath(node.id, tree), Object.fromEntries(documents.map((doc) => [doc.docPath, new Uint8Array()])))
     const target = resolveGeneratedSpecPath(relativePath)
+    const evidencePath = evidenceExportPathFor(node)
     mkdirSync(path.dirname(target.resolved), { recursive: true })
-    writeFileSync(target.resolved, generateMarkdown({ ...node, docPath: target.relative }, tree), 'utf-8')
+    writeFileSync(
+      target.resolved,
+      generateMarkdown(
+        { ...node, docPath: target.relative },
+        tree,
+        {
+          evidencePath: markdownRelativeLink(target.relative, evidencePath),
+          includeInlineEvidence: false,
+        },
+      ),
+      'utf-8',
+    )
     pathByNodeId.set(node.id, target.relative)
     documents.push({ nodeId: node.id, docPath: target.relative })
   }
-  writeFileSync(path.join(SPEC_EXPORT_ROOT, '00-INDEX.md'), generateIndexMarkdown(pageNodes, tree, pathByNodeId), 'utf-8')
+
+  const evidenceDocs: EvidenceExportDoc[] = documents.map((doc) => {
+    const node = tree[doc.nodeId]
+    return {
+      nodeId: doc.nodeId,
+      docPath: doc.docPath,
+      evidencePath: node ? evidenceExportPathFor(node) : `evidence/by-node/${sanitizeNodeId(doc.nodeId)}.md`,
+    }
+  })
+  for (const doc of evidenceDocs) {
+    const node = tree[doc.nodeId]
+    if (!node) continue
+    const target = resolveGeneratedSpecPath(doc.evidencePath)
+    mkdirSync(path.dirname(target.resolved), { recursive: true })
+    writeFileSync(
+      target.resolved,
+      generateEvidenceMarkdown(
+        { ...node, docPath: doc.docPath },
+        tree,
+        {
+          docPath: doc.docPath,
+          evidencePath: target.relative,
+        },
+      ),
+      'utf-8',
+    )
+  }
+  const evidenceIndex = resolveGeneratedSpecPath('evidence/EVIDENCE-INDEX.md')
+  mkdirSync(path.dirname(evidenceIndex.resolved), { recursive: true })
+  writeFileSync(evidenceIndex.resolved, generateEvidenceIndexMarkdown(evidenceDocs, tree), 'utf-8')
+  const uiFlowDoc = generateUiFlowMarkdown(pageNodes, tree, pathByNodeId, evidenceDocs)
+  const uiFlowTarget = resolveGeneratedSpecPath(uiFlowDoc.docPath)
+  writeFileSync(uiFlowTarget.resolved, uiFlowDoc.markdown, 'utf-8')
+  writeFileSync(path.join(SPEC_EXPORT_ROOT, '00-INDEX.md'), generateIndexMarkdown(pageNodes, tree, pathByNodeId, evidenceDocs, { uiFlowPath: uiFlowTarget.relative }), 'utf-8')
   const assets = options.includeAssets ? writeProjectAssetExports(options.assetWorkbench) : null
-  return { exportDir: SPEC_EXPORT_ROOT, documents, assets }
+  return {
+    exportDir: SPEC_EXPORT_ROOT,
+    documents,
+    flow: {
+      docPath: uiFlowTarget.relative,
+      nodeCount: uiFlowDoc.nodeCount,
+      edgeCount: uiFlowDoc.edgeCount,
+    },
+    evidence: {
+      manifestPath: 'evidence/EVIDENCE-INDEX.md',
+      documents: evidenceDocs.map((doc) => ({ nodeId: doc.nodeId, evidencePath: doc.evidencePath })),
+    },
+    assets,
+  }
 }
 
 interface ExportZipRequest {
   tree: Record<string, PrdNode>
+  depth?: ExportDepth
 }
 
 interface ExportSpecFolderRequest extends ExportZipRequest {
@@ -10708,14 +11419,15 @@ app.post('/api/export-node', (req, res) => {
 })
 
 app.post('/api/export-zip', (req, res) => {
-  const { tree } = req.body as ExportZipRequest
+  const { tree, depth: rawDepth } = req.body as ExportZipRequest
 
   if (!tree || typeof tree !== 'object') {
     res.status(400).json({ error: '缺少导图树数据' })
     return
   }
 
-  const leafNodes = collectDeliveryNodes(tree).filter((node) => node.status === 'done' || !node.needsPolish)
+  const depth = normalizeExportDepth(rawDepth)
+  const leafNodes = filterDeliveryNodesByDepth(collectDeliveryNodes(tree), depth, tree)
 
   if (leafNodes.length === 0) {
     res.status(400).json({ error: '没有找到可导出的文档包节点' })
@@ -10727,12 +11439,33 @@ app.post('/api/export-zip', (req, res) => {
   }
   const pathByNodeId = new Map<string, string>()
   for (const node of leafNodes) {
-    const path = uniqueExportPath(buildNodePath(node.id, tree), files)
-    pathByNodeId.set(node.id, path)
-    const content = generateMarkdown(node, tree)
-    files[path] = Buffer.from(content, 'utf-8')
+    const docPath = uniqueExportPath(buildNodePath(node.id, tree), files)
+    const evidencePath = evidenceExportPathFor(node)
+    pathByNodeId.set(node.id, docPath)
+    const content = generateMarkdown(
+      { ...node, docPath },
+      tree,
+      {
+        evidencePath: markdownRelativeLink(docPath, evidencePath),
+        includeInlineEvidence: false,
+      },
+    )
+    files[docPath] = Buffer.from(content, 'utf-8')
   }
-  files['00-INDEX.md'] = Buffer.from(generateIndexMarkdown(leafNodes, tree, pathByNodeId), 'utf-8')
+  const evidenceDocs: EvidenceExportDoc[] = leafNodes.map((node) => ({
+    nodeId: node.id,
+    docPath: pathByNodeId.get(node.id) ?? buildNodePath(node.id, tree),
+    evidencePath: evidenceExportPathFor(node),
+  }))
+  for (const doc of evidenceDocs) {
+    const node = tree[doc.nodeId]
+    if (!node) continue
+    files[doc.evidencePath] = Buffer.from(generateEvidenceMarkdown({ ...node, docPath: doc.docPath }, tree, doc), 'utf-8')
+  }
+  const uiFlowDoc = generateUiFlowMarkdown(leafNodes, tree, pathByNodeId, evidenceDocs)
+  files[uiFlowDoc.docPath] = Buffer.from(uiFlowDoc.markdown, 'utf-8')
+  files['evidence/EVIDENCE-INDEX.md'] = Buffer.from(generateEvidenceIndexMarkdown(evidenceDocs, tree), 'utf-8')
+  files['00-INDEX.md'] = Buffer.from(generateIndexMarkdown(leafNodes, tree, pathByNodeId, evidenceDocs, { uiFlowPath: uiFlowDoc.docPath }), 'utf-8')
 
   const zipped = zipSync(files)
 
@@ -10742,13 +11475,13 @@ app.post('/api/export-zip', (req, res) => {
 })
 
 app.post('/api/export-spec-folder', (req, res) => {
-  const { tree, includeAssets, assetWorkbench } = req.body as ExportSpecFolderRequest
+  const { tree, depth, includeAssets, assetWorkbench } = req.body as ExportSpecFolderRequest
   if (!tree || typeof tree !== 'object') {
     res.status(400).json({ error: '缺少导图树数据' })
     return
   }
   try {
-    res.json(writeSpecFolder(tree, { includeAssets: includeAssets === true, assetWorkbench }))
+    res.json(writeSpecFolder(tree, { depth, includeAssets: includeAssets === true, assetWorkbench }))
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : '导出页面 spec 文件夹失败' })
   }
@@ -10783,6 +11516,15 @@ app.post('/api/open-doc', async (req, res) => {
   }
 })
 
+if (STATIC_WEB_ENABLED && existsSync(CLIENT_DIST_DIR)) {
+  app.use(express.static(CLIENT_DIST_DIR))
+  app.get(/^\/(?!api(?:\/|$)).*/u, (_req, res, next) => {
+    res.sendFile(path.join(CLIENT_DIST_DIR, 'index.html'), (error) => {
+      if (error) next(error)
+    })
+  })
+}
+
 app.use((error: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (res.headersSent) {
     next(error)
@@ -10797,6 +11539,12 @@ app.use((error: unknown, _req: express.Request, res: express.Response, next: exp
   })
 })
 
-app.listen(port, '127.0.0.1', () => {
-  console.log(`GameUX PromptForge local proxy listening on http://127.0.0.1:${port}`)
+app.listen(port, host, () => {
+  const browserHost = host === '0.0.0.0' ? '127.0.0.1' : host
+  console.log(`UX SpecForge local proxy listening on http://${browserHost}:${port}`)
+  if (STATIC_WEB_ENABLED && existsSync(CLIENT_DIST_DIR)) {
+    console.log(`UX SpecForge web app serving from ${CLIENT_DIST_DIR}`)
+  } else if (STATIC_WEB_ENABLED) {
+    console.log('UX SpecForge web app static serving skipped: dist/ not found')
+  }
 })

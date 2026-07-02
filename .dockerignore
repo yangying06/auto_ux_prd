@@ -1,0 +1,13 @@
+node_modules
+dist
+.git
+.planning
+.cache
+generated
+src-tauri/target
+*.log
+.codex-*.log
+.codex-*.err.log
+.env
+server/.env
+npm-debug.log*

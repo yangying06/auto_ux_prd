@@ -473,6 +473,18 @@ export function formatProjectUiFlowMarkdown(flow: ProjectUiFlow | null | undefin
   if (!flow) return ''
   const nodeById = new Map(flow.nodes.map((node) => [node.id, node]))
   const labels = (ids: string[]) => ids.map((id) => nodeById.get(id)?.label ?? id).join(' → ')
+  const aliasById = new Map(flow.nodes.map((node, index) => [node.id, `F${index + 1}`]))
+  const mermaidLabel = (value: string | null | undefined, maxLength = 60) =>
+    compact(value, maxLength).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  const mermaidLines = [
+    '```mermaid',
+    'flowchart LR',
+    ...flow.nodes.map((node) => `  ${aliasById.get(node.id)}["${mermaidLabel(node.label)}"]`),
+    ...(flow.edges.length
+      ? flow.edges.map((edge) => `  ${aliasById.get(edge.sourceNodeId)} -->|"${mermaidLabel(edge.trigger ?? edge.effect ?? '流转', 36)}"| ${aliasById.get(edge.targetNodeId)}`)
+      : ['  %% 暂无明确流转边']),
+    '```',
+  ]
   const edgeLines = flow.edges.length
     ? flow.edges.map((edge) => {
       const source = nodeById.get(edge.sourceNodeId)?.label ?? edge.sourceNodeId
@@ -492,6 +504,9 @@ export function formatProjectUiFlowMarkdown(flow: ProjectUiFlow | null | undefin
     `- 终点：${labels(flow.exitNodeIds) || '未识别'}`,
     `- 主路径：${labels(flow.happyPathNodeIds) || '未形成稳定主路径'}`,
     `- 摘要：${flow.summary}`,
+    '',
+    '### Mermaid 流程图',
+    mermaidLines.join('\n'),
     '',
     '### 流程边',
     edgeLines,

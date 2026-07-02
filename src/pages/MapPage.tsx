@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'wouter'
-import { getAiEnvironmentConfig, previewDecomposition, startDecomposition, pollDecomposition, exportSpecFolder, openSpecExportFolder, exportNodeMarkdown, suggestPrdNodeOperations, scanProjectBaseline, importFigmaFrame, generatePrototype } from '../lib/api'
+import { getAiEnvironmentConfig, previewDecomposition, startDecomposition, pollDecomposition, exportSpecFolder, openSpecExportFolder, exportNodeMarkdown, suggestPrdNodeOperations, importFigmaFrame, generatePrototype } from '../lib/api'
 import type { DecompositionSourcePayload } from '../lib/api'
 import { MapAdjustmentPanel } from '../components/map/MapAdjustmentPanel'
 import type { PrdImportPreview, PrdNode, PrdNodeOperationSuggestion, PrdNodeReference, PrdTree } from '../types/prdNode'
@@ -19,361 +19,17 @@ import { buildProjectArchiveFile, encodeProjectArchive } from '../lib/archiveCod
 import { formatProjectArchiveError, openProjectArchiveFile, saveProjectArchiveBytes } from '../lib/archiveIO'
 import { createProjectWorkspaceSnapshot } from '../lib/archiveSnapshot'
 import { AddNodeModal, type AddNodePayload } from '../components/map/AddNodeModal'
-import { collectDeliveryNodes, isDeliveryNode } from '../lib/prdNodeDelivery'
+import { collectDeliveryNodes, countExportableNodesByDepth, EXPORT_DEPTH_ORDER, pickExportDepthForCount, type ExportDepth, isDeliveryNode } from '../lib/prdNodeDelivery'
 import { buildFigmaDraftPrototypeInstruction, buildFigmaDraftRequirement, figmaImportToPrototypeImages, getNodeFigmaDraftSource, nodeHasGeneratedPrototype, nodeHasPrototypeInFlight } from '../lib/figmaDraftPrototype'
 import { EnvironmentConfigModal } from '../components/map/EnvironmentConfigModal'
 import { AssetWorkbenchModal } from '../components/map/AssetWorkbenchModal'
-import type { AssetWorkbenchState } from '../types/assetWorkbench'
-import type { ProjectBaselineScan, ProjectIterationContext, ProjectWorkflowMode } from '../types/projectWorkflow'
+import { buildAddedNodeContent, buildFlowConnectionDraftItems, buildImportSourceDocumentText, buildImportSourceFilename, buildInterfaceFlowDisplayTree, buildNodePreviewHtmlMap, buildSmartReference, collectGeneratedNodePrototypes, collectPendingFigmaDraftTargets, completionGateNodes, countExportableAssetRows, countFigmaBoundDeliveryNodes, defaultArchiveFilename, defaultFlowConnectionLabel, downloadBlob, findLastActiveIdx, hasProjectData, normalizeStepPhase, type CanvasConnectionDraft, type FlowConnectionDraft, type FlowConnectionDraftItem } from '../lib/mapPageTransforms'
 
 type Stage = 'upload' | 'preview' | 'decomposing' | 'error' | 'map'
 
 const INITIAL_STEP = '正在建立原文索引'
 const POLL_INTERVAL_MS = 700
 const EMPTY_NODE_SUGGESTIONS: PrdNodeOperationSuggestion[] = []
-
-function getImportedSourceText(sources: DecompositionSourcePayload) {
-  return sources.sourceText?.trim() || sources.mdText?.trim() || ''
-}
-
-function getImportedSourceFilename(sources: DecompositionSourcePayload) {
-  return sources.sourceFilename?.trim() || sources.mdFilename?.trim() || 'source-corpus.md'
-}
-
-function buildImportSourceDocumentText(sources: DecompositionSourcePayload) {
-  const figmaUrl = sources.figmaUrl?.trim()
-  const sourceText = getImportedSourceText(sources)
-  const parts: string[] = []
-
-  if (figmaUrl) {
-    parts.push(`# Figma 设计稿链接\n\n${figmaUrl}`)
-  }
-
-  if (sourceText) {
-    const filename = getImportedSourceFilename(sources)
-    parts.push(`# 导入素材：${filename}\n\n${sourceText}`)
-  }
-
-  return parts.join('\n\n---\n\n')
-}
-
-function buildImportSourceFilename(sources: DecompositionSourcePayload) {
-  const hasFigma = Boolean(sources.figmaUrl?.trim())
-  const sourceFilename = getImportedSourceText(sources) ? getImportedSourceFilename(sources) : ''
-  if (hasFigma && sourceFilename) return `figma+${sourceFilename}`
-  if (hasFigma) return 'figma-design.md'
-  return sourceFilename || 'source-corpus.md'
-}
-
-function buildIterationSourceText(sources: DecompositionSourcePayload) {
-  const sourceText = getImportedSourceText(sources)
-  return [
-    sources.figmaUrl?.trim() ? `Figma 设计稿：${sources.figmaUrl.trim()}` : null,
-    sourceText || null,
-  ].filter(Boolean).join('\n\n')
-}
-
-interface FlowConnectionDraftItem {
-  originalIndex: number | null
-  label: string
-  reason: string
-}
-
-interface FlowConnectionDraft {
-  isOpen: boolean
-  mode: 'incoming' | 'outgoing' | 'edge'
-  sourceNodeId: string
-  targetNodeId: string
-  originalSourceNodeId: string | null
-  originalTargetNodeId: string | null
-  items: FlowConnectionDraftItem[]
-}
-
-interface CanvasConnectionDraft {
-  nodeId: string
-  direction: 'incoming' | 'outgoing'
-}
-
-function compactText(value: string | null | undefined, maxLength = 72) {
-  const normalized = (value ?? '').replace(/\s+/g, ' ').trim()
-  if (!normalized) return ''
-  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized
-}
-
-function nodeInteractionHint(node: PrdNode) {
-  return compactText(
-    node.sections?.interaction?.summary
-    ?? node.sections?.interaction?.content
-    ?? node.sections?.view?.summary
-    ?? node.summary
-    ?? node.content,
-  )
-}
-
-const TRIGGER_VERBS = ['点击并', '点击', '按下', '选择', '勾选', '切换', '触发', '提交', '确认', '登录', '注册', '支付', '购买', '删除', '新增', '编辑', '返回', '退出', '长按', '双击', '拖拽', '滑动']
-
-// 从源界面的交互描述里抠出一个短动作短语（如“点击登录按钮”），用来当画布上的跳转标题。
-function extractTriggerAction(sourceNode: PrdNode): string {
-  const hint = nodeInteractionHint(sourceNode)
-  if (!hint) return ''
-  const matched = TRIGGER_VERBS.find((v) => hint.includes(v))
-  const start = matched ? hint.indexOf(matched) : 0
-  const rest = hint.slice(start)
-  const stop = rest.search(/[，。；,.;:：、\n\r（）()【】\[\]「」""'']/)
-  const phrase = stop > 0 ? rest.slice(0, stop) : rest
-  return compactText(phrase, 14)
-}
-
-function buildSmartReference(sourceNode: PrdNode, targetNode: PrdNode): PrdNodeReference {
-  const sourceHint = nodeInteractionHint(sourceNode)
-  const targetHint = nodeInteractionHint(targetNode)
-  const trigger = extractTriggerAction(sourceNode)
-  const label = defaultFlowConnectionLabel(sourceNode, targetNode, trigger)
-  const reason = buildStructuredFlowDetail(sourceNode, targetNode, { label: trigger, hint: sourceHint, targetHint })
-
-  return {
-    targetNodeId: targetNode.id,
-    label,
-    reason,
-    sourceNodeId: sourceNode.id,
-  }
-}
-
-function findNodeStateLabel(node: PrdNode | null | undefined, stateId: string | null | undefined) {
-  if (!node || !stateId) return ''
-  return node.uiStates?.find((state) => state.id === stateId)?.label?.trim() ?? ''
-}
-
-function defaultNodeStateLabel(node: PrdNode | null | undefined) {
-  if (!node?.uiStates?.length) return ''
-  const base = node.uiStates.find((state) => state.kind === 'default')
-  return (base ?? node.uiStates[0]).label?.trim() ?? ''
-}
-
-// 找出 source 节点上指向 target 的状态转移（出向优先，再回退入向）。
-function findTransitionBetween(sourceNode: PrdNode, targetNode: PrdNode) {
-  const outgoing = (sourceNode.stateTransitions ?? []).find((transition) => transition.targetNodeId === targetNode.id)
-  if (outgoing) return outgoing
-  const incoming = (targetNode.stateTransitions ?? []).find((transition) => transition.targetNodeId === sourceNode.id && transition.sourceNodeId === sourceNode.id)
-  return incoming ?? null
-}
-
-// 生成「从 X 界面的 Y 状态，通过 ... 跳转到 A 界面的 B 状态」的结构化跳转描述。
-function buildStructuredFlowDetail(
-  sourceNode: PrdNode,
-  targetNode: PrdNode,
-  fallback: { label?: string; hint?: string; targetHint?: string },
-): string {
-  const transition = findTransitionBetween(sourceNode, targetNode)
-  const sourceState = findNodeStateLabel(sourceNode, transition?.sourceStateId) || defaultNodeStateLabel(sourceNode)
-  const targetState = findNodeStateLabel(targetNode, transition?.targetStateId) || defaultNodeStateLabel(targetNode)
-  const trigger = compactText(transition?.trigger ?? fallback.label ?? '', 24)
-  const condition = compactText(transition?.condition ?? '', 40)
-  const hint = fallback.hint ?? ''
-
-  const fromClause = sourceState ? `「${sourceNode.label}」的「${sourceState}」状态` : `「${sourceNode.label}」`
-  const toClause = targetState ? `「${targetNode.label}」的「${targetState}」状态` : `「${targetNode.label}」`
-
-  const howParts: string[] = []
-  if (trigger) howParts.push(trigger)
-  if (condition) howParts.push(`满足「${condition}」`)
-  const howClause = howParts.length ? `通过${howParts.join('、')}触发` : (hint ? `由「${compactText(hint, 28)}」触发` : '跳转')
-
-  return `从${fromClause}${howClause}，进入${toClause}。`
-}
-
-function defaultFlowConnectionLabel(_sourceNode: PrdNode, targetNode: PrdNode, trigger?: string) {
-  if (trigger) return trigger
-  return `进入「${targetNode.label}」`
-}
-
-function buildFlowConnectionDraftItems(sourceNode: PrdNode, targetNode: PrdNode): FlowConnectionDraftItem[] {
-  const fallbackLabel = defaultFlowConnectionLabel(sourceNode, targetNode)
-  const trigger = extractTriggerAction(sourceNode)
-  const structuredReason = buildStructuredFlowDetail(sourceNode, targetNode, {
-    label: trigger,
-    hint: nodeInteractionHint(sourceNode),
-    targetHint: nodeInteractionHint(targetNode),
-  })
-  const matches = (sourceNode.references ?? [])
-    .map((reference, index) => ({ reference, index }))
-    .filter(({ reference }) => reference.targetNodeId === targetNode.id)
-
-  if (!matches.length) {
-    return [{ originalIndex: null, label: fallbackLabel, reason: structuredReason }]
-  }
-
-  return matches.map(({ reference, index }) => ({
-    originalIndex: index,
-    label: reference.label?.trim() || fallbackLabel,
-    reason: reference.reason?.trim() || structuredReason,
-  }))
-}
-
-function buildInterfaceFlowDisplayTree(tree: PrdTree): PrdTree {
-  return Object.fromEntries(
-    collectDeliveryNodes(tree).map((node) => [
-      node.id,
-      {
-        ...node,
-        parentId: null,
-        children: [],
-      },
-    ]),
-  ) as PrdTree
-}
-
-function findLastActiveIdx(steps: Array<{ status: string }>) {
-  for (let i = steps.length - 1; i >= 0; i--) {
-    if (steps[i].status === 'active') return i
-  }
-  return -1
-}
-
-function normalizeStepPhase(label: string) {
-  return label
-    .replace(/（已等待 \d+ 秒，AI 正在分析原文）$/, '')
-    .replace(/（\d+\/\d+）$/, '')
-    .replace(/[.。…]+$/, '')
-    .trim()
-}
-
-function completionGateNodes(tree: PrdTree) {
-  const deliveryNodes = collectDeliveryNodes(tree)
-  if (deliveryNodes.length) return deliveryNodes
-  const nodes = Object.values(tree)
-  const leaves = nodes.filter((node) => node.children.length === 0)
-  return leaves.length ? leaves : nodes
-}
-
-function allCompletionGateNodesDone(tree: PrdTree) {
-  const targets = completionGateNodes(tree)
-  return targets.length > 0 && targets.every((node) => node.status === 'done')
-}
-
-function clipNodeSourceText(text: string) {
-  const trimmed = text.trim()
-  if (trimmed.length <= 5000) return trimmed
-  return `${trimmed.slice(0, 5000)}\n\n[资料内容较长，节点预览仅保留前半部分，AI 分析文本也按附件上限截断]`
-}
-
-function buildAddedNodeContent(title: string, supplementText: string, sources: AddNodePayload['sources']) {
-  const sections = [
-    `# ${title}`,
-    '## 节点目标',
-    supplementText.trim() || '待基于补充资料完善页面目标、交互范围和验收点。',
-  ]
-
-  if (sources.length) {
-    sections.push(
-      '## 用户提供资料',
-      ...sources.map((source) => `### ${source.name}\n\n${clipNodeSourceText(source.text)}`),
-    )
-  }
-
-  sections.push('## View / Flow / Data', '等待 AI 建议或人工补齐画面、操作、数据三类细节；服务端依赖记录到服务端交互内容中。')
-  return sections.join('\n\n')
-}
-
-function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
-}
-
-function hasProjectData(tree: PrdTree | null, sourceDocument: unknown) {
-  return Boolean(sourceDocument) || Object.keys(tree ?? {}).length > 0
-}
-
-function defaultArchiveFilename(projectName: string, sourceFilename?: string | null) {
-  const sourceBase = sourceFilename?.replace(/\.[^.]+$/u, '') ?? projectName
-  const safeName = (sourceBase || projectName || 'promptforge-project')
-    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '-')
-    .replace(/\s+/g, ' ')
-    .trim()
-  return `${safeName || 'promptforge-project'}-${new Date().toISOString().slice(0, 10)}.gpf`
-}
-
-function collectGeneratedNodePrototypes(tree: PrdTree, nodePrototypeStates: ReturnType<typeof useAppStore.getState>['nodePrototypeStates']) {
-  return collectDeliveryNodes(tree)
-    .sort((a, b) => a.level - b.level || a.order - b.order || a.id.localeCompare(b.id))
-    .map((node) => {
-      const state = nodePrototypeStates[node.id]
-      const selectedVariant = state?.prototypeVariants.find((variant) => variant.index === state.selectedVariantIndex)
-      const html = selectedVariant?.html ?? state?.prototypeHtml ?? null
-      return html ? { node, html } : null
-    })
-    .filter((item): item is { node: PrdNode; html: string } => Boolean(item))
-}
-
-function buildNodePreviewHtmlMap(nodePrototypeStates: ReturnType<typeof useAppStore.getState>['nodePrototypeStates']) {
-  return Object.fromEntries(
-    Object.entries(nodePrototypeStates)
-      .map(([nodeId, state]) => {
-        const selectedVariant = state.prototypeVariants.find((variant) => (
-          variant.index === state.selectedVariantIndex && Boolean(variant.html)
-        ))
-        const html = selectedVariant?.html ?? state.prototypeHtml ?? null
-        return html ? [nodeId, html] : null
-      })
-      .filter((entry): entry is [string, string] => Boolean(entry)),
-  )
-}
-
-function collectPendingFigmaDraftTargets(
-  tree: PrdTree,
-  nodePrototypeStates: ReturnType<typeof useAppStore.getState>['nodePrototypeStates'],
-) {
-  return collectDeliveryNodes(tree).filter((node) => {
-    if (!getNodeFigmaDraftSource(node)) return false
-    const state = nodePrototypeStates[node.id]
-    return !nodeHasGeneratedPrototype(state) && !nodeHasPrototypeInFlight(state)
-  })
-}
-
-function countFigmaBoundDeliveryNodes(tree: PrdTree) {
-  return collectDeliveryNodes(tree).filter((node) => Boolean(getNodeFigmaDraftSource(node))).length
-}
-
-function countExportableAssetRows(assetWorkbench: AssetWorkbenchState) {
-  const uiCount = assetWorkbench.uiRows.filter((row) => row.status === 'ready' && row.result).length
-  const effectCount = assetWorkbench.effectRows.filter((row) =>
-    row.loadStatus === 'loaded' || Boolean(row.loadedPath) || row.files.length > 0
-  ).length
-  const audioCount = assetWorkbench.audioRows.filter((row) =>
-    row.loadStatus === 'loaded' || Boolean(row.loadedPath) || row.files.length > 0
-  ).length
-  return uiCount + effectCount + audioCount
-}
-
-function buildPlatformStrategyNotes(scan: ProjectBaselineScan) {
-  return scan.platforms.map((platform) => `${platform.platform}: ${platform.strategy}`)
-}
-
-function buildIterationAcceptanceFocus(scan: ProjectBaselineScan) {
-  const evidenceKinds = Array.from(new Set(scan.evidence.map((item) => item.kind))).filter(Boolean)
-  return [
-    '只生成本次迭代 PRD 命中的界面节点',
-    '代码证据只挂在界面节点详情中，不生成代码结构导图',
-    '标出当前现状、本次变更、影响范围、资源/文案/数据变更和待确认问题',
-    evidenceKinds.length ? `重点回归证据类型：${evidenceKinds.join(' / ')}` : '若缺少代码证据，先要求用户确认目标界面',
-  ]
-}
-
-function compactIterationContext(context: ProjectIterationContext | null | undefined) {
-  if (!context) return null
-  const scan = context.baselineScan
-  return {
-    codebasePath: context.codebasePath,
-    focus: context.focus,
-    platforms: scan?.platforms.map((item) => `${item.platform} ${item.confidence}%`) ?? [],
-    evidenceCount: scan?.evidence.length ?? 0,
-    queryTerms: scan?.queryTerms.slice(0, 8) ?? [],
-  }
-}
 
 export function MapPage() {
   const [stage, setStage] = useState<Stage>(() =>
@@ -384,6 +40,7 @@ export function MapPage() {
   const [nodeCount, setNodeCount] = useState(0)
   const [isExporting, setIsExporting] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
+  const [exportDepth, setExportDepth] = useState<ExportDepth>('all')
   const [pendingImportSources, setPendingImportSources] = useState<DecompositionSourcePayload | null>(null)
   const [importPreview, setImportPreview] = useState<PrdImportPreview | null>(null)
   const [isPreviewLoading, setIsPreviewLoading] = useState(false)
@@ -417,7 +74,6 @@ export function MapPage() {
   const prdTree = useAppStore((s) => s.prdTree)
   const settings = useAppStore((s) => s.settings)
   const sourceDocument = useAppStore((s) => s.sourceDocument)
-  const projectWorkflow = useAppStore((s) => s.projectWorkflow)
   const currentArchivePath = useAppStore((s) => s.currentArchivePath)
   const archiveDirty = useAppStore((s) => s.archiveDirty)
   const nodePrototypeStates = useAppStore((s) => s.nodePrototypeStates)
@@ -433,8 +89,6 @@ export function MapPage() {
   const resetDecomposition = useAppStore((s) => s.resetDecomposition)
   const setPrdTree = useAppStore((s) => s.setPrdTree)
   const setSourceDocument = useAppStore((s) => s.setSourceDocument)
-  const setProjectWorkflowMode = useAppStore((s) => s.setProjectWorkflowMode)
-  const setProjectIterationContext = useAppStore((s) => s.setProjectIterationContext)
   const loadArchiveSnapshot = useAppStore((s) => s.loadArchiveSnapshot)
   const markArchiveSaved = useAppStore((s) => s.markArchiveSaved)
   const resetProject = useAppStore((s) => s.resetProject)
@@ -722,17 +376,6 @@ export function MapPage() {
       return
     }
 
-    const workflowBeforeReset = useAppStore.getState().projectWorkflow
-    const iterationDraft = workflowBeforeReset.iteration
-    const isIterationMode = workflowBeforeReset.mode === 'existing_project_iteration'
-    const codebasePath = iterationDraft?.codebasePath.trim() ?? ''
-    const focus = iterationDraft?.focus.trim() ?? ''
-
-    if (isIterationMode && !codebasePath) {
-      setUploadError('已有项目迭代需要先填写代码库路径。')
-      return
-    }
-
     clearPolling()
     sessionIdRef.current = null
     resetProject()
@@ -756,25 +399,6 @@ export function MapPage() {
     previewRequestRef.current = requestId
 
     try {
-      if (isIterationMode) {
-        const iterationSourceText = buildIterationSourceText(sources)
-        const baselineScan = await scanProjectBaseline(settings.proxyBaseUrl, {
-          rootPath: codebasePath,
-          iterationPrd: iterationSourceText,
-          focus,
-        })
-        const iterationContext: ProjectIterationContext = {
-          codebasePath,
-          focus,
-          baselineScan,
-          platformStrategyNotes: buildPlatformStrategyNotes(baselineScan),
-          acceptanceFocus: buildIterationAcceptanceFocus(baselineScan),
-        }
-        setProjectIterationContext(iterationContext)
-      } else {
-        setProjectWorkflowMode('new_project')
-      }
-
       const preview = await previewDecomposition(settings.proxyBaseUrl, sources, useAppStore.getState().projectWorkflow)
       if (previewRequestRef.current !== requestId) return
       setImportPreview(preview)
@@ -789,32 +413,6 @@ export function MapPage() {
   const handleConfirmPreview = () => {
     if (!pendingImportSources) return
     void beginDecomposition(pendingImportSources)
-  }
-
-  const handleWorkflowModeChange = (mode: ProjectWorkflowMode) => {
-    setProjectWorkflowMode(mode)
-  }
-
-  const handleIterationCodebasePathChange = (codebasePath: string) => {
-    const current = useAppStore.getState().projectWorkflow.iteration
-    setProjectIterationContext({
-      codebasePath,
-      focus: current?.focus ?? '',
-      baselineScan: null,
-      platformStrategyNotes: current?.platformStrategyNotes ?? [],
-      acceptanceFocus: current?.acceptanceFocus ?? [],
-    })
-  }
-
-  const handleIterationFocusChange = (focus: string) => {
-    const current = useAppStore.getState().projectWorkflow.iteration
-    setProjectIterationContext({
-      codebasePath: current?.codebasePath ?? '',
-      focus,
-      baselineScan: null,
-      platformStrategyNotes: current?.platformStrategyNotes ?? [],
-      acceptanceFocus: current?.acceptanceFocus ?? [],
-    })
   }
 
   const handleReset = () => {
@@ -839,7 +437,6 @@ export function MapPage() {
       .then((status) => {
         if (cancelled) return
         setEnvironmentStatus(status)
-        if (!status.aiConfigured) setEnvironmentConfigOpen(true)
       })
       .catch(() => {
         if (!cancelled) setEnvironmentStatus(null)
@@ -847,10 +444,23 @@ export function MapPage() {
     return () => { cancelled = true }
   }, [settings.proxyBaseUrl])
 
+  useEffect(() => {
+    if (!environmentConfigOpen) return
+    let cancelled = false
+    getAiEnvironmentConfig(settings.proxyBaseUrl)
+      .then((status) => {
+        if (!cancelled) setEnvironmentStatus(status)
+      })
+      .catch(() => {
+        if (!cancelled) setEnvironmentStatus(null)
+      })
+    return () => { cancelled = true }
+  }, [environmentConfigOpen, settings.proxyBaseUrl])
+
   const environmentConfigModal = (
     <EnvironmentConfigModal
       open={environmentConfigOpen}
-      required={environmentStatus ? !environmentStatus.aiConfigured : false}
+      required={false}
       baseUrl={settings.proxyBaseUrl}
       status={environmentStatus}
       onSaved={setEnvironmentStatus}
@@ -881,14 +491,15 @@ export function MapPage() {
     const generatedNodePrototypes = collectGeneratedNodePrototypes(prdTree, nodePrototypeStates)
     const selectedNodePrototype = generatedNodePrototypes.find((item) => item.node.id === selectedPrototypeNodeId)
       ?? generatedNodePrototypes[0]
-    const canExport = allCompletionGateNodesDone(prdTree)
+    const exportableCount = countExportableNodesByDepth(prdTree, exportDepth)
+    const effectiveExportDepth: ExportDepth = exportableCount > 0 ? exportDepth : pickExportDepthForCount(prdTree, 'all')
+    const effectiveExportableCount = exportableCount > 0 ? exportableCount : countExportableNodesByDepth(prdTree, effectiveExportDepth)
+    const allExportDoneCount = collectDeliveryNodes(prdTree).filter((node) => node.status === 'done').length
+    const canExport = effectiveExportableCount > 0
     const canValidatePrototype = completionTargets.length > 0
     const hasProject = hasProjectData(prdTree, sourceDocument)
     const topError = exportError ?? projectError
     const qaOpenIssueCount = Object.values(qaIssues).filter((issue) => issue.status !== 'draft' && issue.status !== 'closed').length
-    const iterationInfo = projectWorkflow.mode === 'existing_project_iteration'
-      ? compactIterationContext(projectWorkflow.iteration)
-      : null
     const connectableNodes = collectDeliveryNodes(prdTree)
     const fallbackConnectableNode = (excludeNodeId?: string | null) => (
       connectableNodes.find((node) => node.id !== excludeNodeId) ?? connectableNodes[0] ?? null
@@ -1046,6 +657,7 @@ export function MapPage() {
           ? window.confirm(`检测到 ${exportableAssetCount} 组项目素材。\n\n选择“确定”：导出制作文档并附带素材。\n选择“取消”：只导出制作文档。`)
           : false
         const result = await exportSpecFolder(settings.proxyBaseUrl, prdTree, {
+          depth: effectiveExportDepth,
           includeAssets,
           assetWorkbench,
         })
@@ -1055,7 +667,15 @@ export function MapPage() {
         const assetSummary = includeAssets && result.assets
           ? `\n素材清单：${result.assets.manifestPath}\n已复制文件：${result.assets.copiedFiles} 个，跳过：${result.assets.skippedItems} 项`
           : ''
-        alert(`已导出页面级 spec 文件夹：${result.exportDir}${assetSummary}`)
+        const evidenceSummary = result.evidence
+          ? `\n证据链索引：${result.evidence.manifestPath}\n证据文件：${result.evidence.documents.length} 个`
+          : ''
+        const depthNote = effectiveExportDepth === 'all'
+          ? '（包含尚未打磨的草稿，仅供早期评审）'
+          : effectiveExportDepth === 'forged'
+            ? '（已确认 + 免打磨节点）'
+            : ''
+        alert(`已导出页面级 spec 文件夹：${result.exportDir}\n共 ${result.documents.length} 篇文档${depthNote}${evidenceSummary}${assetSummary}`)
         try {
           await openSpecExportFolder(settings.proxyBaseUrl)
         } catch (openError) {
@@ -1277,6 +897,11 @@ export function MapPage() {
           onSaveArchiveAs={() => { void handleSaveArchive(true) }}
           onConfigureEnvironment={() => setEnvironmentConfigOpen(true)}
           onDeleteProject={handleDeleteProject}
+          exportDepth={exportDepth}
+          exportDepthOptions={EXPORT_DEPTH_ORDER}
+          exportableCount={effectiveExportableCount}
+          exportDoneCount={allExportDoneCount}
+          onChangeExportDepth={setExportDepth}
           canExport={canExport}
           onExport={handleExport}
           isExporting={isExporting}
@@ -1304,16 +929,6 @@ export function MapPage() {
             </span>
             <span className="font-medium text-tertiary">Figma first drafts</span>
             <span className="truncate">{figmaDraftBatchStatus}</span>
-          </div>
-        ) : null}
-        {iterationInfo ? (
-          <div className="flex shrink-0 flex-wrap items-center gap-sm border-b border-secondary/30 bg-secondary/10 px-lg py-sm text-label-md text-on-surface-variant">
-            <span className="material-symbols-outlined text-secondary" style={{ fontSize: '18px' }}>difference</span>
-            <span className="font-semibold text-secondary">已有项目迭代</span>
-            <span className="max-w-[320px] truncate">{iterationInfo.focus || '未填写迭代焦点'}</span>
-            <span className="max-w-[360px] truncate font-mono text-code-sm">{iterationInfo.codebasePath}</span>
-            <span>{iterationInfo.platforms.join(' / ') || '平台待确认'}</span>
-            <span>证据 {iterationInfo.evidenceCount}</span>
           </div>
         ) : null}
         {topError && (
@@ -1357,6 +972,7 @@ export function MapPage() {
                 setCanvasFocusNodeId(id)
                 setSelectedNodeId(id)
               }}
+              onOpenForge={(id) => navigate('/forge/' + id)}
               onCanvasBlankClick={() => {
                 if (selectedNodeId) setSelectedNodeId(null)
               }}
@@ -1688,7 +1304,6 @@ export function MapPage() {
             preview={importPreview}
             isLoading={isPreviewLoading}
             error={previewError}
-            projectWorkflow={projectWorkflow}
             onConfirm={handleConfirmPreview}
             onReset={handleReset}
           />
@@ -1709,12 +1324,6 @@ export function MapPage() {
               onConfigureEnvironment={() => setEnvironmentConfigOpen(true)}
               proxyBaseUrl={settings.proxyBaseUrl}
               error={uploadError ?? projectError}
-              workflowMode={projectWorkflow.mode}
-              iterationCodebasePath={projectWorkflow.iteration?.codebasePath ?? ''}
-              iterationFocus={projectWorkflow.iteration?.focus ?? ''}
-              onWorkflowModeChange={handleWorkflowModeChange}
-              onIterationCodebasePathChange={handleIterationCodebasePathChange}
-              onIterationFocusChange={handleIterationFocusChange}
             />
           ) : (
             <DecompProgress steps={decompositionSteps} nodeCount={nodeCount} error={decompError} />

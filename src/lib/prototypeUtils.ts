@@ -661,7 +661,7 @@ export function normalizePrototypeHtml(raw: string) {
 <head>
 <meta charset="UTF-8" />
 ${headAdditions}
-<title>GameUX Prototype</title>
+<title>UX SpecForge Prototype</title>
 </head>
 <body>
 ${parsed}

@@ -206,7 +206,7 @@ export function ChatPanel({ onOpenSettings, onBack, onConfirm }: ChatPanelProps)
     <aside className="relative z-10 flex h-full w-[35%] min-w-[360px] flex-col border-r border-outline-variant/30 bg-surface-container">
       <header className="flex items-center justify-between border-b border-outline-variant/20 bg-surface-container-high/50 px-lg py-md backdrop-blur-sm">
         <div>
-          <h1 className="text-headline-sm font-semibold text-on-surface">GameUX PromptForge</h1>
+          <h1 className="text-headline-sm font-semibold text-on-surface">UX SpecForge</h1>
           <div className="mt-xs flex items-center gap-sm">
             <div className="pulse-dot h-2 w-2 rounded-full bg-tertiary" />
             <span className="font-mono text-label-md uppercase text-tertiary">项目知识已就绪</span>

@@ -1,5 +1,7 @@
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
 import {
+  LEGACY_PROJECT_ARCHIVE_APP_NAME,
+  PROJECT_ARCHIVE_APP_NAME,
   PROJECT_ARCHIVE_SCHEMA_VERSION,
   type ProjectArchiveFile,
   type ProjectArchiveManifest,
@@ -9,6 +11,7 @@ import {
 const MANIFEST_PATH = 'manifest.json'
 const WORKSPACE_PATH = 'workspace.json'
 const SOURCE_PRD_PATH = 'sources/prd.md'
+const ACCEPTED_ARCHIVE_APP_NAMES = new Set([PROJECT_ARCHIVE_APP_NAME, LEGACY_PROJECT_ARCHIVE_APP_NAME])
 
 function parseJsonFile<T>(files: Record<string, Uint8Array>, path: string): T {
   const bytes = files[path]
@@ -20,8 +23,8 @@ function assertArchiveManifest(manifest: ProjectArchiveManifest) {
   if (manifest.schemaVersion !== PROJECT_ARCHIVE_SCHEMA_VERSION) {
     throw new Error(`Unsupported project archive version: ${manifest.schemaVersion}`)
   }
-  if (manifest.app !== 'GameUX PromptForge') {
-    throw new Error('This file is not a GameUX PromptForge archive')
+  if (!ACCEPTED_ARCHIVE_APP_NAMES.has(manifest.app)) {
+    throw new Error('This file is not a UX SpecForge archive')
   }
 }
 
@@ -30,7 +33,7 @@ export function buildProjectArchiveFile(workspace: ProjectWorkspaceSnapshot): Pr
   return {
     manifest: {
       schemaVersion: PROJECT_ARCHIVE_SCHEMA_VERSION,
-      app: 'GameUX PromptForge',
+      app: PROJECT_ARCHIVE_APP_NAME,
       projectName: workspace.settings.projectName,
       createdAt: workspace.sourceDocument?.importedAt ?? now,
       savedAt: now,

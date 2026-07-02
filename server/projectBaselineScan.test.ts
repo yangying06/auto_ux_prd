@@ -10,7 +10,7 @@ function writeFile(root: string, relativePath: string, body: string) {
   writeFileSync(absolutePath, body, 'utf8')
 }
 
-const tempRoot = mkdtempSync(path.join(tmpdir(), 'promptforge-baseline-'))
+const tempRoot = mkdtempSync(path.join(tmpdir(), 'ux-specforge-baseline-'))
 
 try {
   const h5Root = path.join(tempRoot, 'h5-client')

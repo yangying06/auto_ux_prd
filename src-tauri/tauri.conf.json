@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "GameUX PromptForge",
+  "productName": "UX SpecForge",
   "version": "0.1.0",
-  "identifier": "com.gameux.promptforge",
+  "identifier": "com.uxspecforge.app",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://127.0.0.1:5173",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "GameUX PromptForge",
+        "title": "UX SpecForge",
         "width": 1440,
         "height": 900,
         "resizable": true,

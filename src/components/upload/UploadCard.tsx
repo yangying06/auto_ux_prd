@@ -1,7 +1,6 @@
 import { useRef, useState } from 'react'
 import { importLarkDocument, type LarkImportResponse } from '../../lib/api'
 import type { SourceImageInput } from '../../types/chat'
-import type { ProjectWorkflowMode } from '../../types/projectWorkflow'
 
 type ImportSourceFileKind = 'document' | 'code' | 'config' | 'text'
 
@@ -34,15 +33,10 @@ interface UploadCardProps {
   onConfigureEnvironment: () => void
   proxyBaseUrl: string
   error?: string | null
-  workflowMode: ProjectWorkflowMode
-  iterationCodebasePath: string
-  iterationFocus: string
-  onWorkflowModeChange: (mode: ProjectWorkflowMode) => void
-  onIterationCodebasePathChange: (path: string) => void
-  onIterationFocusChange: (focus: string) => void
 }
 
 const MAX_SOURCE_FILES = 180
+const MAX_GITHUB_SOURCE_FILES = 80
 const MAX_SOURCE_FILE_BYTES = 220_000
 const MAX_CHARS_PER_FILE = 12_000
 const MAX_TOTAL_SOURCE_CHARS = 260_000
@@ -161,6 +155,13 @@ const IGNORED_PATH_SEGMENTS = new Set([
 
 const FILE_ACCEPT = Array.from(SOURCE_EXTENSIONS).join(',')
 
+interface GithubRepositoryRef {
+  owner: string
+  repo: string
+  branch: string | null
+  pathPrefix: string
+}
+
 function normalizePath(file: File) {
   return (file.webkitRelativePath || file.name).replace(/\\/g, '/')
 }
@@ -177,13 +178,17 @@ function shouldIgnorePath(path: string) {
     .some((segment) => IGNORED_PATH_SEGMENTS.has(segment.toLowerCase()))
 }
 
-function isReadableSourceFile(file: File) {
-  const path = normalizePath(file)
+function isReadableSourcePath(path: string, mimeType = '') {
   if (!path || shouldIgnorePath(path)) return false
   const extension = fileExtension(path)
   if (BINARY_EXTENSIONS.has(extension)) return false
   if (SOURCE_EXTENSIONS.has(extension)) return true
-  return file.type.startsWith('text/')
+  return mimeType.startsWith('text/')
+}
+
+function isReadableSourceFile(file: File) {
+  const path = normalizePath(file)
+  return isReadableSourcePath(path, file.type)
 }
 
 function sourceKindForPath(path: string): ImportSourceFileKind {
@@ -305,10 +310,14 @@ function buildSourceCorpus(files: SelectedSourceFile[]) {
   }
 }
 
-function mergeSourceFileList(files: SelectedSourceFile[], file: SelectedSourceFile) {
+function mergeSourceFileLists(files: SelectedSourceFile[], incomingFiles: SelectedSourceFile[]) {
   const byPath = new Map(files.map((item) => [item.path, item]))
-  byPath.set(file.path, file)
+  incomingFiles.forEach((file) => byPath.set(file.path, file))
   return Array.from(byPath.values()).sort((a, b) => a.path.localeCompare(b.path))
+}
+
+function mergeSourceFileList(files: SelectedSourceFile[], file: SelectedSourceFile) {
+  return mergeSourceFileLists(files, [file])
 }
 
 function replaceLarkSourceFileList(files: SelectedSourceFile[], file: SelectedSourceFile) {
@@ -332,6 +341,110 @@ function sourceFileFromLarkImport(result: LarkImportResponse): SelectedSourceFil
     kind: 'document',
     truncated: false,
   }
+}
+
+function parseGithubRepositoryUrl(value: string): GithubRepositoryRef | null {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+
+  const sshMatch = /^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/iu.exec(trimmed)
+  if (sshMatch) {
+    return {
+      owner: sshMatch[1],
+      repo: sshMatch[2].replace(/\.git$/iu, ''),
+      branch: null,
+      pathPrefix: '',
+    }
+  }
+
+  try {
+    const withProtocol = /^https?:\/\//iu.test(trimmed) ? trimmed : `https://${trimmed}`
+    const parsed = new URL(withProtocol)
+    if (parsed.hostname.toLowerCase() !== 'github.com') return null
+    const segments = parsed.pathname.split('/').filter(Boolean).map((segment) => decodeURIComponent(segment))
+    if (segments.length < 2) return null
+    const [owner, rawRepo] = segments
+    const repo = rawRepo.replace(/\.git$/iu, '')
+    const treeIndex = segments.findIndex((segment) => segment === 'tree')
+    const branch = treeIndex >= 0 && segments[treeIndex + 1] ? segments[treeIndex + 1] : null
+    const pathPrefix = treeIndex >= 0 ? segments.slice(treeIndex + 2).join('/') : ''
+    return owner && repo ? { owner, repo, branch, pathPrefix } : null
+  } catch {
+    return null
+  }
+}
+
+function githubRawFileUrl(ref: GithubRepositoryRef, branch: string, path: string) {
+  const encodedPath = path.split('/').map((part) => encodeURIComponent(part)).join('/')
+  return `https://raw.githubusercontent.com/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.repo)}/${encodeURIComponent(branch)}/${encodedPath}`
+}
+
+async function readGithubRepositorySourceFiles(value: string) {
+  const ref = parseGithubRepositoryUrl(value)
+  if (!ref) throw new Error('GitHub 项目链接格式不正确。')
+
+  const repoResponse = await fetch(`https://api.github.com/repos/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.repo)}`)
+  if (!repoResponse.ok) throw new Error(`无法访问仓库：HTTP ${repoResponse.status}`)
+  const repoInfo = await repoResponse.json() as { default_branch?: string }
+  const branch = ref.branch ?? repoInfo.default_branch ?? 'main'
+
+  const treeResponse = await fetch(`https://api.github.com/repos/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.repo)}/git/trees/${encodeURIComponent(branch)}?recursive=1`)
+  if (!treeResponse.ok) throw new Error(`无法读取仓库文件树：HTTP ${treeResponse.status}`)
+  const treeInfo = await treeResponse.json() as {
+    tree?: Array<{ path?: string; type?: string; size?: number }>
+    truncated?: boolean
+  }
+  const tree = Array.isArray(treeInfo.tree) ? treeInfo.tree : []
+  const prefix = ref.pathPrefix.replace(/^\/+|\/+$/gu, '')
+  const candidateEntries = tree
+    .filter((entry) => entry.type === 'blob' && entry.path)
+    .filter((entry): entry is { path: string; type: string; size?: number } => Boolean(entry.path))
+    .filter((entry) => !prefix || entry.path === prefix || entry.path.startsWith(`${prefix}/`))
+    .filter((entry) => isReadableSourcePath(entry.path))
+
+  const warnings: string[] = []
+  const oversizedCount = candidateEntries.filter((entry) => typeof entry.size === 'number' && entry.size > MAX_SOURCE_FILE_BYTES).length
+  const readableEntries = candidateEntries.filter((entry) => typeof entry.size !== 'number' || entry.size <= MAX_SOURCE_FILE_BYTES)
+  const cappedEntries = readableEntries.slice(0, MAX_GITHUB_SOURCE_FILES)
+
+  if (treeInfo.truncated) warnings.push('GitHub 文件树已截断，已读取可用部分。')
+  if (oversizedCount > 0) warnings.push(`已跳过 ${oversizedCount} 个过大的 GitHub 文件。`)
+  if (readableEntries.length > cappedEntries.length) {
+    warnings.push(`GitHub 仓库文件较多，已纳入前 ${cappedEntries.length} 个文本文件。`)
+  }
+
+  const files: SelectedSourceFile[] = []
+  for (const entry of cappedEntries) {
+    try {
+      const rawResponse = await fetch(githubRawFileUrl(ref, branch, entry.path))
+      if (!rawResponse.ok) {
+        warnings.push(`GitHub 文件读取失败：${entry.path}`)
+        continue
+      }
+      const rawText = await rawResponse.text()
+      if (looksBinary(rawText)) {
+        warnings.push(`已跳过疑似二进制文件：${entry.path}`)
+        continue
+      }
+      const normalizedText = rawText.replace(/\r\n/g, '\n').replace(/\u0000/gu, '').trim()
+      if (!normalizedText) continue
+      const text = normalizedText.slice(0, MAX_CHARS_PER_FILE)
+      files.push({
+        path: `github/${ref.owner}/${ref.repo}/${entry.path}`,
+        name: entry.path.split('/').pop() ?? entry.path,
+        text,
+        size: entry.size ?? new Blob([rawText]).size,
+        chars: text.length,
+        kind: sourceKindForPath(entry.path),
+        truncated: normalizedText.length > text.length,
+      })
+    } catch {
+      warnings.push(`GitHub 文件读取失败：${entry.path}`)
+    }
+  }
+
+  if (!files.length) throw new Error('没有读取到可分析的 GitHub 文本文件。')
+  return { files, warnings }
 }
 
 async function readSourceFiles(fileList: File[]) {
@@ -382,29 +495,29 @@ export function UploadCard({
   onConfigureEnvironment,
   proxyBaseUrl,
   error,
-  workflowMode,
-  iterationCodebasePath,
-  iterationFocus,
-  onWorkflowModeChange,
-  onIterationCodebasePathChange,
-  onIterationFocusChange,
 }: UploadCardProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const directoryInputRef = useRef<HTMLInputElement>(null)
+  const codeRepositoryInputRef = useRef<HTMLInputElement>(null)
   const [isReading, setIsReading] = useState(false)
   const [isFetchingLark, setIsFetchingLark] = useState(false)
+  const [isFetchingGithub, setIsFetchingGithub] = useState(false)
   const [rejectionError, setRejectionError] = useState<string | null>(null)
   const [sourceFiles, setSourceFiles] = useState<SelectedSourceFile[]>([])
   const [sourceImages, setSourceImages] = useState<SourceImageInput[]>([])
   const [sourceWarnings, setSourceWarnings] = useState<string[]>([])
   const [figmaUrl, setFigmaUrl] = useState('')
   const [larkUrl, setLarkUrl] = useState('')
+  const [githubRepoUrl, setGithubRepoUrl] = useState('')
   const [larkTitle, setLarkTitle] = useState<string | null>(null)
   const [loadedLarkUrl, setLoadedLarkUrl] = useState<string | null>(null)
+  const [loadedGithubRepoUrl, setLoadedGithubRepoUrl] = useState<string | null>(null)
 
   const normalizedFigmaUrl = figmaUrl.trim()
   const normalizedLarkUrl = larkUrl.trim()
+  const normalizedGithubRepoUrl = githubRepoUrl.trim()
   const hasPendingLarkDocument = Boolean(normalizedLarkUrl && normalizedLarkUrl !== loadedLarkUrl)
+  const hasPendingGithubRepository = Boolean(normalizedGithubRepoUrl && normalizedGithubRepoUrl !== loadedGithubRepoUrl)
   const sourceCorpus = buildSourceCorpus(sourceFiles)
   const displayWarnings = [
     ...sourceWarnings,
@@ -412,8 +525,8 @@ export function UploadCard({
     ...sourceCorpus.warnings,
   ]
   const displayError = error ?? rejectionError
-  const isBusy = isReading || isFetchingLark
-  const canImport = Boolean(sourceCorpus.text.trim() || normalizedFigmaUrl || normalizedLarkUrl)
+  const isBusy = isReading || isFetchingLark || isFetchingGithub
+  const canImport = Boolean(sourceCorpus.text.trim() || normalizedFigmaUrl || normalizedLarkUrl || normalizedGithubRepoUrl)
   const displayedFiles = sourceFiles.slice(0, 5)
   const sourceTotalBytes = sourceFiles.reduce((total, file) => total + file.size, 0)
 
@@ -454,6 +567,14 @@ export function UploadCard({
     return { file, images: result.images }
   }
 
+  const fetchAndMergeGithubRepository = async (url: string) => {
+    const result = await readGithubRepositorySourceFiles(url)
+    setSourceFiles((current) => mergeSourceFileLists(current, result.files))
+    setSourceWarnings(result.warnings)
+    setLoadedGithubRepoUrl(url)
+    return result
+  }
+
   const handleFetchLarkDocument = async () => {
     if (!normalizedLarkUrl) {
       setRejectionError('请先粘贴飞书文档链接。')
@@ -471,8 +592,33 @@ export function UploadCard({
     }
   }
 
+  const handleFetchGithubRepository = async () => {
+    if (!normalizedGithubRepoUrl) {
+      setRejectionError('请先粘贴 GitHub 项目链接。')
+      return
+    }
+
+    setIsFetchingGithub(true)
+    setRejectionError(null)
+    try {
+      await fetchAndMergeGithubRepository(normalizedGithubRepoUrl)
+    } catch (fetchError) {
+      setRejectionError(fetchError instanceof Error ? `GitHub 读取失败：${fetchError.message}` : 'GitHub 读取失败')
+    } finally {
+      setIsFetchingGithub(false)
+    }
+  }
+
   const openDirectoryPicker = () => {
     const input = directoryInputRef.current
+    if (!input) return
+    input.setAttribute('webkitdirectory', '')
+    input.setAttribute('directory', '')
+    input.click()
+  }
+
+  const openCodeRepositoryPicker = () => {
+    const input = codeRepositoryInputRef.current
     if (!input) return
     input.setAttribute('webkitdirectory', '')
     input.setAttribute('directory', '')
@@ -507,6 +653,19 @@ export function UploadCard({
       }
     }
 
+    if (hasPendingGithubRepository && normalizedGithubRepoUrl) {
+      setIsFetchingGithub(true)
+      try {
+        const result = await fetchAndMergeGithubRepository(normalizedGithubRepoUrl)
+        importSourceFiles = mergeSourceFileLists(importSourceFiles, result.files)
+      } catch (fetchError) {
+        setRejectionError(fetchError instanceof Error ? `GitHub 读取失败：${fetchError.message}` : 'GitHub 读取失败')
+        return
+      } finally {
+        setIsFetchingGithub(false)
+      }
+    }
+
     const importSourceCorpus = buildSourceCorpus(importSourceFiles)
     if (!importSourceCorpus.text.trim() && !normalizedFigmaUrl) {
       setRejectionError('没有读取到可分析的 PRD 正文，请检查飞书链接权限或重新读取。')
@@ -527,8 +686,8 @@ export function UploadCard({
   return (
     <>
       <span className="material-symbols-outlined text-on-surface" style={{ fontSize: '32px' }}>account_tree</span>
-      <h1 className="text-headline-sm font-semibold text-on-surface">GameUX PromptForge</h1>
-      <p className="text-label-md font-semibold text-on-surface-variant uppercase tracking-wider">PRD 拆解引擎</p>
+      <h1 className="text-headline-sm font-semibold text-on-surface">UX SpecForge</h1>
+      <p className="text-label-md font-semibold text-on-surface-variant">导入资料，生成交互导图</p>
       <button
         type="button"
         onClick={onConfigureEnvironment}
@@ -537,52 +696,6 @@ export function UploadCard({
         <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>settings</span>
         环境配置
       </button>
-
-      <div className="grid w-full grid-cols-2 gap-xs rounded-lg border border-outline-variant bg-surface-container p-xs">
-        {[
-          { id: 'new_project' as const, label: '新项目拆解', icon: 'note_add' },
-          { id: 'existing_project_iteration' as const, label: '已有项目迭代', icon: 'difference' },
-        ].map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            onClick={() => onWorkflowModeChange(item.id)}
-            aria-pressed={workflowMode === item.id}
-            className={[
-              'flex min-h-[40px] items-center justify-center gap-xs rounded-md px-sm py-xs text-label-md transition-colors',
-              workflowMode === item.id
-                ? 'bg-secondary-container text-on-secondary-container'
-                : 'text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface',
-            ].join(' ')}
-          >
-            <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>{item.icon}</span>
-            {item.label}
-          </button>
-        ))}
-      </div>
-
-      {workflowMode === 'existing_project_iteration' ? (
-        <div className="grid w-full gap-sm rounded-lg border border-outline-variant bg-surface-container-low p-md">
-          <label className="grid gap-xs">
-            <span className="text-label-md text-on-surface">代码库路径</span>
-            <input
-              value={iterationCodebasePath}
-              onChange={(event) => onIterationCodebasePathChange(event.target.value)}
-              className="min-h-[40px] rounded-md border border-outline-variant bg-surface px-sm py-xs text-body-md text-on-surface outline-none focus:border-secondary"
-              placeholder="D:\\project\\client"
-            />
-          </label>
-          <label className="grid gap-xs">
-            <span className="text-label-md text-on-surface">本次迭代焦点</span>
-            <textarea
-              value={iterationFocus}
-              onChange={(event) => onIterationFocusChange(event.target.value)}
-              className="min-h-[72px] resize-none rounded-md border border-outline-variant bg-surface px-sm py-xs text-body-md text-on-surface outline-none focus:border-secondary"
-              placeholder="例如：帮助界面的任务说明功能"
-            />
-          </label>
-        </div>
-      ) : null}
 
       <label className="grid w-full gap-xs">
         <span className="text-label-md text-on-surface">Figma 设计稿链接</span>
@@ -593,7 +706,7 @@ export function UploadCard({
           placeholder="https://www.figma.com/design/...?...node-id=..."
         />
         <span className="text-code-sm text-on-surface-variant">
-          有 Figma 时优先按设计稿解析；导入素材会补充功能规则、代码约束、文案和验收信息。
+          可选，用于补充界面结构。
         </span>
       </label>
 
@@ -605,16 +718,9 @@ export function UploadCard({
               <h2 className="text-label-lg font-semibold text-on-surface">飞书 PRD 链接</h2>
             </div>
             <p className="mt-[2px] text-body-md text-on-surface-variant">
-              {larkTitle && !hasPendingLarkDocument ? `已读取：${larkTitle}` : hasPendingLarkDocument ? '待读取：开始解析前会自动拉取 PRD 正文。' : '读取飞书文档正文，并尽量带入文档图片。'}
+              {larkTitle && !hasPendingLarkDocument ? `已读取：${larkTitle}` : hasPendingLarkDocument ? '开始解析前会自动读取。' : '粘贴 PRD 文档链接。'}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={onConfigureEnvironment}
-            className="shrink-0 rounded border border-outline-variant bg-surface px-sm py-xs text-code-sm text-on-surface-variant transition-colors hover:bg-surface-variant"
-          >
-            配置
-          </button>
         </div>
         <div className="grid gap-sm sm:grid-cols-[minmax(0,1fr)_auto]">
           <input
@@ -650,7 +756,7 @@ export function UploadCard({
               <h2 className="text-label-lg font-semibold text-on-surface">素材池</h2>
             </div>
             <p className="mt-[2px] text-body-md text-on-surface-variant">
-              {isReading ? '正在读取素材...' : sourceFiles.length ? '文件会合并为本次分析资料' : '通过下方按钮添加文件或文件夹'}
+              {isReading || isFetchingGithub ? '正在读取素材...' : sourceFiles.length ? '已加入本次分析' : '添加 PRD、代码或配置资料'}
             </p>
           </div>
           {sourceFiles.length ? (
@@ -678,6 +784,14 @@ export function UploadCard({
             <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>create_new_folder</span>
             添加文件夹
           </button>
+          <button
+            type="button"
+            className="flex min-h-[40px] flex-1 items-center justify-center gap-2 rounded-lg border border-outline-variant bg-surface-container-high px-4 py-2 text-label-md text-on-surface transition-colors hover:bg-surface-variant"
+            onClick={openCodeRepositoryPicker}
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>terminal</span>
+            添加代码库
+          </button>
           {sourceFiles.length ? (
             <button
               type="button"
@@ -688,12 +802,38 @@ export function UploadCard({
                 setSourceWarnings([])
                 setLarkTitle(null)
                 setLoadedLarkUrl(null)
+                setLoadedGithubRepoUrl(null)
               }}
             >
               <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>delete</span>
               清空
             </button>
           ) : null}
+        </div>
+
+        <div className="mt-sm grid gap-sm sm:grid-cols-[minmax(0,1fr)_auto]">
+          <input
+            value={githubRepoUrl}
+            onChange={(event) => setGithubRepoUrl(event.target.value)}
+            className="min-h-[42px] min-w-0 rounded-lg border border-outline-variant bg-surface px-md py-sm text-body-md text-on-surface outline-none transition-colors placeholder:text-on-surface-variant/60 focus:border-secondary"
+            placeholder="https://github.com/org/repo"
+          />
+          <button
+            type="button"
+            onClick={() => { void handleFetchGithubRepository() }}
+            disabled={!normalizedGithubRepoUrl || isFetchingGithub}
+            className={[
+              'flex min-h-[42px] items-center justify-center gap-2 rounded-lg px-4 py-2 text-label-md transition-colors',
+              normalizedGithubRepoUrl && !isFetchingGithub
+                ? 'border border-secondary/40 bg-secondary/10 text-secondary hover:bg-secondary/20'
+                : 'cursor-not-allowed border border-outline-variant bg-surface-container text-on-surface-variant opacity-60',
+            ].join(' ')}
+          >
+            <span className={['material-symbols-outlined', isFetchingGithub ? 'animate-spin' : ''].join(' ').trim()} style={{ fontSize: '18px' }}>
+              {isFetchingGithub ? 'sync' : 'cloud_download'}
+            </span>
+            {isFetchingGithub ? '读取中...' : '添加 GitHub'}
+          </button>
         </div>
 
         {sourceFiles.length ? (
@@ -710,7 +850,7 @@ export function UploadCard({
           </div>
         ) : (
           <div className="mt-sm rounded border border-dashed border-outline-variant bg-surface/40 px-md py-sm text-body-md text-on-surface-variant">
-            尚未添加素材。可以添加多个文件，也可以多次添加不同文件夹。
+            尚未添加素材。
           </div>
         )}
       </section>
@@ -728,6 +868,16 @@ export function UploadCard({
       />
       <input
         ref={directoryInputRef}
+        type="file"
+        multiple
+        style={{ display: 'none' }}
+        onChange={(event) => {
+          void mergeSelectedFiles(Array.from(event.target.files ?? []))
+          event.target.value = ''
+        }}
+      />
+      <input
+        ref={codeRepositoryInputRef}
         type="file"
         multiple
         style={{ display: 'none' }}

@@ -1,19 +1,20 @@
 <!-- GSD:project-start source:PROJECT.md -->
 ## Project
 
-**GameUX PromptForge — PRD 文档拆解导图**
+**UX SpecForge — 跨端交互规格导图**
 
-GameUX PromptForge 是一个面向游戏策划和交互设计师的桌面工具，用于将大型PRD文档自动拆解为可交互的思维导图，并对每个UI交互节点进行AI辅助的需求打磨，最终导出一套完整的交互设计spec文档。
+UX SpecForge 是一个面向产品经理、交互设计师、游戏策划和多端客户端团队的本地 Web/桌面工具，用于将大型 PRD、设计稿和素材证据拆解为可交互的 UI 流程导图，并对每个页面/交互节点进行 AI 辅助需求打磨，最终导出可交付给 H5、Android、iOS 和游戏客户端实现的交互设计 spec 文档包。
 
-**Core Value:** **将模糊的PRD文档转化为精确的、经过逐节点确认的交互设计规格**——用户上传一份大文档，经过结构化拆解和逐项打磨后，获得可直接交付给开发的详细spec文件夹。
+**Core Value:** **将模糊的 PRD 与设计证据转化为精确的、经过逐节点确认的跨端交互设计规格**——用户上传一份大文档和相关证据，经过结构化拆解和逐项打磨后，获得可直接交付给开发的详细 spec 文件夹。
 
 ### Constraints
 
-- **交付形式**: 先Web版开发验证，后续包装Tauri桌面应用
+- **交付形式**: 先 Web 版开发验证，后续包装 Tauri 桌面应用
 - **技术栈**: 保持现有 React + Vite + Tailwind + Zustand + Express 栈
-- **AI后端**: 继续使用Anthropic Claude API（通过本地Express代理）
+- **AI 后端**: 继续通过本地 Express 代理调用 Anthropic/Claude API
 - **设计规范**: 严格遵循 stitch/ 目录中的设计稿和 "Forge Blueprint" 设计系统
-- **单文档**: 一次只处理一份PRD，不做并行管理
+- **目标平台**: 覆盖 H5、Android、iOS 和游戏客户端的交互规格输出
+- **单文档**: 一次只处理一份 PRD，不做并行管理
 <!-- GSD:project-end -->
 
 <!-- GSD:stack-start source:codebase/STACK.md -->
@@ -30,7 +31,7 @@ GameUX PromptForge 是一个面向游戏策划和交互设计师的桌面工具�
 ## Frameworks
 - React (latest) - Component model; no router, single-page no-nav app
 - Vite (latest) - Dev server on `http://127.0.0.1:5173`, production bundler
-- Zustand ^5.0.13 with `persist` middleware - single global store persisted to `localStorage` under key `gameux-promptforge-state` at version `3`
+- Zustand ^5.0.13 with `persist` middleware - single global store persisted to `localStorage` under key `ux-specforge-state` at version `17` (migrates from legacy `gameux-promptforge-state`)
 - Tailwind CSS ^3.4.17 - utility-first; extensive custom design tokens in `tailwind.config.js`
 - PostCSS + Autoprefixer (devDependencies)
 - Tauri ^2.11.2 (CLI) / ^2.11.0 (API) - wraps the Vite app as a native desktop window
@@ -63,7 +64,7 @@ GameUX PromptForge 是一个面向游戏策划和交互设计师的桌面工具�
 - Windows-specific env paths hardcoded in `tauri:dev:windows` script (`RUSTUP_HOME`, `CARGO_HOME`)
 - Tauri desktop bundle (targets: all) via `npx tauri build`
 - Express proxy must run as a separate process; not bundled into the Tauri binary
-- App identifier: `com.gameux.promptforge`
+- App identifier: `com.uxspecforge.app`
 <!-- GSD:stack-end -->
 
 <!-- GSD:conventions-start source:CONVENTIONS.md -->

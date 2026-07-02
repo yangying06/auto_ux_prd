@@ -13,6 +13,7 @@ interface NodeCardProps {
   previewHtml?: string | null
   onNodeClick: (id: string) => void
   onNodeDoubleClick: (id: string) => void
+  onOpenForge?: (id: string) => void
   onOpenStatePreview?: (id: string) => void
 }
 
@@ -133,7 +134,7 @@ function nodeKindMeta(node: PrdNode, tree: PrdTree) {
   return { icon: 'conversion_path', label: '交互细节' }
 }
 
-export function NodeCard({ node, tree, isSelected, previewHtml, onNodeClick, onNodeDoubleClick, onOpenStatePreview }: NodeCardProps) {
+export function NodeCard({ node, tree, isSelected, previewHtml, onNodeClick, onNodeDoubleClick, onOpenForge, onOpenStatePreview }: NodeCardProps) {
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const specLens = resolveNodeSpecLens(node)
   const lensLabel = formatSpecLens(specLens)
@@ -166,6 +167,26 @@ export function NodeCard({ node, tree, isSelected, previewHtml, onNodeClick, onN
       clickTimerRef.current = null
     }
     onOpenStatePreview?.(node.id)
+  }
+
+  function handleOpenDetails(event: MouseEvent<HTMLButtonElement>) {
+    event.preventDefault()
+    event.stopPropagation()
+    if (clickTimerRef.current) {
+      clearTimeout(clickTimerRef.current)
+      clickTimerRef.current = null
+    }
+    onNodeDoubleClick(node.id)
+  }
+
+  function handleOpenForge(event: MouseEvent<HTMLButtonElement>) {
+    event.preventDefault()
+    event.stopPropagation()
+    if (clickTimerRef.current) {
+      clearTimeout(clickTimerRef.current)
+      clickTimerRef.current = null
+    }
+    onOpenForge?.(node.id)
   }
 
   if (node.type === 'module' && node.parentId === null) {
@@ -280,9 +301,28 @@ export function NodeCard({ node, tree, isSelected, previewHtml, onNodeClick, onN
               状态
             </button>
           ) : null}
-          <span className="font-label-md text-label-md text-primary opacity-0 transition-opacity group-hover:opacity-100">
-            {canForge ? '双击打磨' : '单击查看'}
-          </span>
+          <button
+            type="button"
+            onClick={handleOpenDetails}
+            className="inline-flex min-h-[26px] items-center gap-[3px] rounded border border-outline-variant bg-surface-container-high px-xs text-label-md font-medium text-on-surface-variant transition-colors hover:border-primary hover:text-primary"
+            title="打开右侧详情"
+            aria-label={`打开「${node.label}」详情`}
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>dock_to_right</span>
+            详情
+          </button>
+          {canForge && onOpenForge ? (
+            <button
+              type="button"
+              onClick={handleOpenForge}
+              className="inline-flex min-h-[26px] items-center gap-[3px] rounded border border-secondary/55 bg-secondary-container px-xs text-label-md font-medium text-on-secondary-container transition-colors hover:border-secondary hover:bg-secondary-container/90"
+              title="进入 Deep Forge 打磨文档包"
+              aria-label={`打磨「${node.label}」文档包`}
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>construction</span>
+              打磨
+            </button>
+          ) : null}
         </div>
       </div>
     </div>
