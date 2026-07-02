@@ -1,4 +1,4 @@
-import type { DocumentSourceIssue, PrdImportCandidateNode, PrdImportPreview } from '../../types/prdNode'
+import type { DocumentSourceIssue, PrdImportCandidateNode, PrdImportPreview, ProjectUiFlowEdge } from '../../types/prdNode'
 import type { ProjectWorkflowState } from '../../types/projectWorkflow'
 
 interface ImportPreviewProps {
@@ -50,6 +50,27 @@ function uiFlowNodeLabel(preview: PrdImportPreview, nodeId: string) {
 
 function uiFlowPathLabels(preview: PrdImportPreview, nodeIds: string[]) {
   return nodeIds.map((nodeId) => uiFlowNodeLabel(preview, nodeId)).filter(Boolean)
+}
+
+function cleanFlowText(value: string | null | undefined, maxLength = 120) {
+  const text = String(value ?? '')
+    .replace(/\s+/g, ' ')
+    .replace(/^(UI Flow|Figma UX Map|PRD\+Figma UI Flow)\s*[:：]\s*/iu, '')
+    .replace(/^Figma\s*(箭头连接|连接线)\s*[:：-]?\s*/iu, '')
+    .replace(/^PRD\s*(流程|段落)?\s*[:：-]?\s*/iu, '')
+    .trim()
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text
+}
+
+function uiFlowEdgeIntent(edge: ProjectUiFlowEdge) {
+  return cleanFlowText(edge.trigger) || cleanFlowText(edge.effect) || '未命名流转'
+}
+
+function uiFlowEdgeEvidence(edge: ProjectUiFlowEdge) {
+  const refs = edge.evidenceRefs
+    .map((ref) => cleanFlowText(ref.quote || ref.label, 96))
+    .filter(Boolean)
+  return refs.slice(0, 2).join(' / ')
 }
 
 export function ImportPreview({ preview, isLoading, error, projectWorkflow, onConfirm, onReset }: ImportPreviewProps) {
@@ -245,6 +266,26 @@ export function ImportPreview({ preview, isLoading, error, projectWorkflow, onCo
                 <p className="mt-[2px] text-body-sm text-on-surface-variant">暂未形成稳定端到端流程，请检查 Figma 连线或 PRD 流程描述。</p>
               )}
             </div>
+            {projectUiFlow.edges.length ? (
+              <div className="rounded border border-outline-variant/70 bg-surface-container px-sm py-xs">
+                <p className="text-code-sm text-on-surface-variant">关键流转</p>
+                <div className="custom-scrollbar mt-xs flex max-h-28 flex-col gap-xs overflow-y-auto pr-xs">
+                  {projectUiFlow.edges.slice(0, 5).map((edge) => {
+                    const evidence = uiFlowEdgeEvidence(edge)
+                    return (
+                      <article key={edge.id} className="rounded border border-secondary/20 bg-secondary/5 px-xs py-[3px]">
+                        <p className="truncate text-body-sm text-on-surface" title={`${uiFlowNodeLabel(preview, edge.sourceNodeId)} → ${uiFlowNodeLabel(preview, edge.targetNodeId)}：${uiFlowEdgeIntent(edge)}`}>
+                          {uiFlowNodeLabel(preview, edge.sourceNodeId)} → {uiFlowNodeLabel(preview, edge.targetNodeId)}：{uiFlowEdgeIntent(edge)}
+                        </p>
+                        {evidence ? (
+                          <p className="mt-[1px] line-clamp-1 text-code-sm text-on-surface-variant" title={evidence}>证据：{evidence}</p>
+                        ) : null}
+                      </article>
+                    )
+                  })}
+                </div>
+              </div>
+            ) : null}
             {projectUiFlow.ambiguities.length ? (
               <div className="rounded border border-secondary/40 bg-surface-container px-sm py-xs text-body-sm text-on-surface-variant">
                 {projectUiFlow.ambiguities.slice(0, 2).map((ambiguity) => ambiguity.message).join('；')}

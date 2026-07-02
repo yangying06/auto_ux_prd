@@ -330,6 +330,52 @@ export function collectNearbyFigmaAnnotations(
   return uniqueTexts(scored.map((item) => item.text), maxItems)
 }
 
+export function collectNearbyFigmaInteractionTips(
+  frame: FigmaSemanticFrame,
+  candidates: FigmaAnnotationCandidate[],
+  maxItems = 8,
+) {
+  // Figma 交互 tips 通常作为 callout 画在界面 frame 外部（上方/右侧），
+  // 不能仅用「中心点落在 frame 内」判定，否则几乎采集不到。
+  // 这里复用 nearby 几何判定，对 interaction_tip 候选放宽距离阈值。
+  const visibleTextKeys = new Set(frame.visibleTexts.map((text) => compact(text).toLocaleLowerCase()))
+  const scored = candidates
+    .filter((candidate) => candidate.kind === 'interaction_tip')
+    .map((candidate) => {
+      const text = compact(candidate.text, 180)
+      if (!text || visibleTextKeys.has(text.toLocaleLowerCase())) return null
+
+      const horizontalOverlap = overlapLength(candidate.x, candidate.width, frame.x, frame.width)
+      const verticalOverlap = overlapLength(candidate.y, candidate.height, frame.y, frame.height)
+      const horizontalRatio = horizontalOverlap / Math.max(1, Math.min(candidate.width, frame.width))
+      const verticalRatio = verticalOverlap / Math.max(1, Math.min(candidate.height, frame.height))
+      const aboveDistance = frame.y - (candidate.y + candidate.height)
+      const belowDistance = candidate.y - (frame.y + frame.height)
+      const leftDistance = frame.x - (candidate.x + candidate.width)
+      const rightDistance = candidate.x - (frame.x + frame.width)
+
+      const inside = horizontalOverlap > 0 && verticalOverlap > 0
+      const above = aboveDistance >= -24 && aboveDistance <= 320 && horizontalRatio >= 0.1
+      const below = belowDistance >= -12 && belowDistance <= 240 && horizontalRatio >= 0.1
+      const left = leftDistance >= -24 && leftDistance <= 420 && verticalRatio >= 0.08
+      const right = rightDistance >= -24 && rightDistance <= 420 && verticalRatio >= 0.08
+      if (!inside && !above && !below && !left && !right) return null
+
+      const distance = Math.min(
+        inside ? 0 : Number.POSITIVE_INFINITY,
+        above ? Math.max(0, aboveDistance) : Number.POSITIVE_INFINITY,
+        below ? Math.max(0, belowDistance) : Number.POSITIVE_INFINITY,
+        left ? Math.max(0, leftDistance) : Number.POSITIVE_INFINITY,
+        right ? Math.max(0, rightDistance) : Number.POSITIVE_INFINITY,
+      )
+      return { text, score: distance }
+    })
+    .filter((item): item is { text: string; score: number } => Boolean(item))
+    .sort((a, b) => a.score - b.score)
+
+  return uniqueTexts(scored.map((item) => item.text), maxItems)
+}
+
 function cleanTargetHint(value: string | null | undefined) {
   const text = compact(value, 48)
     .replace(/[，。；;、].*$/u, '')

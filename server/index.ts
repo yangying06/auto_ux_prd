@@ -20,8 +20,9 @@ import type { ChatMessage as AppChatMessage, ReferenceImageClassificationRequest
 import type { QaAttachment, QaChatRequest, QaChatResponse, QaIssuePatch, QaIssuePriority, QaIssueSeverity } from '../src/types/qa'
 import { contentDispositionHeader } from './exportHeaders'
 import { buildFigmaPrdAlignment, type FigmaPrdAlignmentGroup, type FigmaPrdAlignmentMatch, type FigmaPrdAlignmentSection } from './figmaPrdAlignment'
+import { formatFigmaInteractionTipRequirement, formatFigmaInteractionTipsMarkdown, formatFigmaRelationLabel, formatFigmaRelationReason } from './figmaFlowSemantics'
 import { collectFigmaNumericTextSlots, redactNumericTextFromPng } from './figmaNumericText'
-import { buildFigmaUiStatesForFrames, buildHeuristicFigmaUxMap, chooseFigmaMetaTargetEndpointIndex, chooseStableFigmaLineMergeCandidate, classifyFigmaUiState, collectNearbyFigmaAnnotations, createFigmaStateTransition, extractFigmaStateTransitionCue, figmaUiStateKindLabel, isStrictFigmaInterfaceFrameSize, normalizeFigmaScreenFamilyLabel, normalizeFigmaUxMap, uniqueFigmaStateTransitions, type FigmaAnnotationCandidate } from './figmaSemantics'
+import { buildFigmaUiStatesForFrames, buildHeuristicFigmaUxMap, chooseFigmaMetaTargetEndpointIndex, chooseStableFigmaLineMergeCandidate, classifyFigmaUiState, collectNearbyFigmaAnnotations, collectNearbyFigmaInteractionTips, createFigmaStateTransition, extractFigmaStateTransitionCue, figmaUiStateKindLabel, isStrictFigmaInterfaceFrameSize, normalizeFigmaScreenFamilyLabel, normalizeFigmaUxMap, uniqueFigmaStateTransitions, type FigmaAnnotationCandidate } from './figmaSemantics'
 import { extractNodeChatSuffix } from './nodeChatResponse'
 import { auditPrototypeAssets, buildPrototypeAssetManifestSection, normalizePrototypeAssetManifest } from './prototypeAssetAudit'
 import { buildVariantConfigs, clampVariantCount, DEFAULT_CREATE_VARIANTS, DEFAULT_UPDATE_VARIANTS } from './prototypePrompts'
@@ -2007,8 +2008,7 @@ function isFigmaInteractionTipText(text: string, name: string, path: string) {
 }
 
 function formatFigmaInteractionTip(text: string) {
-  const compacted = compactFigmaText(text, 180)
-  return compacted ? `交互提示：${compacted}` : ''
+  return formatFigmaInteractionTipRequirement(text)
 }
 
 function collectFigmaAnnotationCandidates(root: FigmaApiNode) {
@@ -2044,21 +2044,16 @@ function collectFigmaAnnotationCandidates(root: FigmaApiNode) {
   return candidates
 }
 
-function annotationCenterInsideFrame(candidate: FigmaAnnotationCandidate, frame: FigmaDesignEvidenceFrame) {
-  const cx = candidate.x + candidate.width / 2
-  const cy = candidate.y + candidate.height / 2
-  return cx >= frame.x && cx <= frame.x + frame.width && cy >= frame.y && cy <= frame.y + frame.height
-}
-
 function collectFigmaInteractionTipsForFrame(
   frame: FigmaDesignEvidenceFrame,
   candidates: FigmaAnnotationCandidate[],
   maxItems = 8,
 ) {
+  // 兼容「中心落在 frame 内」与「画在 frame 外侧的 callout」两种 Figma 标注习惯。
+  const nearbyTexts = collectNearbyFigmaInteractionTips(frame, candidates, maxItems)
   return figmaTextList(
-    candidates
-      .filter((candidate) => candidate.kind === 'interaction_tip' && annotationCenterInsideFrame(candidate, frame))
-      .map((candidate) => formatFigmaInteractionTip(candidate.text)),
+    nearbyTexts
+      .map((text) => formatFigmaInteractionTip(text)),
     maxItems,
   )
 }
@@ -2546,7 +2541,7 @@ function relationLabelFromConnector(connector: FigmaConnectorCandidate) {
 }
 
 function relationReasonFromConnector(connector: FigmaConnectorCandidate, source: FigmaDesignEvidenceGroup, target: FigmaDesignEvidenceGroup) {
-  return `Figma connector ${connector.name} (${connector.id}) connects “${source.label}” to “${target.label}”; ${connector.bounds}.`
+  return `Figma 连接线「${connector.name}」(${connector.id}) 连接「${source.label}」到「${target.label}」；${connector.bounds}。`
 }
 
 function relationLabelFromVectorConnector(connector: FigmaConnectorCandidate) {
@@ -2574,16 +2569,20 @@ function relationReasonFromVectorConnector(
 ) {
   const sourceFrame = nearestFigmaFrameInGroup(source, sourcePoint)
   const targetFrame = nearestFigmaFrameInGroup(target, targetPoint)
-  const summary = [
-    `${connector.name} (${connector.id}): ${source.label} -> ${target.label}.`,
-    `direction=${direction}; source=${connectorPointLabel(sourcePoint)}; target=${connectorPointLabel(targetPoint)}.`,
-    sourceFrame ? `sourceFrame=${sourceFrame.name} (${sourceFrame.id}).` : null,
-    targetFrame ? `targetFrame=${targetFrame.name} (${targetFrame.id}).` : null,
-  ].join(' ')
-  return [
-    summary,
-    relationReasonFromConnector(connector, source, target),
-  ].join(' ')
+  return formatFigmaRelationReason({
+    connectorName: connector.name,
+    connectorId: connector.id,
+    connectorBounds: connector.bounds,
+    sourceGroup: source,
+    targetGroup: target,
+    sourceFrame,
+    targetFrame,
+    direction,
+    sourcePoint: connectorPointLabel(sourcePoint),
+    targetPoint: connectorPointLabel(targetPoint),
+    fallbackLabel: relationLabelFromVectorConnector(connector),
+    fallbackReason: relationReasonFromConnector(connector, source, target),
+  })
 }
 
 function relationReasonFromMergedConnector(
@@ -2663,10 +2662,24 @@ function inferFigmaConnectorRelations(root: FigmaApiNode, groups: FigmaDesignEvi
     reason = relationReasonFromVectorConnector(connector, source, target, sourcePoint, targetPoint, direction),
   ) => {
     if (source.key === target.key) return
+    const sourceFrame = nearestFigmaFrameInGroup(source, sourcePoint)
+    const targetFrame = nearestFigmaFrameInGroup(target, targetPoint)
     relations.push({
       sourceGroupKey: source.key,
       targetGroupKey: target.key,
-      label: relationLabelFromVectorConnector(connector),
+      label: formatFigmaRelationLabel({
+        connectorName: connector.name,
+        connectorId: connector.id,
+        connectorBounds: connector.bounds,
+        sourceGroup: source,
+        targetGroup: target,
+        sourceFrame,
+        targetFrame,
+        direction,
+        sourcePoint: connectorPointLabel(sourcePoint),
+        targetPoint: connectorPointLabel(targetPoint),
+        fallbackLabel: relationLabelFromVectorConnector(connector),
+      }),
       reason,
       confidence: Math.max(65, 96 - Math.round(distanceSum)),
       source: 'figma_connector',
@@ -2896,7 +2909,7 @@ function extractPrdInterfaceRelations(rawPrdText: string, groups: FigmaDesignEvi
           relations.push({
             sourceGroupKey: sourceGroup.key,
             targetGroupKey: targetGroup.key,
-            label: `PRD流程：${keyword ?? '流程'}`,
+            label: keyword || '依次进入下一界面',
             reason: `PRD 第 ${lineNumber} 行流程：“${compactFigmaText(fragment, 160)}”`,
             confidence: 84,
             source: 'prd_text',
@@ -2914,7 +2927,7 @@ function extractPrdInterfaceRelations(rawPrdText: string, groups: FigmaDesignEvi
             relations.push({
               sourceGroupKey: sourceGroup.key,
               targetGroupKey: target.group.key,
-              label: `PRD：${keyword}`,
+              label: keyword,
               reason: `PRD 第 ${lineNumber} 行：“${compactFigmaText(fragment, 140)}”`,
               confidence: 78,
               source: 'prd_text',
@@ -2931,7 +2944,7 @@ function extractPrdInterfaceRelations(rawPrdText: string, groups: FigmaDesignEvi
           relations.push({
             sourceGroupKey: source.key,
             targetGroupKey: target.key,
-            label: `PRD：${keyword}`,
+            label: keyword,
             reason: `PRD 第 ${lineNumber} 行：“${compactFigmaText(fragment, 140)}”`,
             confidence: 82,
             source: 'prd_text',
@@ -2944,7 +2957,7 @@ function extractPrdInterfaceRelations(rawPrdText: string, groups: FigmaDesignEvi
         relations.push({
           sourceGroupKey: currentGroup.key,
           targetGroupKey: fragmentMatches[0].group.key,
-          label: `PRD：${keyword}`,
+          label: keyword,
           reason: `PRD 第 ${lineNumber} 行：“${compactFigmaText(fragment, 140)}”`,
           confidence: 76,
           source: 'prd_text',
@@ -3908,7 +3921,7 @@ function projectUiFlowNodeLabel(flow: ProjectUiFlow, flowNodeId: string) {
 }
 
 function projectUiFlowEdgeLabel(edge: ProjectUiFlowEdge) {
-  return `UI Flow：${edge.trigger ?? edge.effect ?? '流程流转'}`
+  return edge.trigger ?? edge.effect ?? '流程流转'
 }
 
 function projectUiFlowEdgeReason(edge: ProjectUiFlowEdge, flow: ProjectUiFlow) {
@@ -4014,7 +4027,7 @@ function prdStateIdForUxState(node: PrdNode | null | undefined, map: FigmaUxMap 
 }
 
 function uxTransitionLabel(transition: FigmaUxMapTransition) {
-  return transition.trigger ?? transition.effect ?? 'Figma UX Map 流转'
+  return transition.trigger ?? transition.effect ?? '流程流转'
 }
 
 function uxTransitionReason(transition: FigmaUxMapTransition, map: FigmaUxMap) {
@@ -4048,7 +4061,7 @@ function applyFigmaUxMapTransitions(nodes: PrdNode[], evidence: FigmaDesignEvide
       source: transition.source,
     }))
     if (sourceNode.id !== targetNode.id) {
-      applyFigmaReference(sourceNode, targetNode, `Figma UX Map：${uxTransitionLabel(transition)}`, uxTransitionReason(transition, map))
+      applyFigmaReference(sourceNode, targetNode, uxTransitionLabel(transition), uxTransitionReason(transition, map))
     }
     applied = true
   }
@@ -4585,10 +4598,12 @@ function buildFigmaPageNodes(evidence: FigmaDesignEvidence, rawPrdText?: string 
       .slice(0, 12)
       .map((text) => `- ${text}`)
       .join('\n') || '- 无可见文本样本'
+    const figmaInteractionTips = formatFigmaInteractionTipsMarkdown(group.frames)
+    const hasFigmaInteractionTips = !figmaInteractionTips.includes('未识别到 Figma interaction tips')
     const evidenceRefs: PrdNodeEvidenceRef[] = group.frames.slice(0, 5).map((frame) => ({
       sourceKind: 'upload',
       sourceLabel: `Figma：${frame.name}`,
-      quote: frame.visibleTexts.slice(0, 3).join(' / ') || `${Math.round(frame.width)}×${Math.round(frame.height)}`,
+      quote: frame.interactionTips.slice(0, 2).join(' / ') || frame.visibleTexts.slice(0, 3).join(' / ') || `${Math.round(frame.width)}×${Math.round(frame.height)}`,
     }))
     const allEvidenceRefs = [...evidenceRefs, ...(prdSupplement?.evidenceRefs ?? [])]
 
@@ -4615,6 +4630,9 @@ function buildFigmaPageNodes(evidence: FigmaDesignEvidence, rawPrdText?: string 
         '## Figma 状态矩阵',
         stateMatrix,
         '',
+        '## Figma 交互提示',
+        figmaInteractionTips,
+        '',
         '## 需澄清点',
         '- Figma 未表达的接口字段、服务端规则、计费、权限、异常分支和验收口径，需要结合导入素材或后续打磨补齐。',
       ].join('\n'),
@@ -4637,12 +4655,17 @@ function buildFigmaPageNodes(evidence: FigmaDesignEvidence, rawPrdText?: string 
           evidenceRefs,
           openQuestions: [],
         },
-        ...(prdSupplement ? {
+        ...(hasFigmaInteractionTips || prdSupplement ? {
           interaction: {
-            title: `${group.label} PRD 补充`,
-            summary: '从导入素材中匹配到的功能、交互或规则补充。',
-            content: prdSupplement.content,
-            evidenceRefs: prdSupplement.evidenceRefs,
+            title: `${group.label} Flow`,
+            summary: hasFigmaInteractionTips
+              ? '已从 Figma tips 中提取可交互行为，后续 FlowGraph 会继续补充上下游。'
+              : '从导入素材中匹配到的功能、交互或规则补充。',
+            content: uniqueTextBlocks([
+              hasFigmaInteractionTips ? `## Figma 交互提示\n${figmaInteractionTips}` : null,
+              prdSupplement?.content,
+            ]).join('\n\n'),
+            evidenceRefs: prdSupplement?.evidenceRefs ?? evidenceRefs,
             openQuestions: [],
           },
         } : {}),

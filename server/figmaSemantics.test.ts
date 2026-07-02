@@ -6,6 +6,7 @@ import {
   chooseStableFigmaLineMergeCandidate,
   classifyFigmaUiState,
   collectNearbyFigmaAnnotations,
+  collectNearbyFigmaInteractionTips,
   createFigmaStateTransition,
   extractFigmaStateTransitionCue,
   isStrictFigmaInterfaceFrameSize,
@@ -82,6 +83,34 @@ const annotations = collectNearbyFigmaAnnotations(
   ],
 )
 assert.deepEqual(annotations, ['注释：长按礼物图标打开AI礼物预览浮层'], 'nearby annotations exclude inside and far text')
+
+const tipFrame = {
+  id: '22:1774',
+  name: 'AI礼物预览_半屏浮层',
+  sourceUrl: 'https://figma.example',
+  x: 100,
+  y: 200,
+  width: 375,
+  height: 812,
+  visibleTexts: ['赠送'],
+}
+const tips = collectNearbyFigmaInteractionTips(
+  tipFrame,
+  [
+    // callout 画在 frame 右侧外部 —— Figma 常见标注习惯
+    { id: 'tip-right', text: 'Interaction tip: Long press the gift to preview it~', x: 500, y: 240, width: 220, height: 28, kind: 'interaction_tip' },
+    // callout 画在 frame 上方外部
+    { id: 'tip-above', text: '交互提示：点击案例查看礼物效果', x: 120, y: 150, width: 240, height: 24, kind: 'interaction_tip' },
+    // 普通注解，应被过滤
+    { id: 'anno-1', text: '注释：颜色规范', x: 110, y: 140, width: 120, height: 20, kind: 'annotation' },
+    // 距离过远的 tips，应被排除
+    { id: 'tip-far', text: 'Interaction tip: 远处无关提示', x: 3000, y: 3000, width: 200, height: 24, kind: 'interaction_tip' },
+  ],
+)
+assert.ok(tips.includes('Interaction tip: Long press the gift to preview it~'), 'interaction tips drawn OUTSIDE the frame (right-side callout) are still collected')
+assert.ok(tips.includes('交互提示：点击案例查看礼物效果'), 'interaction tips drawn above the frame are collected')
+assert.ok(!tips.some((text) => text.includes('颜色规范')), 'plain annotations are excluded from interaction tips')
+assert.ok(!tips.some((text) => text.includes('远处无关提示')), 'far-away tips are excluded by geometry')
 
 const cue = extractFigmaStateTransitionCue('长按礼物图标打开AI礼物预览_半屏浮层')
 assert.ok(cue, 'trigger phrase is parsed from frame title')

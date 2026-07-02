@@ -1220,6 +1220,9 @@ const GENERIC_REFERENCE_LABELS = new Set([
   '跳转',
   '关联',
   '引用',
+  'Figma 箭头连接',
+  'Figma 连接线',
+  '流程流转',
 ])
 
 const REFERENCE_TRIGGER_VERBS = [
@@ -1262,7 +1265,7 @@ function extractTriggerPhrase(haystack: string, targetLabel: string) {
   return ''
 }
 
-const REFERENCE_LABEL_MAX = 10
+const REFERENCE_LABEL_MAX = 14
 
 function briefLabel(text: string, max = REFERENCE_LABEL_MAX) {
   const t = cleanReferenceText(text)
@@ -1271,16 +1274,46 @@ function briefLabel(text: string, max = REFERENCE_LABEL_MAX) {
   return t.slice(0, max) + '…'
 }
 
+function cleanReferenceLabel(text: string | null | undefined) {
+  const normalized = cleanReferenceText(text)
+    .replace(/^(UI Flow|Figma UX Map|PRD\+Figma UI Flow)\s*[:：]\s*/iu, '')
+    .replace(/^Figma\s*(箭头连接|连接线)\s*[:：-]?\s*/iu, '')
+    .replace(/^PRD\s*(流程|段落)?\s*[:：-]?\s*/iu, '')
+    .replace(/^Vector\s+\d+\s*[:：-]?\s*/iu, '')
+    .trim()
+  if (!normalized) return ''
+  if (GENERIC_REFERENCE_LABELS.has(normalized)) return ''
+  if (/^Vector\s+\d+$/iu.test(normalized)) return ''
+  return normalized
+}
+
+function extractIntentFromReason(reason: string | null | undefined) {
+  const text = cleanReferenceText(reason)
+  if (!text) return ''
+  const intent = text.match(/交互意图[:：]\s*([^。\n；;]+)/u)?.[1]
+  if (intent) return cleanReferenceLabel(intent) || cleanReferenceText(intent)
+  const tip = text.match(/交互提示[:：]\s*([^。\n；;/]+)/u)?.[1]
+  if (tip) return cleanReferenceText(tip)
+  return ''
+}
+
 function deriveReferenceEdgeLabel(source: PrdNode, target: PrdNode, references: NonNullable<PrdNode['references']>) {
   const targetLabel = cleanReferenceText(target.label) || '目标'
   const referenceCount = references.length
 
   const meaningfulLabels = references
-    .map((reference) => cleanReferenceText(reference.label))
-    .filter((label) => Boolean(label) && !GENERIC_REFERENCE_LABELS.has(label))
+    .map((reference) => cleanReferenceLabel(reference.label))
+    .filter(Boolean)
   if (meaningfulLabels.length === 1) return briefLabel(meaningfulLabels[0])
   if (meaningfulLabels.length > 1 && referenceCount > 1) {
     return briefLabel(meaningfulLabels[0]) + ' 等' + referenceCount + '条'
+  }
+
+  const intentLabels = references
+    .map((reference) => extractIntentFromReason(reference.reason))
+    .filter(Boolean)
+  if (intentLabels.length) {
+    return referenceCount > 1 ? briefLabel(intentLabels[0]) + ' 等' + referenceCount + '条' : briefLabel(intentLabels[0])
   }
 
   const meaningfulReasons = references
