@@ -239,19 +239,40 @@ const tipState = uxMap.states[0]!
 const tipFallback = {
   ...uxMap,
   states: uxMap.states.map((state) => state.id === tipState.id
-    ? { ...state, annotations: ['Interaction tip: Long press the gift to preview it~', 'Original note'] }
+    ? { ...state, annotations: ['Interaction tip: Long press the gift to preview it~', '交互提示：长按礼物图标打开预览浮层', 'Original note'] }
     : state),
 }
 const tipProtectedReview = normalizeFigmaUxMap({
   states: [
     {
       id: tipState.id,
-      annotations: ['AI reviewed note'],
+      annotations: ['AI总结：礼物预览用于确认生成效果。'],
     },
   ],
 }, tipFallback)
 const protectedTipState = tipProtectedReview?.states.find((state) => state.id === tipState.id)
-assert.ok(protectedTipState?.annotations.includes('Interaction tip: Long press the gift to preview it~'), 'Interaction tips survive AI annotation review')
-assert.ok(protectedTipState?.annotations.includes('AI reviewed note'), 'AI-reviewed annotations are still accepted alongside locked tips')
+assert.ok(protectedTipState?.annotations.some((item) => item.includes('长按礼物图标打开预览浮层')), 'Chinese interaction tips survive AI annotation review')
+assert.ok(protectedTipState?.annotations.includes('AI总结：礼物预览用于确认生成效果。'), 'Chinese AI-reviewed annotations are accepted alongside locked tips')
+assert.ok(!protectedTipState?.annotations.some((item) => /Long press|Original note/u.test(item)), 'English annotation text is filtered from state annotations')
+
+const visualSummaryReview = normalizeFigmaUxMap({
+  screens: [
+    {
+      id: uxMap.screens[0]?.id,
+      label: '礼物预览主界面',
+    },
+  ],
+  states: [
+    {
+      id: tipState.id,
+      label: '礼物预览默认态',
+      annotations: ['AI总结：该界面预览生成后的礼物，并说明长按入口。'],
+    },
+  ],
+}, tipFallback)
+const visualSummaryState = visualSummaryReview?.states.find((state) => state.id === tipState.id)
+assert.equal(visualSummaryReview?.screens[0]?.label, '礼物预览主界面', 'AI review can replace a weak frame-derived screen title')
+assert.equal(visualSummaryState?.label, '礼物预览默认态', 'AI review can replace a weak frame-derived state title')
+assert.ok(visualSummaryState?.annotations.some((item) => item.startsWith('AI总结：')), 'Chinese AI visual summary is carried in state annotations')
 
 console.log('figmaSemantics.test.ts: all assertions passed')

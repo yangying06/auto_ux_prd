@@ -202,6 +202,28 @@ function uniqueTexts(values: Array<string | null | undefined>, maxItems: number)
   return result
 }
 
+function annotationBodyText(value: string) {
+  return value.replace(/^(?:AI总结|交互提示|注释|说明|备注|标注)\s*[:：]\s*/u, '').trim()
+}
+
+function isChineseAnnotationText(value: string) {
+  return /[\u3400-\u9fff]/u.test(annotationBodyText(value))
+}
+
+function uniqueChineseAnnotations(values: Array<string | null | undefined>, maxItems: number) {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const value of values) {
+    const text = compact(value)
+    const key = text.replace(/\s+/g, ' ').toLocaleLowerCase()
+    if (!text || !isChineseAnnotationText(text) || seen.has(key)) continue
+    seen.add(key)
+    result.push(text)
+    if (result.length >= maxItems) break
+  }
+  return result
+}
+
 function cleanupStateLabel(name: string, groupLabel?: string | null) {
   let label = compact(name, 64)
   const group = compact(groupLabel, 64)
@@ -381,7 +403,7 @@ export function buildFigmaUiStatesForFrames(
       sourceUrl: frame.sourceUrl,
       previewImageUrl: frame.assetUrl ?? null,
       visibleTexts: uniqueTexts(frame.visibleTexts, 12),
-      annotations: uniqueTexts(frame.annotations ?? [], 8),
+      annotations: uniqueChineseAnnotations(frame.annotations ?? [], 8),
       confidence: classification.confidence,
     }
   })
@@ -642,7 +664,7 @@ export function buildHeuristicFigmaUxMap(input: BuildFigmaUxMapInput): FigmaUxMa
         sourceUrl: frame.sourceUrl,
         previewImageUrl: frame.assetUrl ?? null,
         visibleTexts: uniqueTexts(frame.visibleTexts, 12),
-        annotations: uniqueTexts(frame.annotations ?? [], 8),
+        annotations: uniqueChineseAnnotations(frame.annotations ?? [], 8),
         triggerHints: cue ? uniqueTexts([cue.cue.trigger, cue.cue.effect], 4) : [],
         confidence: classification.confidence,
       }
@@ -816,8 +838,11 @@ function normalizeStateCandidate(value: unknown, fallback: FigmaUxMapState | nul
   const figmaNodeId = compact((candidate.figmaNodeId ?? candidate.figma_node_id) as string | undefined) || fallback?.figmaNodeId
   if (!id || !screenId || !screenIds.has(screenId) || !label || !figmaNodeId) return null
   const kind = normalizeUiStateKindForMap(candidate.kind, fallback?.kind ?? 'variant')
-  const candidateAnnotations = textList(candidate.annotations, 8)
-  const fallbackInteractionTips = (fallback?.annotations ?? []).filter((text) => /^Interaction tip:/iu.test(text))
+  const candidateAnnotations = uniqueChineseAnnotations(textList(candidate.annotations, 12), 8)
+  const fallbackInteractionTips = (fallback?.annotations ?? [])
+    .filter((text) => /^(Interaction tip:|交互提示：)/iu.test(text))
+    .map((text) => text.replace(/^Interaction tip:\s*/iu, '交互提示：'))
+  const fallbackAnnotations = uniqueChineseAnnotations(fallback?.annotations ?? [], 8)
   return {
     id,
     screenId,
@@ -830,9 +855,9 @@ function normalizeStateCandidate(value: unknown, fallback: FigmaUxMapState | nul
     visibleTexts: textList(candidate.visibleTexts ?? candidate.visible_texts, 12).length
       ? textList(candidate.visibleTexts ?? candidate.visible_texts, 12)
       : (fallback?.visibleTexts ?? []),
-    annotations: uniqueTexts([
+    annotations: uniqueChineseAnnotations([
       ...fallbackInteractionTips,
-      ...(candidateAnnotations.length ? candidateAnnotations : (fallback?.annotations ?? [])),
+      ...(candidateAnnotations.length ? candidateAnnotations : fallbackAnnotations),
     ], 8),
     triggerHints: textList(candidate.triggerHints ?? candidate.trigger_hints, 8).length
       ? textList(candidate.triggerHints ?? candidate.trigger_hints, 8)

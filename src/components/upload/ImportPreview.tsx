@@ -44,6 +44,14 @@ function uxMapScreenStateSummary(preview: PrdImportPreview, screenId: string) {
   return states.map((state) => `${state.label} · ${state.role}`).join(' / ')
 }
 
+function uiFlowNodeLabel(preview: PrdImportPreview, nodeId: string) {
+  return preview.projectUiFlow?.nodes.find((node) => node.id === nodeId)?.label ?? nodeId
+}
+
+function uiFlowPathLabels(preview: PrdImportPreview, nodeIds: string[]) {
+  return nodeIds.map((nodeId) => uiFlowNodeLabel(preview, nodeId)).filter(Boolean)
+}
+
 export function ImportPreview({ preview, isLoading, error, projectWorkflow, onConfirm, onReset }: ImportPreviewProps) {
   if (isLoading) {
     return (
@@ -78,6 +86,7 @@ export function ImportPreview({ preview, isLoading, error, projectWorkflow, onCo
 
   const { sourceIndex, candidateNodes } = preview
   const figmaUxMap = preview.figmaUxMap ?? null
+  const projectUiFlow = preview.projectUiFlow ?? null
   const prdSource = preview.prdSource ?? null
   const relationSummary = preview.relationSummary ?? null
   const visibleSections = sourceIndex.sections.slice(0, 10)
@@ -182,6 +191,66 @@ export function ImportPreview({ preview, isLoading, error, projectWorkflow, onCo
       ) : figmaUxMap ? (
         <section className="rounded-lg border border-tertiary/40 bg-tertiary/5 px-md py-sm text-body-md text-on-surface-variant">
           当前预览只收到 Figma 设计稿，未收到 PRD 正文；请确认飞书 PRD 已读取进素材池。
+        </section>
+      ) : null}
+
+      {projectUiFlow ? (
+        <section className="grid gap-sm rounded-lg border border-secondary/30 bg-secondary/5 p-md xl:grid-cols-[minmax(0,0.78fr)_minmax(0,1.22fr)]">
+          <div className="min-w-0">
+            <div className="flex items-center gap-xs text-secondary">
+              <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>route</span>
+              <h2 className="text-label-lg font-semibold text-on-surface">PRD+Figma UI Flow</h2>
+            </div>
+            <div className="mt-sm grid grid-cols-4 gap-xs">
+              {[
+                ['节点', projectUiFlow.nodes.length],
+                ['流转', projectUiFlow.edges.length],
+                ['分支', projectUiFlow.alternatePaths.length],
+                ['待确认', projectUiFlow.ambiguities.length],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded border border-secondary/25 bg-surface-container px-sm py-xs">
+                  <p className="text-code-sm text-on-surface-variant">{label}</p>
+                  <p className="text-label-lg text-on-surface">{value}</p>
+                </div>
+              ))}
+            </div>
+            <p className="mt-sm text-body-sm text-on-surface-variant">FlowGraph · 置信度 {projectUiFlow.confidence}%</p>
+            <p className="mt-xs line-clamp-2 text-body-sm text-on-surface-variant">{projectUiFlow.summary}</p>
+          </div>
+          <div className="min-h-0 space-y-xs overflow-hidden">
+            <div className="rounded border border-outline-variant/70 bg-surface-container px-sm py-xs">
+              <p className="text-code-sm text-on-surface-variant">起点</p>
+              <p className="mt-[2px] truncate text-body-md text-on-surface" title={uiFlowPathLabels(preview, projectUiFlow.entryNodeIds).join(' / ')}>
+                {uiFlowPathLabels(preview, projectUiFlow.entryNodeIds).join(' / ') || '未识别'}
+              </p>
+            </div>
+            <div className="rounded border border-outline-variant/70 bg-surface-container px-sm py-xs">
+              <p className="text-code-sm text-on-surface-variant">终点</p>
+              <p className="mt-[2px] truncate text-body-md text-on-surface" title={uiFlowPathLabels(preview, projectUiFlow.exitNodeIds).join(' / ')}>
+                {uiFlowPathLabels(preview, projectUiFlow.exitNodeIds).join(' / ') || '未识别'}
+              </p>
+            </div>
+            <div className="rounded border border-outline-variant/70 bg-surface-container px-sm py-xs">
+              <p className="text-code-sm text-on-surface-variant">主路径</p>
+              {projectUiFlow.happyPathNodeIds.length > 1 ? (
+                <div className="custom-scrollbar mt-xs flex max-h-16 flex-wrap items-center gap-xs overflow-y-auto">
+                  {uiFlowPathLabels(preview, projectUiFlow.happyPathNodeIds).map((label, index) => (
+                    <span key={`${label}-${index}`} className="inline-flex items-center gap-xs rounded border border-secondary/30 bg-secondary/10 px-xs py-[2px] text-code-sm text-secondary">
+                      {index > 0 ? <span className="text-on-surface-variant">→</span> : null}
+                      <span className="max-w-[140px] truncate" title={label}>{label}</span>
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-[2px] text-body-sm text-on-surface-variant">暂未形成稳定端到端流程，请检查 Figma 连线或 PRD 流程描述。</p>
+              )}
+            </div>
+            {projectUiFlow.ambiguities.length ? (
+              <div className="rounded border border-secondary/40 bg-surface-container px-sm py-xs text-body-sm text-on-surface-variant">
+                {projectUiFlow.ambiguities.slice(0, 2).map((ambiguity) => ambiguity.message).join('；')}
+              </div>
+            ) : null}
+          </div>
         </section>
       ) : null}
 

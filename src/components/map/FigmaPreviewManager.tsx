@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { importFigmaFrame } from '../../lib/api'
-import type { PrdNode, PrdNodeFigmaPreview, PrdTree, UpdateNodePatch } from '../../types/prdNode'
+import type { PrdNode, PrdNodeFigmaPreview, PrdTree, PrdUiStateKind, UpdateNodePatch } from '../../types/prdNode'
 
 type PreviewImage = PrdNodeFigmaPreview
+type PreviewImageWithUrl = PreviewImage & { imageUrl: string }
+type AddMode = 'closed' | 'choice' | 'figma' | 'existing'
 
 interface FigmaPreviewManagerProps {
   node: PrdNode
@@ -12,8 +14,54 @@ interface FigmaPreviewManagerProps {
   onUpdateNode: (nodeId: string, patch: UpdateNodePatch) => void
 }
 
+interface PreviewEntry {
+  preview: PreviewImageWithUrl
+  previewIndex: number
+}
+
+interface SourcePreviewEntry {
+  sourceNode: PrdNode
+  preview: PreviewImageWithUrl
+  previewIndex: number
+}
+
+const FIGMA_STATE_KIND_LABELS: Record<PrdUiStateKind, string> = {
+  default: '默认',
+  overlay: '浮层',
+  loading: '加载',
+  success: '成功',
+  error: '错误',
+  empty: '空态',
+  disabled: '禁用',
+  expanded: '展开',
+  collapsed: '收起',
+  localized: '语言',
+  mirror: '镜像',
+  selected: '选中',
+  variant: '变体',
+}
+
 function previewKey(preview: PreviewImage) {
   return `${preview.nodeId}|${preview.imageUrl ?? ''}|${preview.sourceUrl}`
+}
+
+function previewEntries(previews: PreviewImage[]): PreviewEntry[] {
+  return previews.flatMap((preview, previewIndex) => (
+    preview.imageUrl ? [{ preview: preview as PreviewImageWithUrl, previewIndex }] : []
+  ))
+}
+
+function stateKindLabel(kind: PrdUiStateKind) {
+  return FIGMA_STATE_KIND_LABELS[kind] ?? FIGMA_STATE_KIND_LABELS.variant
+}
+
+function stateForPreview(node: PrdNode, preview: PreviewImage) {
+  return node.uiStates?.find((state) => state.figmaNodeId === preview.nodeId) ?? null
+}
+
+function isTextEditingTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false
+  return target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
 }
 
 function dedupePreviews(previews: PreviewImage[]) {
@@ -43,6 +91,14 @@ function moveItem<T>(items: T[], index: number, direction: -1 | 1) {
   return next
 }
 
+function moveItemTo<T>(items: T[], fromIndex: number, toIndex: number) {
+  if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0 || fromIndex >= items.length || toIndex >= items.length) return items
+  const next = [...items]
+  const [item] = next.splice(fromIndex, 1)
+  next.splice(toIndex, 0, item)
+  return next
+}
+
 function previewFromImport(
   image: Awaited<ReturnType<typeof importFigmaFrame>>['images'][number],
   sourceUrl: string,
@@ -62,52 +118,20 @@ function previewFromImport(
   }
 }
 
-function PreviewThumb({
-  preview,
-  index,
-  selected,
-  footer,
-}: {
-  preview: PreviewImage
-  index: number
-  selected?: boolean
-  footer: ReactNode
-}) {
-  return (
-    <figure className={[
-      'min-w-0 overflow-hidden rounded-lg border bg-surface-container-low',
-      selected ? 'border-primary ring-2 ring-primary/35' : 'border-outline-variant',
-    ].join(' ')}>
-      <div className="flex h-44 items-center justify-center overflow-hidden bg-black">
-        {preview.imageUrl ? (
-          <img src={preview.imageUrl} alt={preview.name} draggable={false} className="h-full w-full object-contain" />
-        ) : (
-          <div className="px-sm text-center text-body-sm text-on-surface-variant">暂无图片</div>
-        )}
-      </div>
-      <figcaption className="space-y-xs border-t border-outline-variant/70 p-sm">
-        <div className="flex min-w-0 items-center justify-between gap-sm">
-          <span className="truncate text-label-md font-medium text-on-surface">{index + 1}. {preview.name}</span>
-          {preview.isPrimary ? (
-            <span className="shrink-0 rounded bg-primary-container px-xs text-[10px] text-on-primary-container">主预览</span>
-          ) : null}
-        </div>
-        <div className="flex min-w-0 items-center justify-between gap-sm font-code-sm text-code-sm text-on-surface-variant">
-          <span className="truncate">{Math.round(preview.width)}x{Math.round(preview.height)}</span>
-          <span className="truncate">{preview.nodeId}</span>
-        </div>
-        {preview.originNodeLabel ? (
-          <div className="truncate text-[10px] text-on-surface-variant">来源：{preview.originNodeLabel}</div>
-        ) : null}
-        {footer}
-      </figcaption>
-    </figure>
-  )
+function sourcePreviewEntries(sourceNodes: PrdNode[]): SourcePreviewEntry[] {
+  return sourceNodes.flatMap((sourceNode) => (
+    (sourceNode.figmaPreviews ?? []).flatMap((preview, previewIndex) => (
+      preview.imageUrl ? [{ sourceNode, preview: preview as PreviewImageWithUrl, previewIndex }] : []
+    ))
+  ))
 }
 
 export function FigmaPreviewManager({ node, tree, proxyBaseUrl, onClose, onUpdateNode }: FigmaPreviewManagerProps) {
   const [replaceIndex, setReplaceIndex] = useState<number | null>(null)
-  const [sourceNodeId, setSourceNodeId] = useState('')
+  const [activePreviewIndex, setActivePreviewIndex] = useState(0)
+  const [dragPreviewIndex, setDragPreviewIndex] = useState<number | null>(null)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; previewIndex: number } | null>(null)
+  const [addMode, setAddMode] = useState<AddMode>('closed')
   const [figmaUrl, setFigmaUrl] = useState('')
   const [importedPreviews, setImportedPreviews] = useState<PreviewImage[]>([])
   const [importedSourceLabel, setImportedSourceLabel] = useState<string | null>(null)
@@ -116,28 +140,65 @@ export function FigmaPreviewManager({ node, tree, proxyBaseUrl, onClose, onUpdat
   const [error, setError] = useState<string | null>(null)
 
   const currentPreviews = node.figmaPreviews ?? []
+  const currentPreviewEntries = useMemo(() => previewEntries(currentPreviews), [currentPreviews])
   const sourceNodes = useMemo(() => (
     Object.values(tree ?? {})
-      .filter((item) => item.id !== node.id && (item.figmaPreviews?.length ?? 0) > 0)
+      .filter((item) => item.id !== node.id && (item.figmaPreviews?.some((preview) => preview.imageUrl) ?? false))
       .sort((a, b) => a.order - b.order || a.label.localeCompare(b.label))
   ), [node.id, tree])
-  const selectedSourceNode = sourceNodes.find((item) => item.id === sourceNodeId) ?? sourceNodes[0] ?? null
-  const selectedSourcePreviews = selectedSourceNode?.figmaPreviews ?? []
-
-  useEffect(() => {
-    if (!sourceNodeId && sourceNodes[0]) setSourceNodeId(sourceNodes[0].id)
-    if (sourceNodeId && !sourceNodes.some((item) => item.id === sourceNodeId)) {
-      setSourceNodeId(sourceNodes[0]?.id ?? '')
-    }
-  }, [sourceNodeId, sourceNodes])
+  const allSourcePreviews = useMemo(() => sourcePreviewEntries(sourceNodes), [sourceNodes])
+  const safeActiveIndex = currentPreviewEntries.length ? Math.min(activePreviewIndex, currentPreviewEntries.length - 1) : 0
+  const activeEntry = currentPreviewEntries[safeActiveIndex] ?? null
+  const activePreview = activeEntry?.preview ?? null
+  const activeState = activePreview ? stateForPreview(node, activePreview) : null
 
   useEffect(() => {
     setReplaceIndex(null)
+    setActivePreviewIndex(0)
+    setDragPreviewIndex(null)
+    setContextMenu(null)
+    setAddMode('closed')
     setNotice(null)
     setError(null)
     setImportedPreviews([])
     setImportedSourceLabel(null)
   }, [node.id])
+
+  useEffect(() => {
+    if (activePreviewIndex >= currentPreviewEntries.length) {
+      setActivePreviewIndex(Math.max(0, currentPreviewEntries.length - 1))
+    }
+  }, [activePreviewIndex, currentPreviewEntries.length])
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (isTextEditingTarget(event.target)) return
+      if (event.key === 'Escape') {
+        if (contextMenu) setContextMenu(null)
+        else if (addMode !== 'closed') setAddMode('closed')
+        else onClose()
+      }
+      if (event.key === 'ArrowLeft') setActivePreviewIndex((current) => Math.max(0, current - 1))
+      if (event.key === 'ArrowRight' && currentPreviewEntries.length > 0) {
+        setActivePreviewIndex((current) => Math.min(currentPreviewEntries.length - 1, current + 1))
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [addMode, contextMenu, currentPreviewEntries.length, onClose])
+
+  useEffect(() => {
+    if (!contextMenu) return undefined
+    function closeMenu() {
+      setContextMenu(null)
+    }
+    window.addEventListener('click', closeMenu)
+    window.addEventListener('scroll', closeMenu, true)
+    return () => {
+      window.removeEventListener('click', closeMenu)
+      window.removeEventListener('scroll', closeMenu, true)
+    }
+  }, [contextMenu])
 
   function commitCurrent(previews: PreviewImage[]) {
     const next = normalizePrimary(dedupePreviews(previews))
@@ -162,6 +223,12 @@ export function FigmaPreviewManager({ node, tree, proxyBaseUrl, onClose, onUpdat
 
   function movePreview(index: number, direction: -1 | 1) {
     commitCurrent(moveItem(currentPreviews, index, direction))
+    setNotice('已调整预览顺序。')
+  }
+
+  function movePreviewToIndex(fromIndex: number, toIndex: number) {
+    commitCurrent(moveItemTo(currentPreviews, fromIndex, toIndex))
+    setNotice('已调整预览顺序。')
   }
 
   function addOrReplacePreview(preview: PreviewImage) {
@@ -172,15 +239,21 @@ export function FigmaPreviewManager({ node, tree, proxyBaseUrl, onClose, onUpdat
     commitCurrent(next)
     setNotice(replaceIndex === null ? '已加入当前界面。' : `已替换第 ${replaceIndex + 1} 张预览图。`)
     setReplaceIndex(null)
+    setAddMode('closed')
   }
 
   function addAllImportedPreviews() {
     if (!importedPreviews.length) return
+    if (replaceIndex !== null) {
+      addOrReplacePreview(importedPreviews[0]!)
+      return
+    }
     commitCurrent([
       ...currentPreviews,
       ...importedPreviews.map((preview) => ({ ...preview, isPrimary: false })),
     ])
     setNotice(`已加入 ${importedPreviews.length} 张 Figma 预览图。`)
+    setAddMode('closed')
   }
 
   function previewFromSource(preview: PreviewImage, sourceNode: PrdNode) {
@@ -191,22 +264,6 @@ export function FigmaPreviewManager({ node, tree, proxyBaseUrl, onClose, onUpdat
       userAdded: true,
       userNote: preview.userNote ?? `用户从「${sourceNode.label}」加入`,
     }
-  }
-
-  function copyFromSource(preview: PreviewImage, sourceNode: PrdNode) {
-    addOrReplacePreview(previewFromSource(preview, sourceNode))
-  }
-
-  function moveFromSource(preview: PreviewImage, sourceNode: PrdNode) {
-    const isReplacing = replaceIndex !== null
-    addOrReplacePreview(previewFromSource(preview, sourceNode))
-    const remainingSourcePreviews = normalizePrimary(
-      (sourceNode.figmaPreviews ?? []).filter((item) => previewKey(item) !== previewKey(preview)),
-    )
-    onUpdateNode(sourceNode.id, {
-      figmaPreviews: remainingSourcePreviews,
-    })
-    setNotice(isReplacing ? `已用「${sourceNode.label}」中的图替换当前预览。` : `已从「${sourceNode.label}」移动到当前界面。`)
   }
 
   async function importFromFigma() {
@@ -227,7 +284,7 @@ export function FigmaPreviewManager({ node, tree, proxyBaseUrl, onClose, onUpdat
       if (!previews.length) throw new Error('Figma 未返回可用图片。')
       setImportedPreviews(previews)
       setImportedSourceLabel(result.panelName || 'Figma 链接')
-      setNotice(previews.length === 1 ? '已读取 1 张 Figma 图片，可选择加入或替换。' : `已读取 ${previews.length} 张 Figma 图片，请选择要加入/替换的画面。`)
+      setNotice(previews.length === 1 ? '已读取 1 张 Figma 图片。' : `已读取 ${previews.length} 张 Figma 图片。`)
       setFigmaUrl('')
     } catch (err) {
       setError(err instanceof Error ? err.message : '导入 Figma 图片失败。')
@@ -236,34 +293,183 @@ export function FigmaPreviewManager({ node, tree, proxyBaseUrl, onClose, onUpdat
     }
   }
 
+  function openContextMenu(event: React.MouseEvent, previewIndex: number) {
+    event.preventDefault()
+    setContextMenu({ x: event.clientX, y: event.clientY, previewIndex })
+  }
+
+  function openReplaceFlow(index: number) {
+    setReplaceIndex(index)
+    setAddMode('choice')
+    setNotice(`选择图片替换第 ${index + 1} 张预览图。`)
+  }
+
+  function renderAddPanel() {
+    if (addMode === 'closed') return null
+    return (
+      <div className="absolute inset-x-sm bottom-sm z-20 max-h-[58vh] overflow-hidden rounded-lg border border-outline-variant bg-surface shadow-2xl">
+        <div className="flex items-center justify-between border-b border-outline-variant bg-surface-container-low px-md py-sm">
+          <div className="min-w-0">
+            <h3 className="truncate text-title-sm font-semibold text-on-surface">{replaceIndex === null ? '添加状态图' : `替换第 ${replaceIndex + 1} 张`}</h3>
+            <p className="mt-[2px] truncate text-body-sm text-on-surface-variant">选择 Figma 链接或已有界面节点。</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setAddMode('closed')
+              setReplaceIndex(null)
+            }}
+            className="rounded p-xs text-on-surface-variant transition-colors hover:bg-surface-variant hover:text-on-surface"
+            aria-label="关闭添加面板"
+            title="关闭"
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>close</span>
+          </button>
+        </div>
+
+        {addMode === 'choice' ? (
+          <div className="grid gap-sm p-md sm:grid-cols-2">
+            <button
+              type="button"
+              onClick={() => setAddMode('figma')}
+              className="flex min-h-[96px] flex-col items-center justify-center gap-xs rounded-lg border border-outline-variant bg-surface-container-low px-md text-center text-on-surface-variant transition-colors hover:border-primary hover:text-primary"
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: '24px' }}>link</span>
+              <span className="text-label-md font-medium">从 Figma 链接加入</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setAddMode('existing')}
+              className="flex min-h-[96px] flex-col items-center justify-center gap-xs rounded-lg border border-outline-variant bg-surface-container-low px-md text-center text-on-surface-variant transition-colors hover:border-primary hover:text-primary"
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: '24px' }}>collections</span>
+              <span className="text-label-md font-medium">从已有界面节点加入</span>
+            </button>
+          </div>
+        ) : null}
+
+        {addMode === 'figma' ? (
+          <div className="custom-scrollbar max-h-[calc(58vh-58px)] space-y-sm overflow-y-auto p-md">
+            <textarea
+              value={figmaUrl}
+              onChange={(event) => setFigmaUrl(event.target.value)}
+              rows={3}
+              placeholder="https://www.figma.com/design/...?...node-id=..."
+              className="w-full resize-none rounded border border-outline-variant bg-surface-container-low p-sm font-code-sm text-code-sm text-on-surface outline-none focus:border-primary"
+            />
+            <div className="flex gap-xs">
+              <button
+                type="button"
+                onClick={() => void importFromFigma()}
+                disabled={isImporting}
+                className="flex min-h-[34px] flex-1 items-center justify-center gap-xs rounded bg-primary px-md text-label-md text-on-primary transition-opacity hover:opacity-90 disabled:opacity-50"
+              >
+                <span className={['material-symbols-outlined', isImporting ? 'animate-spin' : ''].join(' ')} style={{ fontSize: '16px' }}>
+                  {isImporting ? 'sync' : 'image_search'}
+                </span>
+                读取图片
+              </button>
+              <button
+                type="button"
+                onClick={() => setAddMode('choice')}
+                className="rounded border border-outline-variant px-sm text-label-md text-on-surface-variant hover:bg-surface-variant"
+              >
+                返回
+              </button>
+            </div>
+            {importedPreviews.length ? (
+              <div className="space-y-sm">
+                <div className="flex items-center justify-between gap-sm">
+                  <span className="truncate text-label-md font-medium text-on-surface">最近读取：{importedSourceLabel ?? 'Figma 链接'}</span>
+                  <button
+                    type="button"
+                    onClick={addAllImportedPreviews}
+                    className="shrink-0 rounded border border-primary/50 px-sm py-xs text-label-md text-primary hover:bg-primary-container/20"
+                  >
+                    {replaceIndex === null ? '全部加入' : '替换'}
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-sm">
+                  {importedPreviews.map((preview, index) => (
+                    <button
+                      key={`figma-import-${previewKey(preview)}-${index}`}
+                      type="button"
+                      onClick={() => addOrReplacePreview(preview)}
+                      className="h-[150px] min-w-0 overflow-hidden rounded border border-outline-variant bg-surface-container-low text-left transition-colors hover:border-primary"
+                    >
+                      <div className="flex h-28 items-center justify-center overflow-hidden bg-black">
+                        {preview.imageUrl ? <img src={preview.imageUrl} alt={preview.name} draggable={false} className="h-full w-full object-contain" /> : null}
+                      </div>
+                      <div className="truncate border-t border-outline-variant/60 px-xs py-[6px] text-label-md text-on-surface">{preview.name}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {addMode === 'existing' ? (
+          <div className="custom-scrollbar max-h-[calc(58vh-58px)] overflow-y-auto p-md">
+            {allSourcePreviews.length ? (
+              <div className="grid grid-cols-2 gap-sm">
+                {allSourcePreviews.map((entry) => (
+                  <button
+                    key={`${entry.sourceNode.id}-${previewKey(entry.preview)}-${entry.previewIndex}`}
+                    type="button"
+                    onClick={() => addOrReplacePreview(previewFromSource(entry.preview, entry.sourceNode))}
+                    className="h-[150px] min-w-0 overflow-hidden rounded border border-outline-variant bg-surface-container-low text-left transition-colors hover:border-primary"
+                  >
+                    <div className="flex h-28 items-center justify-center overflow-hidden bg-black">
+                      <img src={entry.preview.imageUrl} alt={entry.preview.name} draggable={false} className="h-full w-full object-contain" />
+                    </div>
+                    <div className="space-y-[2px] border-t border-outline-variant/60 px-xs py-[6px]">
+                      <div className="truncate text-label-md text-on-surface">{entry.preview.name}</div>
+                      <div className="truncate text-code-sm text-on-surface-variant">{entry.sourceNode.label}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="rounded border border-dashed border-outline-variant bg-surface-container-low p-md text-body-sm text-on-surface-variant">
+                暂无其他带预览图的界面节点。
+              </div>
+            )}
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+
   return (
-    <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/65 p-lg backdrop-blur-sm" role="dialog" aria-modal="true" aria-label={`${node.label} 画面管理`}>
-      <section className="flex h-[min(92vh,900px)] w-[min(1320px,96vw)] flex-col overflow-hidden rounded-xl border border-outline-variant bg-surface shadow-2xl">
-        <header className="flex shrink-0 items-center justify-between gap-md border-b border-outline-variant bg-surface-container-low px-lg py-md">
+    <div className="fixed inset-0 z-[90] flex justify-end bg-black/35" role="dialog" aria-modal="true" aria-label={`${node.label} 状态预览`} onClick={onClose}>
+      <section className="relative flex h-dvh w-full flex-col overflow-hidden border-l border-outline-variant bg-surface shadow-[-12px_0_32px_rgba(0,0,0,0.45)] md:w-1/2" onClick={(event) => event.stopPropagation()}>
+        <header className="flex shrink-0 items-center justify-between gap-md border-b border-outline-variant bg-surface-container-low px-md py-sm">
           <div className="min-w-0">
             <div className="flex items-center gap-xs text-tertiary">
-              <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>photo_library</span>
-              <h2 className="truncate text-headline-sm font-semibold text-on-surface">画面管理</h2>
+              <span className="material-symbols-outlined" style={{ fontSize: '20px' }}>view_carousel</span>
+              <h2 className="truncate text-headline-sm font-semibold text-on-surface">状态预览</h2>
             </div>
-            <p className="mt-xs truncate text-body-sm text-on-surface-variant">{node.label} · {currentPreviews.length} 张预览图</p>
+            <p className="mt-[2px] truncate text-body-sm text-on-surface-variant">{node.label} · {currentPreviews.length} 张预览图 · {node.uiStates?.length ?? 0} 个状态</p>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="rounded p-xs text-on-surface-variant transition-colors hover:bg-surface-variant hover:text-on-surface"
-            aria-label="关闭画面管理"
-            title="关闭"
+            className="inline-flex min-h-[34px] shrink-0 items-center gap-xs rounded border border-outline-variant bg-surface px-sm text-label-md font-medium text-on-surface-variant transition-colors hover:border-primary hover:text-primary"
+            aria-label="关闭退出状态预览"
+            title="关闭退出"
           >
-            <span className="material-symbols-outlined">close</span>
+            <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>close</span>
+            关闭退出
           </button>
         </header>
 
         {(notice || error || replaceIndex !== null) ? (
-          <div className="shrink-0 border-b border-outline-variant bg-surface-container px-lg py-sm">
+          <div className="shrink-0 border-b border-outline-variant bg-surface-container px-md py-xs">
             {replaceIndex !== null ? (
               <div className="mb-xs flex items-center gap-xs text-label-md text-primary">
                 <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>swap_horiz</span>
-                正在替换第 {replaceIndex + 1} 张预览。选择右侧图片或粘贴 Figma 链接即可替换。
+                正在替换第 {replaceIndex + 1} 张预览。点击“+”选择来源。
               </div>
             ) : null}
             {notice ? <div className="text-body-sm text-tertiary">{notice}</div> : null}
@@ -271,216 +477,185 @@ export function FigmaPreviewManager({ node, tree, proxyBaseUrl, onClose, onUpdat
           </div>
         ) : null}
 
-        <main className="grid min-h-0 flex-1 gap-md bg-surface-container-low p-md lg:grid-cols-[minmax(0,1fr)_380px]">
-          <section className="custom-scrollbar min-h-0 overflow-y-auto rounded-lg border border-outline-variant bg-surface p-md">
-            <div className="mb-md flex items-center justify-between gap-md">
-              <div className="min-w-0">
-                <h3 className="text-title-md font-semibold text-on-surface">当前界面预览</h3>
-                <p className="mt-xs text-body-sm text-on-surface-variant">可删除、排序、设主预览，也可以选中一张后从右侧替换。</p>
-              </div>
-              {replaceIndex !== null ? (
-                <button
-                  type="button"
-                  onClick={() => setReplaceIndex(null)}
-                  className="shrink-0 rounded border border-outline-variant px-sm py-xs text-label-md text-on-surface-variant hover:bg-surface-variant"
-                >
-                  取消替换
-                </button>
-              ) : null}
-            </div>
-
-            {currentPreviews.length ? (
-              <div className="grid gap-md md:grid-cols-2 xl:grid-cols-3">
-                {currentPreviews.map((preview, index) => (
-                  <PreviewThumb
-                    key={`${previewKey(preview)}-${index}`}
-                    preview={preview}
-                    index={index}
-                    selected={replaceIndex === index}
-                    footer={(
-                      <div className="grid grid-cols-5 gap-xs pt-xs">
-                        <button type="button" onClick={() => setPrimary(index)} title="设为主预览" className="rounded border border-outline-variant px-xs py-xs text-label-md hover:bg-surface-variant">
-                          <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>star</span>
-                        </button>
-                        <button type="button" onClick={() => movePreview(index, -1)} disabled={index === 0} title="前移" className="rounded border border-outline-variant px-xs py-xs text-label-md disabled:opacity-35 hover:bg-surface-variant">
-                          <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>arrow_upward</span>
-                        </button>
-                        <button type="button" onClick={() => movePreview(index, 1)} disabled={index === currentPreviews.length - 1} title="后移" className="rounded border border-outline-variant px-xs py-xs text-label-md disabled:opacity-35 hover:bg-surface-variant">
-                          <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>arrow_downward</span>
-                        </button>
-                        <button type="button" onClick={() => setReplaceIndex(index)} title="替换" className="rounded border border-primary/50 px-xs py-xs text-label-md text-primary hover:bg-primary-container/20">
-                          <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>swap_horiz</span>
-                        </button>
-                        <button type="button" onClick={() => removePreview(index)} title="删除" className="rounded border border-error/50 px-xs py-xs text-label-md text-error hover:bg-error/10">
-                          <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>delete</span>
-                        </button>
-                      </div>
-                    )}
+        <main className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_168px] gap-sm bg-surface-container-low p-sm">
+          <section className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface">
+            {activePreview ? (
+              <>
+                <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-black p-sm">
+                  <img
+                    src={activePreview.imageUrl}
+                    alt={activePreview.name}
+                    draggable={false}
+                    className="h-full w-full object-contain"
                   />
-                ))}
-              </div>
+                </div>
+                <div className="shrink-0 space-y-xs border-t border-outline-variant bg-surface-container-low px-sm py-xs">
+                  <div className="flex min-w-0 flex-wrap items-center justify-between gap-xs">
+                    <div className="min-w-0">
+                      <div className="flex min-w-0 items-center gap-xs">
+                        <span className="truncate text-label-lg font-medium text-on-surface">
+                          {safeActiveIndex + 1}. {activeState?.label ?? activePreview.name}
+                        </span>
+                        {activeState ? (
+                          <span className="shrink-0 rounded border border-tertiary/40 bg-tertiary/10 px-xs font-code-sm text-code-sm text-tertiary">
+                            {stateKindLabel(activeState.kind)}
+                          </span>
+                        ) : (
+                          <span className="shrink-0 rounded border border-outline-variant px-xs font-code-sm text-code-sm text-on-surface-variant">
+                            截图
+                          </span>
+                        )}
+                      </div>
+                      <div className="font-code-sm text-code-sm text-on-surface-variant">
+                        {activePreview.name} · {Math.round(activePreview.width)}x{Math.round(activePreview.height)}
+                      </div>
+                    </div>
+                    <a
+                      href={activePreview.sourceUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex min-h-[28px] items-center gap-xs rounded border border-outline-variant px-sm text-label-md text-on-surface-variant transition-colors hover:border-primary hover:text-primary"
+                    >
+                      <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>open_in_new</span>
+                      Figma
+                    </a>
+                  </div>
+                  {activeState?.annotations.length ? (
+                    <div className="line-clamp-2 rounded border border-outline-variant/70 bg-surface-container px-sm py-[2px] text-body-sm leading-snug text-on-surface-variant" title={activeState.annotations.join(' / ')}>
+                      注释：{activeState.annotations.join(' / ')}
+                    </div>
+                  ) : null}
+                  {activeState?.visibleTexts.length ? (
+                    <div className="truncate rounded border border-outline-variant/70 bg-surface-container px-sm py-[2px] text-body-sm leading-snug text-on-surface-variant" title={activeState.visibleTexts.join(' / ')}>
+                      可见文案：{activeState.visibleTexts.slice(0, 6).join(' / ')}
+                    </div>
+                  ) : null}
+                </div>
+              </>
             ) : (
-              <div className="flex min-h-[360px] items-center justify-center rounded-lg border border-dashed border-outline-variant bg-surface-container-low p-lg text-center text-body-md text-on-surface-variant">
-                当前界面还没有预览图。可以从右侧其他界面复制，或粘贴 Figma 节点链接加入。
+              <div className="flex min-h-[260px] flex-1 items-center justify-center bg-surface-container-low p-lg text-center text-body-md text-on-surface-variant">
+                {currentPreviews.length
+                  ? '当前预览记录暂无可浏览图片。'
+                  : '当前界面还没有预览图。点击下方“+”加入。'}
               </div>
             )}
           </section>
 
-          <aside className="custom-scrollbar min-h-0 overflow-y-auto rounded-lg border border-outline-variant bg-surface p-md">
-            <section className="space-y-sm">
-              <div>
-                <h3 className="text-title-sm font-semibold text-on-surface">从 Figma 链接加入</h3>
-                <p className="mt-xs text-body-sm text-on-surface-variant">粘贴具体节点链接，先读取可用图片，再选择加入或替换。</p>
-              </div>
-              <textarea
-                value={figmaUrl}
-                onChange={(event) => setFigmaUrl(event.target.value)}
-                rows={3}
-                placeholder="https://www.figma.com/design/...?...node-id=..."
-                className="w-full resize-none rounded border border-outline-variant bg-surface-container-low p-sm font-code-sm text-code-sm text-on-surface outline-none focus:border-primary"
-              />
-              <button
-                type="button"
-                onClick={() => void importFromFigma()}
-                disabled={isImporting}
-                className="flex min-h-[36px] w-full items-center justify-center gap-xs rounded bg-primary px-md text-label-md text-on-primary transition-opacity hover:opacity-90 disabled:opacity-50"
-              >
-                <span className={['material-symbols-outlined', isImporting ? 'animate-spin' : ''].join(' ')} style={{ fontSize: '16px' }}>
-                  {isImporting ? 'sync' : 'image_search'}
-                </span>
-                读取 Figma 图片
-              </button>
-              {importedPreviews.length ? (
-                <div className="rounded-lg border border-outline-variant bg-surface-container-low p-sm">
-                  <div className="mb-sm flex items-center justify-between gap-sm">
-                    <div className="min-w-0">
-                      <h4 className="truncate text-label-md font-semibold text-on-surface">
-                        最近读取：{importedSourceLabel ?? 'Figma 链接'}
-                      </h4>
-                      <p className="mt-0.5 text-body-sm text-on-surface-variant">{importedPreviews.length} 张候选图</p>
+          <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface p-sm">
+            <div className="mb-xs flex items-center justify-between gap-sm">
+              <span className="text-title-sm font-semibold text-on-surface">状态缩略图</span>
+              <span className="font-code-sm text-code-sm text-on-surface-variant">{currentPreviewEntries.length} 张</span>
+            </div>
+            <div className="custom-scrollbar flex min-h-0 flex-1 flex-col gap-xs overflow-y-auto pr-xs">
+              {currentPreviewEntries.map((entry, entryIndex) => {
+                const state = stateForPreview(node, entry.preview)
+                return (
+                  <div
+                    key={`${previewKey(entry.preview)}-${entry.previewIndex}`}
+                    role="button"
+                    tabIndex={0}
+                    draggable
+                    onClick={() => setActivePreviewIndex(entryIndex)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') setActivePreviewIndex(entryIndex)
+                    }}
+                    onContextMenu={(event) => openContextMenu(event, entry.previewIndex)}
+                    onDragStart={(event) => {
+                      setDragPreviewIndex(entry.previewIndex)
+                      event.dataTransfer.effectAllowed = 'move'
+                      event.dataTransfer.setData('text/plain', String(entry.previewIndex))
+                    }}
+                    onDragOver={(event) => {
+                      event.preventDefault()
+                      event.dataTransfer.dropEffect = 'move'
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault()
+                      const fromIndex = dragPreviewIndex ?? Number(event.dataTransfer.getData('text/plain'))
+                      if (Number.isFinite(fromIndex)) movePreviewToIndex(fromIndex, entry.previewIndex)
+                      setDragPreviewIndex(null)
+                    }}
+                    onDragEnd={() => setDragPreviewIndex(null)}
+                    className={[
+                      'group relative h-[150px] shrink-0 min-w-0 cursor-grab overflow-hidden rounded border bg-surface-container-low text-left transition-colors active:cursor-grabbing',
+                      entryIndex === safeActiveIndex
+                        ? 'border-tertiary bg-tertiary/10 text-on-surface'
+                        : 'border-outline-variant hover:border-primary',
+                    ].join(' ')}
+                    title={entry.preview.name}
+                  >
+                    <div className="flex h-24 items-center justify-center overflow-hidden bg-black">
+                      <img src={entry.preview.imageUrl} alt={entry.preview.name} draggable={false} className="h-full w-full object-contain" />
+                    </div>
+                    <div className="space-y-[2px] border-t border-outline-variant/60 px-xs py-[6px]">
+                      <div className="flex min-w-0 items-center justify-between gap-xs">
+                        <span className="truncate text-label-md">{entryIndex + 1}. {state?.label ?? entry.preview.name}</span>
+                        {entry.preview.isPrimary ? <span className="shrink-0 text-[10px] text-primary">主</span> : null}
+                      </div>
+                      <div className="truncate font-code-sm text-code-sm text-on-surface-variant">{state ? stateKindLabel(state.kind) : '截图'}</div>
                     </div>
                     <button
                       type="button"
-                      onClick={() => {
-                        setImportedPreviews([])
-                        setImportedSourceLabel(null)
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        const rect = event.currentTarget.getBoundingClientRect()
+                        setContextMenu({ x: rect.right - 156, y: rect.bottom + 4, previewIndex: entry.previewIndex })
                       }}
-                      className="shrink-0 rounded border border-outline-variant px-xs py-xs text-label-md text-on-surface-variant hover:bg-surface-variant"
+                      className="absolute right-xs top-xs rounded bg-black/55 p-[2px] text-white opacity-0 transition-opacity hover:bg-black/75 group-hover:opacity-100"
+                      aria-label="打开缩略图操作"
+                      title="操作"
                     >
-                      清空
+                      <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>more_vert</span>
                     </button>
                   </div>
-                  {replaceIndex === null ? (
-                    <button
-                      type="button"
-                      onClick={addAllImportedPreviews}
-                      className="mb-sm flex min-h-[32px] w-full items-center justify-center gap-xs rounded border border-primary/50 px-sm text-label-md text-primary hover:bg-primary-container/20"
-                    >
-                      <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>playlist_add</span>
-                      全部加入当前界面
-                    </button>
-                  ) : null}
-                  <div className="space-y-sm">
-                    {importedPreviews.map((preview, index) => (
-                      <PreviewThumb
-                        key={`figma-import-${previewKey(preview)}-${index}`}
-                        preview={preview}
-                        index={index}
-                        footer={(
-                          <div className="grid grid-cols-2 gap-xs pt-xs">
-                            <button
-                              type="button"
-                              onClick={() => addOrReplacePreview(preview)}
-                              className="rounded border border-primary/50 px-xs py-xs text-label-md text-primary hover:bg-primary-container/20"
-                            >
-                              {replaceIndex === null ? '加入' : '替换'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setFigmaUrl(preview.sourceUrl)
-                                setNotice('已把来源链接放回输入框。')
-                              }}
-                              className="rounded border border-outline-variant px-xs py-xs text-label-md text-on-surface-variant hover:bg-surface-variant"
-                            >
-                              链接
-                            </button>
-                          </div>
-                        )}
-                      />
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-            </section>
-
-            <div className="my-md border-t border-outline-variant" />
-
-            <section className="space-y-sm">
-              <div>
-                <h3 className="text-title-sm font-semibold text-on-surface">从其他界面加入</h3>
-                <p className="mt-xs text-body-sm text-on-surface-variant">可复制保留原节点，也可移动到当前界面。</p>
-              </div>
-              {sourceNodes.length ? (
-                <>
-                  <select
-                    value={selectedSourceNode?.id ?? ''}
-                    onChange={(event) => setSourceNodeId(event.target.value)}
-                    className="w-full rounded border border-outline-variant bg-surface-container-low px-sm py-xs text-body-sm text-on-surface outline-none focus:border-primary"
-                  >
-                    {sourceNodes.map((item) => (
-                      <option key={item.id} value={item.id}>{item.label}（{item.figmaPreviews?.length ?? 0}）</option>
-                    ))}
-                  </select>
-                  <div className="space-y-sm">
-                    {selectedSourceNode && selectedSourcePreviews.map((preview, index) => (
-                      <PreviewThumb
-                        key={`${selectedSourceNode.id}-${previewKey(preview)}-${index}`}
-                        preview={preview}
-                        index={index}
-                        footer={(
-                          <div className="grid grid-cols-3 gap-xs pt-xs">
-                            <button
-                              type="button"
-                              onClick={() => copyFromSource(preview, selectedSourceNode)}
-                              className="rounded border border-outline-variant px-xs py-xs text-label-md hover:bg-surface-variant"
-                            >
-                              复制
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => moveFromSource(preview, selectedSourceNode)}
-                              className="rounded border border-secondary/50 px-xs py-xs text-label-md text-secondary hover:bg-secondary-container/20"
-                            >
-                              移动
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                if (replaceIndex === null) {
-                                  setError('请先在左侧选择要替换的预览图。')
-                                  return
-                                }
-                                copyFromSource(preview, selectedSourceNode)
-                              }}
-                              className="rounded border border-primary/50 px-xs py-xs text-label-md text-primary hover:bg-primary-container/20"
-                            >
-                              替换
-                            </button>
-                          </div>
-                        )}
-                      />
-                    ))}
-                  </div>
-                </>
-              ) : (
-                <div className="rounded border border-dashed border-outline-variant bg-surface-container-low p-md text-body-sm text-on-surface-variant">
-                  暂无其他带预览图的界面节点。
-                </div>
-              )}
-            </section>
-          </aside>
+                )
+              })}
+              <button
+                type="button"
+                onClick={() => {
+                  setReplaceIndex(null)
+                  setAddMode('choice')
+                }}
+                className="flex h-[150px] shrink-0 flex-col items-center justify-center gap-xs rounded border border-dashed border-outline-variant bg-surface-container-low text-on-surface-variant transition-colors hover:border-primary hover:text-primary"
+                aria-label="添加状态图"
+                title="添加状态图"
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: '28px' }}>add</span>
+              </button>
+            </div>
+          </section>
         </main>
+
+        {renderAddPanel()}
+
+        {contextMenu ? (
+          <div
+            className="fixed z-[120] w-40 overflow-hidden rounded-lg border border-outline-variant bg-surface shadow-2xl"
+            style={{ left: Math.max(8, Math.min(contextMenu.x, window.innerWidth - 172)), top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - 220)) }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button type="button" onClick={() => { setPrimary(contextMenu.previewIndex); setContextMenu(null) }} className="flex w-full items-center gap-xs px-sm py-xs text-left text-label-md text-on-surface-variant hover:bg-surface-variant hover:text-on-surface">
+              <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>star</span>
+              设为主预览
+            </button>
+            <button type="button" onClick={() => { openReplaceFlow(contextMenu.previewIndex); setContextMenu(null) }} className="flex w-full items-center gap-xs px-sm py-xs text-left text-label-md text-on-surface-variant hover:bg-surface-variant hover:text-on-surface">
+              <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>swap_horiz</span>
+              替换
+            </button>
+            <button type="button" onClick={() => { movePreview(contextMenu.previewIndex, -1); setContextMenu(null) }} disabled={contextMenu.previewIndex === 0} className="flex w-full items-center gap-xs px-sm py-xs text-left text-label-md text-on-surface-variant hover:bg-surface-variant hover:text-on-surface disabled:opacity-40">
+              <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>arrow_upward</span>
+              前移
+            </button>
+            <button type="button" onClick={() => { movePreview(contextMenu.previewIndex, 1); setContextMenu(null) }} disabled={contextMenu.previewIndex === currentPreviews.length - 1} className="flex w-full items-center gap-xs px-sm py-xs text-left text-label-md text-on-surface-variant hover:bg-surface-variant hover:text-on-surface disabled:opacity-40">
+              <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>arrow_downward</span>
+              后移
+            </button>
+            <button type="button" onClick={() => { removePreview(contextMenu.previewIndex); setContextMenu(null) }} className="flex w-full items-center gap-xs px-sm py-xs text-left text-label-md text-error hover:bg-error/10">
+              <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>delete</span>
+              删除
+            </button>
+          </div>
+        ) : null}
       </section>
     </div>
   )

@@ -4,7 +4,7 @@ import { buildDeliverySections, isDeliveryNode } from '../../lib/prdNodeDelivery
 import type { PrdNode, PrdNodeSectionKey, PrdTree, UpdateNodePatch } from '../../types/prdNode'
 import { DocumentPreview, type DocumentPreviewTab } from './DocumentPreview'
 import { FigmaPreviewManager } from './FigmaPreviewManager'
-import { FigmaStatePreviewModal, figmaPreviewImages } from './FigmaStatePreview'
+import { figmaPreviewImages } from './FigmaStatePreview'
 
 interface PreviewDrawerProps {
   node: PrdNode | null
@@ -15,17 +15,7 @@ interface PreviewDrawerProps {
   onUpdateNode?: (nodeId: string, patch: UpdateNodePatch) => void
   onUpdateContent?: (nodeId: string, content: string) => void
   onOpenQa?: (node: PrdNode) => void
-  onSelectNode?: (nodeId: string) => void
   proxyBaseUrl: string
-}
-
-interface FlowRelation {
-  id: string
-  node: PrdNode
-  label: string
-  note?: string | null
-  icon: string
-  tone: 'primary' | 'secondary'
 }
 
 const previewTabs: Array<{ id: DocumentPreviewTab; label: string; icon: string }> = [
@@ -70,174 +60,6 @@ function tabTone(tab: DocumentPreviewTab, active: boolean) {
   return active ? `${tone?.active ?? ''} ${activeTabFrame}` : tone?.inactive ?? ''
 }
 
-function relationKey(source: string, target: string, label: string) {
-  return `${source}->${target}:${label}`
-}
-
-function transitionLabel(transition: NonNullable<PrdNode['stateTransitions']>[number]) {
-  return transition.trigger ?? transition.effect ?? '状态流转'
-}
-
-function transitionNote(transition: NonNullable<PrdNode['stateTransitions']>[number]) {
-  return [
-    transition.effect,
-    transition.condition ? `条件：${transition.condition}` : null,
-    transition.source ? `来源：${transition.source}` : null,
-    transition.evidence.length ? `证据：${transition.evidence.join(' / ')}` : null,
-  ].filter(Boolean).join('\n') || null
-}
-
-function uniqueRelations(relations: FlowRelation[]) {
-  const seen = new Set<string>()
-  return relations.filter((relation) => {
-    if (seen.has(relation.id)) return false
-    seen.add(relation.id)
-    return true
-  })
-}
-
-function buildFlowRelations(node: PrdNode, tree?: PrdTree | null) {
-  if (!tree) return { upstream: [] as FlowRelation[], downstream: [] as FlowRelation[] }
-
-  const upstream: FlowRelation[] = []
-  const downstream: FlowRelation[] = []
-  const parent = node.parentId ? tree[node.parentId] : null
-
-  if (parent) {
-    upstream.push({
-      id: relationKey(parent.id, node.id, '上级流程'),
-      node: parent,
-      label: '上级流程',
-      icon: 'subdirectory_arrow_right',
-      tone: 'primary',
-    })
-  }
-
-  for (const childId of node.children) {
-    const child = tree[childId]
-    if (!child) continue
-    downstream.push({
-      id: relationKey(node.id, child.id, '进入下游'),
-      node: child,
-      label: child.type === 'module' ? '展开分组' : '进入下游',
-      icon: 'arrow_forward',
-      tone: 'primary',
-    })
-  }
-
-  for (const reference of node.references ?? []) {
-    if (!reference.targetNodeId) continue
-    const target = tree[reference.targetNodeId]
-    if (!target) continue
-    downstream.push({
-      id: relationKey(node.id, target.id, reference.label),
-      node: target,
-      label: reference.label || '跨页面跳转',
-      note: reference.reason,
-      icon: 'open_in_new',
-      tone: 'secondary',
-    })
-  }
-
-  for (const transition of node.stateTransitions ?? []) {
-    if (!transition.targetNodeId || transition.targetNodeId === node.id) continue
-    const target = tree[transition.targetNodeId]
-    if (!target) continue
-    const label = transitionLabel(transition)
-    downstream.push({
-      id: relationKey(node.id, target.id, `state:${transition.id}`),
-      node: target,
-      label,
-      note: transitionNote(transition),
-      icon: 'alt_route',
-      tone: 'secondary',
-    })
-  }
-
-  for (const source of Object.values(tree)) {
-    for (const reference of source.references ?? []) {
-      if (reference.targetNodeId !== node.id) continue
-      upstream.push({
-        id: relationKey(source.id, node.id, reference.label),
-        node: source,
-        label: reference.label || '引用到当前',
-        note: reference.reason,
-        icon: 'call_received',
-        tone: 'secondary',
-      })
-    }
-    for (const transition of source.stateTransitions ?? []) {
-      if (source.id === node.id || transition.targetNodeId !== node.id) continue
-      const label = transitionLabel(transition)
-      upstream.push({
-        id: relationKey(source.id, node.id, `state:${transition.id}`),
-        node: source,
-        label,
-        note: transitionNote(transition),
-        icon: 'alt_route',
-        tone: 'secondary',
-      })
-    }
-  }
-
-  return {
-    upstream: uniqueRelations(upstream),
-    downstream: uniqueRelations(downstream),
-  }
-}
-
-function FlowRelationRail({
-  title,
-  icon,
-  empty,
-  relations,
-  onSelectNode,
-}: {
-  title: string
-  icon: string
-  empty: string
-  relations: FlowRelation[]
-  onSelectNode?: (nodeId: string) => void
-}) {
-  return (
-    <div className="min-w-0">
-      <div className="mb-xs flex items-center gap-xs font-label-md text-label-md text-on-surface-variant">
-        <span className="material-symbols-outlined" style={{ fontSize: '15px' }}>{icon}</span>
-        {title}
-      </div>
-      {relations.length ? (
-        <div className="flex gap-xs overflow-x-auto pb-xs">
-          {relations.map((relation) => (
-            <button
-              key={relation.id}
-              type="button"
-              onClick={() => onSelectNode?.(relation.node.id)}
-              className={[
-                'flex max-w-[190px] shrink-0 items-center gap-xs rounded border px-sm py-xs text-left transition-colors',
-                relation.tone === 'secondary'
-                  ? 'border-secondary/40 bg-secondary-container/20 text-secondary hover:bg-secondary-container/30'
-                  : 'border-outline-variant bg-surface-container-high text-on-surface-variant hover:bg-surface-variant hover:text-on-surface',
-              ].join(' ')}
-              title={[`${relation.label}: ${relation.node.label}`, relation.note].filter(Boolean).join('\n')}
-            >
-              <span className="material-symbols-outlined shrink-0" style={{ fontSize: '15px' }}>{relation.icon}</span>
-              <span className="min-w-0">
-                <span className="block truncate font-label-md text-label-md">{relation.label}</span>
-                <span className="block truncate text-body-sm">{relation.node.label}</span>
-                {relation.note ? <span className="block truncate text-[10px] opacity-75">{relation.note}</span> : null}
-              </span>
-            </button>
-          ))}
-        </div>
-      ) : (
-        <div className="rounded border border-dashed border-outline-variant bg-surface-container-low px-sm py-xs text-body-sm text-on-surface-variant">
-          {empty}
-        </div>
-      )}
-    </div>
-  )
-}
-
 export function PreviewDrawer({
   node,
   tree,
@@ -247,7 +69,6 @@ export function PreviewDrawer({
   onUpdateNode,
   onUpdateContent,
   onOpenQa,
-  onSelectNode,
   proxyBaseUrl,
 }: PreviewDrawerProps) {
   const [, navigate] = useLocation()
@@ -257,7 +78,6 @@ export function PreviewDrawer({
   const [draftContent, setDraftContent] = useState('')
   const [isCollapsed, setIsCollapsed] = useState(false)
   const [activeTab, setActiveTab] = useState<DocumentPreviewTab>('overview')
-  const [isStatePreviewOpen, setIsStatePreviewOpen] = useState(false)
   const [isPreviewManagerOpen, setIsPreviewManagerOpen] = useState(false)
   const deliverySections = node ? buildDeliverySections(node, tree) : []
   const figmaPreviewCount = node ? figmaPreviewImages(node).length : 0
@@ -268,14 +88,12 @@ export function PreviewDrawer({
       return true
     })
     : previewTabs
-  const relations = node ? buildFlowRelations(node, tree) : { upstream: [], downstream: [] }
 
   useEffect(() => {
     setIsEditing(false)
     setDraftContent(node?.content ?? '')
     setIsCollapsed(false)
     setActiveTab('overview')
-    setIsStatePreviewOpen(false)
     setIsPreviewManagerOpen(false)
   }, [node?.id, node?.content])
 
@@ -349,27 +167,6 @@ export function PreviewDrawer({
           </div>
 
           {!isEditing && (
-            <div className="shrink-0 space-y-md border-b border-outline-variant bg-surface-container px-lg py-md shadow-sm">
-              <div className="grid gap-sm 2xl:grid-cols-2">
-                <FlowRelationRail
-                  title="流入"
-                  icon="login"
-                  empty="暂无上游入口"
-                  relations={relations.upstream}
-                  onSelectNode={onSelectNode}
-                />
-                <FlowRelationRail
-                  title="流出"
-                  icon="logout"
-                  empty="暂无下游跳转"
-                  relations={relations.downstream}
-                  onSelectNode={onSelectNode}
-                />
-              </div>
-            </div>
-          )}
-
-          {!isEditing && (
             <div className="shrink-0 border-b border-outline-variant bg-surface-container px-lg py-sm shadow-sm">
               <div className="flex gap-xs overflow-x-auto">
                 {visibleTabs.map((tab) => (
@@ -425,25 +222,14 @@ export function PreviewDrawer({
             <button
               type="button"
               onClick={() => setIsPreviewManagerOpen(true)}
-              className="mb-sm flex min-h-[38px] w-full items-center justify-center gap-xs rounded-lg border border-outline-variant bg-surface-container px-md text-label-md font-medium text-on-surface-variant transition-colors hover:border-primary hover:bg-primary-container/10 hover:text-primary"
+              className="mb-sm flex min-h-[40px] w-full items-center justify-center gap-xs rounded-lg border border-tertiary bg-tertiary-container px-md text-label-md font-medium text-on-tertiary-container transition-opacity hover:opacity-90"
             >
-              <span className="material-symbols-outlined" style={{ fontSize: '17px' }}>photo_library</span>
-              管理画面
+              <span className="material-symbols-outlined" style={{ fontSize: '17px' }}>dashboard_customize</span>
+              画面与状态
               {figmaPreviewCount > 0 ? (
-                <span className="rounded border border-outline-variant px-xs font-code-sm text-code-sm">{figmaPreviewCount}</span>
+                <span className="rounded border border-on-tertiary-container/25 px-xs font-code-sm text-code-sm">{figmaPreviewCount}</span>
               ) : null}
             </button>
-            {figmaPreviewCount > 0 ? (
-              <button
-                type="button"
-                onClick={() => setIsStatePreviewOpen(true)}
-                className="mb-sm flex min-h-[38px] w-full items-center justify-center gap-xs rounded-lg border border-tertiary bg-tertiary-container px-md text-label-md font-medium text-on-tertiary-container transition-opacity hover:opacity-90"
-              >
-                <span className="material-symbols-outlined" style={{ fontSize: '17px' }}>view_carousel</span>
-                界面状态预览
-                <span className="rounded border border-on-tertiary-container/25 px-xs font-code-sm text-code-sm">{figmaPreviewCount}</span>
-              </button>
-            ) : null}
             <div className="mb-sm grid grid-cols-4 gap-xs">
               <button
                 onClick={() => setIsEditing(true)}
@@ -480,9 +266,6 @@ export function PreviewDrawer({
               </button>
             )}
           </div>
-          {isStatePreviewOpen ? (
-            <FigmaStatePreviewModal node={node} onClose={() => setIsStatePreviewOpen(false)} />
-          ) : null}
           {isPreviewManagerOpen && onUpdateNode ? (
             <FigmaPreviewManager
               node={node}

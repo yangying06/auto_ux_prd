@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, type MouseEvent } from 'react'
 import { formatSpecLens, resolveNodeSpecLens } from '../../lib/prdNodeLens'
 import { buildDeliverySections, deliverySectionStatusLabel, isDeliveryNode, type DeliverySectionStatus, type DeliverySectionSummary } from '../../lib/prdNodeDelivery'
 import type { PrdNode, PrdNodeSectionKey, PrdNodeSpecLens, PrdTree } from '../../types/prdNode'
@@ -13,6 +13,7 @@ interface NodeCardProps {
   previewHtml?: string | null
   onNodeClick: (id: string) => void
   onNodeDoubleClick: (id: string) => void
+  onOpenStatePreview?: (id: string) => void
 }
 
 function canForgeNode(node: PrdNode, tree: PrdTree) {
@@ -132,7 +133,7 @@ function nodeKindMeta(node: PrdNode, tree: PrdTree) {
   return { icon: 'conversion_path', label: '交互细节' }
 }
 
-export function NodeCard({ node, tree, isSelected, previewHtml, onNodeClick, onNodeDoubleClick }: NodeCardProps) {
+export function NodeCard({ node, tree, isSelected, previewHtml, onNodeClick, onNodeDoubleClick, onOpenStatePreview }: NodeCardProps) {
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const specLens = resolveNodeSpecLens(node)
   const lensLabel = formatSpecLens(specLens)
@@ -155,6 +156,16 @@ export function NodeCard({ node, tree, isSelected, previewHtml, onNodeClick, onN
         onNodeClick(node.id)
       }, 300)
     }
+  }
+
+  function handleOpenStatePreview(event: MouseEvent<HTMLButtonElement>) {
+    event.preventDefault()
+    event.stopPropagation()
+    if (clickTimerRef.current) {
+      clearTimeout(clickTimerRef.current)
+      clickTimerRef.current = null
+    }
+    onOpenStatePreview?.(node.id)
   }
 
   if (node.type === 'module' && node.parentId === null) {
@@ -256,9 +267,23 @@ export function NodeCard({ node, tree, isSelected, previewHtml, onNodeClick, onN
       </div>
       <div className="mt-sm flex items-center justify-between border-t border-outline-variant pt-sm">
         <span className="font-label-md text-label-md text-on-surface-variant">界面与链路预览</span>
-        <span className="font-label-md text-label-md text-primary opacity-0 transition-opacity group-hover:opacity-100">
-          {canForge ? '双击打磨' : '单击查看'}
-        </span>
+        <div className="flex items-center gap-xs">
+          {hasFigmaPreview ? (
+            <button
+              type="button"
+              onClick={handleOpenStatePreview}
+              className="inline-flex min-h-[26px] items-center gap-[3px] rounded border border-tertiary/45 bg-tertiary/10 px-xs text-label-md font-medium text-tertiary transition-colors hover:border-tertiary hover:bg-tertiary/15"
+              title="直接打开状态预览"
+              aria-label={`打开「${node.label}」状态预览`}
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>view_carousel</span>
+              状态
+            </button>
+          ) : null}
+          <span className="font-label-md text-label-md text-primary opacity-0 transition-opacity group-hover:opacity-100">
+            {canForge ? '双击打磨' : '单击查看'}
+          </span>
+        </div>
       </div>
     </div>
   )

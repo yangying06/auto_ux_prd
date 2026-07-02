@@ -179,6 +179,78 @@ export interface FigmaUxMap {
   ambiguities: FigmaUxMapAmbiguity[]
 }
 
+export type ProjectUiFlowEvidenceKind = 'figma' | 'prd' | 'ai' | 'heuristic'
+export type ProjectUiFlowEdgeSource = FigmaUxMapTransitionSource | 'prd_relation' | 'alignment' | 'visual_order' | 'mixed'
+export type ProjectUiFlowAmbiguityKind =
+  | 'missing_entry'
+  | 'missing_exit'
+  | 'disconnected_node'
+  | 'cycle_without_exit'
+  | 'low_confidence_edge'
+  | 'conflicting_direction'
+
+export interface ProjectUiFlowEvidenceRef {
+  kind: ProjectUiFlowEvidenceKind
+  label: string
+  quote?: string | null
+}
+
+export interface ProjectUiFlowNode {
+  id: string
+  screenId?: string | null
+  stateId?: string | null
+  groupKey?: string | null
+  label: string
+  role: 'screen' | 'state'
+  order: number
+  figmaNodeIds: string[]
+  evidenceRefs: ProjectUiFlowEvidenceRef[]
+  confidence: number
+}
+
+export interface ProjectUiFlowEdge {
+  id: string
+  sourceNodeId: string
+  targetNodeId: string
+  trigger?: string | null
+  condition?: string | null
+  effect?: string | null
+  source: ProjectUiFlowEdgeSource
+  confidence: number
+  evidenceRefs: ProjectUiFlowEvidenceRef[]
+}
+
+export interface ProjectUiFlowPath {
+  id: string
+  label: string
+  nodeIds: string[]
+  edgeIds: string[]
+  confidence: number
+}
+
+export interface ProjectUiFlowAmbiguity {
+  id: string
+  kind: ProjectUiFlowAmbiguityKind
+  message: string
+  nodeId?: string | null
+  edgeId?: string | null
+  evidenceRefs: ProjectUiFlowEvidenceRef[]
+  severity: 'info' | 'warning' | 'critical'
+}
+
+export interface ProjectUiFlow {
+  version: 'project-ui-flow.v1'
+  summary: string
+  confidence: number
+  nodes: ProjectUiFlowNode[]
+  edges: ProjectUiFlowEdge[]
+  entryNodeIds: string[]
+  exitNodeIds: string[]
+  happyPathNodeIds: string[]
+  alternatePaths: ProjectUiFlowPath[]
+  ambiguities: ProjectUiFlowAmbiguity[]
+}
+
 export interface PrdNodeFigmaUxMapSlice {
   screenId: string
   screenLabel: string
@@ -522,6 +594,7 @@ export interface PrdImportPreview {
   sourceIndex: DocumentSourceIndex
   candidateNodes: PrdImportCandidateNode[]
   figmaUxMap?: FigmaUxMap | null
+  projectUiFlow?: ProjectUiFlow | null
   prdSource?: PrdImportPrdSourceSummary | null
   relationSummary?: PrdImportRelationSummary | null
 }

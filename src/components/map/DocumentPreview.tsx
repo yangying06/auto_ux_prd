@@ -2,6 +2,7 @@ import { useState, type ReactNode } from 'react'
 import { formatPerformanceSpecMarkdown, resolveNodePerformanceSpec } from '../../lib/performanceOrchestration'
 import { formatSectionTitle, formatSpecLens, hasNodeSections, resolveNodeAudience, resolveNodeSpecLens } from '../../lib/prdNodeLens'
 import { buildDeliverySections, collectBackendContracts, collectDeliveryEvidence } from '../../lib/prdNodeDelivery'
+import { normalizeReadableMarkup } from '../../lib/readableMarkup'
 import type { PrdNode, PrdNodeDocumentSnapshot, PrdNodeEvidenceRef, PrdNodePolishRevision, PrdNodeSectionKey, PrdTree } from '../../types/prdNode'
 import { FigmaStatePreviewPanel, figmaPreviewImages } from './FigmaStatePreview'
 
@@ -289,7 +290,7 @@ function isSectionPreviewTab(tab: DocumentPreviewTab): tab is PrdNodeSectionKey 
 }
 
 export function extractNodeSnippet(node: PrdNode, maxLength = 170) {
-  const source = textOrNull(node.content) ?? textOrNull(node.summary) ?? node.label
+  const source = normalizeReadableMarkup(textOrNull(node.content) ?? textOrNull(node.summary) ?? node.label)
   const normalized = source
     .replace(/^#{1,6}\s+/gm, '')
     .replace(/^\s*[-*]\s+/gm, '')
@@ -509,7 +510,7 @@ function flushParagraph(paragraph: string[], blocks: ReactNode[], key: number, d
 }
 
 function renderMarkdown(markdown: string, density: MarkdownDensity = 'full') {
-  const lines = markdown.split(/\r?\n/)
+  const lines = normalizeReadableMarkup(markdown).split(/\r?\n/)
   const blocks: ReactNode[] = []
   const paragraph: string[] = []
 

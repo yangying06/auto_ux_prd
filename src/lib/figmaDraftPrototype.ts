@@ -1,6 +1,6 @@
 import type { FigmaFrameImportResponse } from './api'
 import type { ContentBlock } from '../types/chat'
-import type { PrdNode, PrdTree } from '../types/prdNode'
+import type { PrdNode, PrdTree, PrdUiStateKind } from '../types/prdNode'
 import type { UXRequirementState } from '../types/uxRequirement'
 
 interface PrototypeStateLike {
@@ -19,6 +19,26 @@ export interface FigmaDraftSource {
   origin: 'ui_state' | 'figma_preview'
   previewImageUrl?: string | null
   confidence?: number | null
+}
+
+const UI_STATE_KIND_LABELS: Record<PrdUiStateKind, string> = {
+  default: '默认态',
+  overlay: '浮层态',
+  loading: '加载态',
+  success: '成功态',
+  error: '错误态',
+  empty: '空态',
+  disabled: '禁用态',
+  expanded: '展开态',
+  collapsed: '收起态',
+  localized: '多语言态',
+  mirror: '镜像态',
+  selected: '选中态',
+  variant: '变体态',
+}
+
+function uiStateKindLabel(kind: PrdUiStateKind) {
+  return UI_STATE_KIND_LABELS[kind] ?? UI_STATE_KIND_LABELS.variant
 }
 
 function compactText(value: string | null | undefined, maxLength = 120) {
@@ -102,16 +122,16 @@ export function buildFigmaDraftPrototypeInstruction(
   source: FigmaDraftSource,
   hasExistingPrototype: boolean,
 ) {
-  const action = hasExistingPrototype ? 'incrementally update the current HTML prototype' : 'generate the first draft HTML prototype'
+  const action = hasExistingPrototype ? '基于当前 HTML 原型做增量更新' : '生成第一版草稿 HTML 原型'
   const numericSlotCount = result.images.reduce((sum, image) => sum + (image.numericTextSlots?.length ?? 0), 0)
   return [
-    `${action} for PRD node ${node.id} (${node.label}) using the bound Figma design "${source.label}" as the visual source of truth.`,
-    `Figma import: ${result.panelName}; ${result.imageCount} visual evidence image(s). Preserve layout, hierarchy, spacing, color relationships, component placement, and visible state structure from Figma.`,
-    'Use the PRD node for interaction rules, data states, edge cases, copy intent, and acceptance details. Do not treat sample Figma numbers as real business data.',
+    `请为 PRD 节点 ${node.id}（${node.label}）${action}，并以已绑定的 Figma 设计「${source.label}」作为视觉依据。`,
+    `Figma 导入结果：${result.panelName}；共 ${result.imageCount} 张视觉证据图。需要保留 Figma 中的布局、层级、间距、色彩关系、组件位置和可见状态结构。`,
+    '交互规则、数据状态、异常边界、文案意图和验收细节以 PRD 节点为准；不要把 Figma 示例数值当成真实业务数据。',
     numericSlotCount
-      ? `${numericSlotCount} numeric sample value(s) were redacted from Figma; add dynamic placeholders or PRD-backed values at the corresponding locations instead of restoring guessed values.`
+      ? `Figma 中有 ${numericSlotCount} 个示例数值位置已被遮蔽；请在对应位置使用动态占位或 PRD 支持的数值，不要猜测还原示例数值。`
       : null,
-    'Output a usable mobile HTML prototype, not a static screenshot. Add lightweight interactions only when they are implied by the node content or Figma state evidence.',
+    '输出可使用的移动端 HTML 原型，不要输出静态截图。只有当节点内容或 Figma 状态证据明确暗示交互时，才加入轻量交互。',
   ].filter(Boolean).join('\n')
 }
 
@@ -126,7 +146,7 @@ export function buildFigmaDraftRequirement(
       const target = reference.targetNodeId ? tree[reference.targetNodeId] : null
       return [
         reference.label,
-        target ? `target=${target.label}` : null,
+        target ? `目标界面：${target.label}` : null,
         reference.reason,
       ].filter(Boolean).join(' / ')
     })
@@ -135,34 +155,34 @@ export function buildFigmaDraftRequirement(
     .filter((candidate) => candidate.id !== node.id)
     .flatMap((candidate) => (candidate.references ?? [])
       .filter((reference) => reference.targetNodeId === node.id)
-      .map((reference) => `${candidate.label} -> ${node.label}: ${reference.label ?? reference.reason ?? 'linked flow'}`))
+      .map((reference) => `${candidate.label} -> ${node.label}：${reference.label ?? reference.reason ?? '关联流程'}`))
   const stateLines = (node.uiStates ?? []).map((state) => [
-    `${state.label} (${state.kind}, confidence ${state.confidence}%)`,
-    state.visibleTexts.length ? `texts=${state.visibleTexts.slice(0, 5).join(' / ')}` : null,
-    state.annotations.length ? `annotations=${state.annotations.slice(0, 4).join(' / ')}` : null,
+    `${state.label}（${uiStateKindLabel(state.kind)}，置信度 ${state.confidence}%）`,
+    state.visibleTexts.length ? `可见文案：${state.visibleTexts.slice(0, 5).join(' / ')}` : null,
+    state.annotations.length ? `注释：${state.annotations.slice(0, 4).join(' / ')}` : null,
   ].filter(Boolean).join('; '))
   const transitionLines = (node.stateTransitions ?? []).map((transition) => [
     `${transition.sourceNodeId}${transition.sourceStateId ? `:${transition.sourceStateId}` : ''} -> ${transition.targetNodeId}${transition.targetStateId ? `:${transition.targetStateId}` : ''}`,
-    transition.trigger ? `trigger=${transition.trigger}` : null,
-    transition.condition ? `condition=${transition.condition}` : null,
-    transition.effect ? `effect=${transition.effect}` : null,
+    transition.trigger ? `触发条件：${transition.trigger}` : null,
+    transition.condition ? `生效条件：${transition.condition}` : null,
+    transition.effect ? `影响结果：${transition.effect}` : null,
   ].filter(Boolean).join('; '))
   const imageLines = result.images.map((image, index) => (
-    `${index + 1}. ${image.name} / ${image.type} / ${image.width}x${image.height} / depth=${image.depth}`
+    `${index + 1}. ${image.name} / ${image.type} / ${image.width}x${image.height} / 层级深度=${image.depth}`
   ))
 
   return {
-    trigger_condition: `Generate a Figma-backed first draft prototype for ${node.id} (${node.label}).`,
+    trigger_condition: `为 ${node.id}（${node.label}）生成基于 Figma 证据的第一版草稿原型。`,
     sequence_rules: [
-      `Node summary: ${firstMeaningfulText(node.summary, node.content)}`,
-      node.sections?.view?.content || node.sections?.view?.summary ? `View details:\n${node.sections.view.content ?? node.sections.view.summary}` : null,
-      node.sections?.interaction?.content || node.sections?.interaction?.summary ? `Interaction details:\n${node.sections.interaction.content ?? node.sections.interaction.summary}` : null,
-      node.sections?.data?.content || node.sections?.data?.summary ? `Data details:\n${node.sections.data.content ?? node.sections.data.summary}` : null,
-      node.figmaUxMap ? `Figma UX map: ${node.figmaUxMap.screenLabel}; review=${node.figmaUxMap.reviewSource}; confidence=${node.figmaUxMap.reviewConfidence}%; notes=${node.figmaUxMap.notes.join(' / ')}` : null,
-      stateLines.length ? `Figma UI states:\n${stateLines.join('\n')}` : null,
-      transitionLines.length ? `Figma transitions:\n${transitionLines.join('\n')}` : null,
-      outgoingRefs.length || incomingRefs.length ? `Flow references:\n${[...outgoingRefs, ...incomingRefs].join('\n')}` : null,
-      `Figma source: ${source.label}\n${result.summary}\n${imageLines.join('\n')}`,
+      `节点摘要：${firstMeaningfulText(node.summary, node.content)}`,
+      node.sections?.view?.content || node.sections?.view?.summary ? `画面细节：\n${node.sections.view.content ?? node.sections.view.summary}` : null,
+      node.sections?.interaction?.content || node.sections?.interaction?.summary ? `交互细节：\n${node.sections.interaction.content ?? node.sections.interaction.summary}` : null,
+      node.sections?.data?.content || node.sections?.data?.summary ? `数据细节：\n${node.sections.data.content ?? node.sections.data.summary}` : null,
+      node.figmaUxMap ? `Figma UX Map：${node.figmaUxMap.screenLabel}；审阅来源：${node.figmaUxMap.reviewSource}；置信度：${node.figmaUxMap.reviewConfidence}%；备注：${node.figmaUxMap.notes.join(' / ')}` : null,
+      stateLines.length ? `Figma 界面状态：\n${stateLines.join('\n')}` : null,
+      transitionLines.length ? `Figma 状态流转：\n${transitionLines.join('\n')}` : null,
+      outgoingRefs.length || incomingRefs.length ? `流程引用：\n${[...outgoingRefs, ...incomingRefs].join('\n')}` : null,
+      `Figma 来源：${source.label}\n${result.summary}\n${imageLines.join('\n')}`,
     ].filter(Boolean).join('\n\n'),
     asset_dependencies: [
       {
@@ -176,7 +196,7 @@ export function buildFigmaDraftRequirement(
         is_ready: true,
       })),
     ],
-    engine_constraints: node.techNotes ?? 'Build a browser-runnable mobile HTML prototype. Keep external assets limited to the provided Figma evidence or generated CSS.',
+    engine_constraints: node.techNotes ?? '构建可在浏览器运行的移动端 HTML 原型。外部资产仅限已提供的 Figma 证据或生成的 CSS。',
     ui_components: [],
     suggested_answers: [],
     completion_rate: node.status === 'done' ? 82 : 68,
@@ -190,7 +210,7 @@ export function buildFigmaDraftRequirement(
       trigger_condition: null,
       sequence_rules: null,
       asset_dependencies: null,
-      engine_constraints: node.techNotes ? null : 'Engine/client constraints still need designer confirmation.',
+      engine_constraints: node.techNotes ? null : '引擎和客户端约束仍需设计师确认。',
     },
     next_question: null,
     performance_spec: node.performanceSpec ?? null,

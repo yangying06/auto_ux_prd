@@ -14,6 +14,7 @@ import { PrototypePreviewSurface } from '../components/state/PrototypeSandboxPre
 import { TopAppBar } from '../components/map/TopAppBar'
 import { TreeCanvas } from '../components/map/TreeCanvas'
 import { PreviewDrawer } from '../components/map/PreviewDrawer'
+import { FigmaPreviewManager } from '../components/map/FigmaPreviewManager'
 import { buildProjectArchiveFile, encodeProjectArchive } from '../lib/archiveCodec'
 import { formatProjectArchiveError, openProjectArchiveFile, saveProjectArchiveBytes } from '../lib/archiveIO'
 import { createProjectWorkspaceSnapshot } from '../lib/archiveSnapshot'
@@ -359,6 +360,7 @@ export function MapPage() {
   const [flowConnectionDraft, setFlowConnectionDraft] = useState<FlowConnectionDraft | null>(null)
   const [canvasConnectionDraft, setCanvasConnectionDraft] = useState<CanvasConnectionDraft | null>(null)
   const [canvasFocusNodeId, setCanvasFocusNodeId] = useState<string | null>(null)
+  const [statePreviewNodeId, setStatePreviewNodeId] = useState<string | null>(null)
   const [smartArrangeFitRequest, setSmartArrangeFitRequest] = useState(0)
   const sessionIdRef = useRef<string | null>(null)
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -827,6 +829,7 @@ export function MapPage() {
     const pendingFigmaDraftTargets = collectPendingFigmaDraftTargets(prdTree, nodePrototypeStates)
     const displayTree = buildInterfaceFlowDisplayTree(prdTree)
     const selectedNode = selectedNodeId && displayTree[selectedNodeId] ? (prdTree[selectedNodeId] ?? null) : null
+    const statePreviewNode = statePreviewNodeId ? prdTree[statePreviewNodeId] ?? null : null
 
     const completionTargets = completionGateNodes(prdTree)
     const incompleteCompletionTargets = completionTargets.filter((node) => node.status !== 'done')
@@ -1304,6 +1307,13 @@ export function MapPage() {
                 setCanvasFocusNodeId(id)
                 setSelectedNodeId(id)
               }}
+              onCanvasBlankClick={() => {
+                if (selectedNodeId) setSelectedNodeId(null)
+              }}
+              onOpenStatePreview={(id) => {
+                setCanvasFocusNodeId(id)
+                setStatePreviewNodeId(id)
+              }}
               onAddNode={handleOpenAddNode}
               onStartConnection={startCanvasConnection}
               onCompleteConnection={completeCanvasConnection}
@@ -1322,10 +1332,18 @@ export function MapPage() {
             onUpdateNode={updateNode}
             onUpdateContent={updateNodeContent}
             onOpenQa={handleOpenQaForNode}
-            onSelectNode={(id) => setSelectedNodeId(id)}
             proxyBaseUrl={settings.proxyBaseUrl}
           />
         </main>
+        {statePreviewNode ? (
+          <FigmaPreviewManager
+            node={statePreviewNode}
+            tree={prdTree}
+            proxyBaseUrl={settings.proxyBaseUrl}
+            onClose={() => setStatePreviewNodeId(null)}
+            onUpdateNode={updateNode}
+          />
+        ) : null}
         {flowConnectionDraft?.isOpen ? (
           <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/60 p-lg backdrop-blur-sm">
             <section className="flex w-[min(720px,96vw)] flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface shadow-2xl">

@@ -55,6 +55,8 @@ interface TreeCanvasProps {
   connectionDraft?: CanvasConnectionDraft | null
   onNodeClick: (id: string) => void
   onNodeDoubleClick: (id: string) => void
+  onCanvasBlankClick?: () => void
+  onOpenStatePreview?: (nodeId: string) => void
   onAddNode?: (parentId: string | null) => void
   onStartConnection?: (nodeId: string, direction: ConnectionDirection) => void
   onCompleteConnection?: (targetNodeId: string) => void
@@ -1484,6 +1486,8 @@ export function TreeCanvas({
   connectionDraft,
   onNodeClick,
   onNodeDoubleClick,
+  onCanvasBlankClick,
+  onOpenStatePreview,
   onAddNode,
   onStartConnection,
   onCompleteConnection,
@@ -1496,6 +1500,7 @@ export function TreeCanvas({
   const viewportRef = useRef<HTMLDivElement>(null)
   const innerRef = useRef<HTMLDivElement>(null)
   const dragStartRef = useRef<{ x: number; y: number } | null>(null)
+  const canvasDragMovedRef = useRef(false)
   const nodeDragRef = useRef<NodeDragState | null>(null)
   const suppressNodeClickRef = useRef<{ nodeId: string; until: number } | null>(null)
   const didInitialFitRef = useRef(false)
@@ -1914,6 +1919,7 @@ export function TreeCanvas({
       onCancelConnection?.()
       return
     }
+    canvasDragMovedRef.current = false
     dragStartRef.current = {
       x: e.clientX - transformRef.current.tx,
       y: e.clientY - transformRef.current.ty,
@@ -1923,6 +1929,7 @@ export function TreeCanvas({
 
   function onPointerMove(e: PointerEvent<HTMLDivElement>) {
     if (!dragStartRef.current) return
+    canvasDragMovedRef.current = true
     applyTransform({
       ...transformRef.current,
       tx: e.clientX - dragStartRef.current.x,
@@ -1934,6 +1941,17 @@ export function TreeCanvas({
     dragStartRef.current = null
   }
 
+  function onCanvasClick(e: MouseEvent<HTMLDivElement>) {
+    const target = e.target as HTMLElement
+    if (connectionDraft) return
+    if (target.closest('[data-node-card], [data-flow-edge-label], [data-add-interface-node], button, input, textarea, select, a')) return
+    if (canvasDragMovedRef.current) {
+      canvasDragMovedRef.current = false
+      return
+    }
+    onCanvasBlankClick?.()
+  }
+
   return (
     <div
       ref={viewportRef}
@@ -1943,6 +1961,7 @@ export function TreeCanvas({
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerLeave={onPointerUp}
+      onClick={onCanvasClick}
     >
       <div className="pointer-events-none absolute left-lg top-lg z-10 max-w-[360px] rounded-lg border border-outline-variant bg-surface-container/90 px-md py-sm shadow-lg backdrop-blur">
         <div className="flex items-center gap-sm text-primary">
@@ -2131,6 +2150,7 @@ export function TreeCanvas({
                 previewHtml={previewHtmlByNodeId[item.node.id] ?? null}
                 onNodeClick={handleCanvasNodeClick}
                 onNodeDoubleClick={handleCanvasNodeDoubleClick}
+                onOpenStatePreview={onOpenStatePreview}
               />
             </div>
           )

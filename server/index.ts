@@ -15,7 +15,7 @@ import { applyPrototypeEdit, normalizeGeneratedPrototypeHtml, normalizePrototype
 import type { UXRequirementState } from '../src/types/uxRequirement'
 import type { ProjectSourceDocument } from '../src/types/archive'
 import type { PrototypeAssetAuditIssue, PrototypeAssetManifest, PrototypeInterfaceBlueprint, PrototypeInterfaceBlueprintNode, PrototypeInterfaceRect, PrototypeSpineAsset } from '../src/types/prototypeAssets'
-import type { DocumentKeywordSignal, DocumentSourceIndex, DocumentSourceIssue, DocumentSourceSection, FigmaUxMap, FigmaUxMapScreen, FigmaUxMapState, FigmaUxMapTransition, FigmaUxMapTransitionSource, MapAdjustmentOperation, PrdImportCandidateNode, PrdImportPreview, PrdNode, PrdNodeAudience, PrdNodeBackendContractKind, PrdNodeBackendContractRef, PrdNodeEvidenceRef, PrdNodeFigmaPreview, PrdNodeFigmaUxMapSlice, PrdNodeOperationPatch, PrdNodeOperationSuggestion, PrdNodeReference, PrdNodeSectionKey, PrdNodeSourceKind, PrdNodeStatus, PrdStateTransition } from '../src/types/prdNode'
+import type { DocumentKeywordSignal, DocumentSourceIndex, DocumentSourceIssue, DocumentSourceSection, FigmaUxMap, FigmaUxMapScreen, FigmaUxMapState, FigmaUxMapTransition, FigmaUxMapTransitionSource, MapAdjustmentOperation, PrdImportCandidateNode, PrdImportPreview, PrdNode, PrdNodeAudience, PrdNodeBackendContractKind, PrdNodeBackendContractRef, PrdNodeEvidenceRef, PrdNodeFigmaPreview, PrdNodeFigmaUxMapSlice, PrdNodeOperationPatch, PrdNodeOperationSuggestion, PrdNodeReference, PrdNodeSectionKey, PrdNodeSourceKind, PrdNodeStatus, PrdStateTransition, ProjectUiFlow, ProjectUiFlowEdge } from '../src/types/prdNode'
 import type { ChatMessage as AppChatMessage, ReferenceImageClassificationRequest, ReferenceImageClassificationResponse, ReferenceImageRole } from '../src/types/chat'
 import type { QaAttachment, QaChatRequest, QaChatResponse, QaIssuePatch, QaIssuePriority, QaIssueSeverity } from '../src/types/qa'
 import { contentDispositionHeader } from './exportHeaders'
@@ -28,6 +28,7 @@ import { buildVariantConfigs, clampVariantCount, DEFAULT_CREATE_VARIANTS, DEFAUL
 import { normalizeAiProviderError } from './aiProviderError'
 import { formatProjectKnowledgeEvidence, searchProjectKnowledge } from './projectKnowledgeIndex'
 import { scanProjectBaseline } from './projectBaselineScan'
+import { buildProjectUiFlow, formatProjectUiFlowMarkdown } from './projectUiFlow'
 import type { FigmaNumericTextSlot } from './figmaNumericText'
 import type { ProjectWorkflowState } from '../src/types/projectWorkflow'
 
@@ -1813,6 +1814,7 @@ interface FigmaDesignEvidence {
   groups: FigmaDesignEvidenceGroup[]
   relations: FigmaDesignEvidenceRelation[]
   figmaUxMap: FigmaUxMap | null
+  projectUiFlow: ProjectUiFlow | null
 }
 
 interface CombinedDecompositionInput {
@@ -1828,6 +1830,9 @@ const FIGMA_EVIDENCE_MAX_CHILD_NAMES = 10
 const FIGMA_PREVIEW_EXPORT_CONCURRENCY = 3
 const FIGMA_PREVIEW_EXPORT_TIMEOUT_MS = Math.max(500, Number.parseInt(process.env.FIGMA_PREVIEW_EXPORT_TIMEOUT_MS ?? '8000', 10))
 const FIGMA_UX_MAP_REVIEW_TIMEOUT_MS = Math.max(1000, Number.parseInt(process.env.FIGMA_UX_MAP_REVIEW_TIMEOUT_MS ?? '25000', 10))
+const FIGMA_UX_MAP_REVIEW_MAX_IMAGES = Math.max(0, Number.parseInt(process.env.FIGMA_UX_MAP_REVIEW_MAX_IMAGES ?? '12', 10))
+const FIGMA_UX_MAP_REVIEW_IMAGE_FETCH_TIMEOUT_MS = Math.max(500, Number.parseInt(process.env.FIGMA_UX_MAP_REVIEW_IMAGE_FETCH_TIMEOUT_MS ?? '6000', 10))
+const FIGMA_UX_MAP_REVIEW_MAX_IMAGE_BYTES = Math.max(128 * 1024, Number.parseInt(process.env.FIGMA_UX_MAP_REVIEW_MAX_IMAGE_BYTES ?? String(3 * 1024 * 1024), 10))
 
 function normalizeOptionalSourceText(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : null
@@ -1884,6 +1889,19 @@ function sourceImagesToAnthropicBlocks(images: NormalizedSourceImage[]): Anthrop
       data: image.data,
     },
   }))
+}
+
+function buildPrdImageEvidenceInstruction(imageBlocks: Anthropic.ImageBlockParam[], scope: string) {
+  if (!imageBlocks.length) return ''
+  return [
+    '## 多模态 PRD 图片证据',
+    `本次请求附带 ${imageBlocks.length} 张图片，来源可能包括飞书文档图片或用户导入图片。图片顺序与“导入图片资料/飞书文档图片索引”一致。`,
+    `当前拆解范围：${scope}。`,
+    '请把这些图片当作 PRD 语义证据，而不是装饰附件：粗略识别界面用途、流程图/状态图、截图含义、可见文案、备注/标注、按钮、布局层级和状态反馈，并与正文交叉验证。',
+    '当图片能补足正文省略的信息时，把结论写入对应节点的 summary/content/evidenceRefs/openQuestions；当图片与正文或标题冲突时，写入“需澄清点”，不要只按文字标题下结论。',
+    '不要仅因为图片里出现按钮、图标、字段或装饰素材就新建页面节点；只有玩家实际看到且适合逐页打磨的界面/弹窗才作为页面节点。',
+    '',
+  ].join('\n')
 }
 
 function buildSourceImageEvidenceMarkdown(images: NormalizedSourceImage[]) {
@@ -1990,7 +2008,7 @@ function isFigmaInteractionTipText(text: string, name: string, path: string) {
 
 function formatFigmaInteractionTip(text: string) {
   const compacted = compactFigmaText(text, 180)
-  return compacted ? `Interaction tip: ${compacted}` : ''
+  return compacted ? `交互提示：${compacted}` : ''
 }
 
 function collectFigmaAnnotationCandidates(root: FigmaApiNode) {
@@ -3013,6 +3031,31 @@ function buildFigmaPrdAlignmentForGroups(rawPrdText: string, groups: FigmaDesign
   )
 }
 
+function buildProjectUiFlowAlignments(rawPrdText: string, groups: FigmaDesignEvidenceGroup[]) {
+  const alignment = buildFigmaPrdAlignmentForGroups(rawPrdText, groups)
+  return groups.flatMap((group) => (
+    (alignment.matchesByGroup.get(group.key) ?? []).map((match) => ({
+      groupKey: group.key,
+      sourceLabel: match.sourceLabel,
+      excerpt: match.excerpt,
+      confidence: match.confidence,
+    }))
+  ))
+}
+
+function buildProjectUiFlowForEvidence(evidence: FigmaDesignEvidence, rawPrdText?: string | null) {
+  const prdText = rawPrdText?.trim() ?? ''
+  const prdRelations = prdText ? extractPrdInterfaceRelations(prdText, evidence.groups) : []
+  const alignments = prdText ? buildProjectUiFlowAlignments(prdText, evidence.groups) : []
+  return buildProjectUiFlow({
+    groups: evidence.groups,
+    figmaUxMap: evidence.figmaUxMap,
+    figmaRelations: evidence.relations,
+    prdRelations,
+    alignments,
+  })
+}
+
 function prdAlignmentContent(match: FigmaPrdAlignmentMatch) {
   return [
     `### ${match.sourceLabel}`,
@@ -3110,6 +3153,7 @@ async function buildFigmaDesignEvidence(figmaUrl: string, assetBaseUrl?: string 
     groups,
     relations: inferFigmaConnectorRelations(root, groups, sourceUrl),
     figmaUxMap: null,
+    projectUiFlow: null,
   }
 
   const hydrated = await hydrateFigmaPreviewAssets(evidence, assetBaseUrl)
@@ -3259,6 +3303,153 @@ function compactFigmaUxMapForReview(evidence: FigmaDesignEvidence) {
   }
 }
 
+function selectFigmaVisualReviewFrames(evidence: FigmaDesignEvidence) {
+  if (FIGMA_UX_MAP_REVIEW_MAX_IMAGES <= 0) return []
+
+  const allFrames = evidence.groups.flatMap((group) => group.frames.map((frame) => ({ group, frame })))
+  const selected: typeof allFrames = []
+  const seen = new Set<string>()
+  const push = (item: typeof allFrames[number] | null | undefined) => {
+    if (!item || seen.has(item.frame.id) || selected.length >= FIGMA_UX_MAP_REVIEW_MAX_IMAGES) return
+    seen.add(item.frame.id)
+    selected.push(item)
+  }
+
+  for (const group of evidence.groups) push({ group, frame: group.frames[0] })
+  for (const item of allFrames) {
+    if (item.frame.interactionTips.length || item.frame.annotations.length) push(item)
+  }
+  for (const item of allFrames) {
+    if (item.frame.stateKind !== 'default' && item.frame.stateKind !== 'variant') push(item)
+  }
+  for (const item of allFrames) push(item)
+
+  return selected
+}
+
+function buildFigmaPrdReviewContext(evidence: FigmaDesignEvidence, rawPrdText?: string | null) {
+  const text = rawPrdText?.trim()
+  if (!text) return null
+
+  const alignment = buildFigmaPrdAlignmentForGroups(text, evidence.groups)
+  const matchedGroups = evidence.groups
+    .map((group) => {
+      const matches = (alignment.matchesByGroup.get(group.key) ?? []).slice(0, 2)
+      if (!matches.length) return null
+      return {
+        groupKey: group.key,
+        currentLabel: group.label,
+        frameNames: group.frames.map((frame) => frame.name).slice(0, 6),
+        matches: matches.map((match) => ({
+          sourceLabel: match.sourceLabel,
+          confidence: match.confidence,
+          matchedTerms: match.matchedTerms.slice(0, 8),
+          excerpt: match.excerpt.slice(0, 360),
+        })),
+      }
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
+
+  return {
+    matchedGroups,
+    unmatchedPrdExcerpts: alignment.unmatchedSections.slice(0, 6).map((section) => ({
+      sourceLabel: section.label,
+      excerpt: section.text.slice(0, 260),
+    })),
+  }
+}
+
+function buildFigmaVisualReviewCaption(
+  item: ReturnType<typeof selectFigmaVisualReviewFrames>[number],
+  index: number,
+  hasImage: boolean,
+) {
+  return [
+    `视觉证据 ${index + 1}${hasImage ? '' : '（图片不可用）'}`,
+    `groupKey=${item.group.key}`,
+    `当前界面分组=${item.group.label}`,
+    `frameId=${item.frame.id}`,
+    `frame 名称=${item.frame.name}`,
+    `状态猜测=${item.frame.stateLabel}/${item.frame.stateKind}/${item.frame.stateConfidence}%`,
+    item.frame.visibleTexts.length ? `可见文案=${item.frame.visibleTexts.slice(0, 8).join(' / ')}` : null,
+    item.frame.annotations.length ? `Figma 注释=${item.frame.annotations.slice(0, 6).join(' / ')}` : null,
+    item.frame.childNames.length ? `子节点名称=${item.frame.childNames.slice(0, 6).join(' / ')}` : null,
+  ].filter(Boolean).join('\n')
+}
+
+async function loadFigmaReviewImageBlock(assetUrl: string | null | undefined, label: string): Promise<Anthropic.ImageBlockParam | null> {
+  if (!assetUrl) return null
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), FIGMA_UX_MAP_REVIEW_IMAGE_FETCH_TIMEOUT_MS)
+  try {
+    const response = await fetch(assetUrl, { signal: controller.signal })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+
+    const mediaType = mediaTypeFromValue(response.headers.get('content-type')) ?? mediaTypeFromFilePath(new URL(assetUrl).pathname)
+    if (!mediaType) return null
+
+    const bytes = Buffer.from(await response.arrayBuffer())
+    if (!bytes.length || bytes.byteLength > FIGMA_UX_MAP_REVIEW_MAX_IMAGE_BYTES) return null
+
+    return {
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: mediaType,
+        data: bytes.toString('base64'),
+      },
+    }
+  } catch (err) {
+    console.warn(`[figma] UX map visual review image skipped for ${label}:`, err)
+    return null
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+function buildFigmaUxMapReviewPrompt(reviewInput: unknown, prdContext: ReturnType<typeof buildFigmaPrdReviewContext>, imageCount: number) {
+  return [
+    '请审阅并修正下面的 Figma UX Map，不要只依赖 Figma frame 标题。',
+    imageCount
+      ? `你还会收到 ${imageCount} 张截图图片，请用它们判断界面实际用途、可见控件和邻近注释含义。`
+      : '没有可附加的截图图片，请使用结构化 Figma 文本、注释、层级和 PRD 上下文。',
+    '把 PRD 上下文作为语义证据：如果标题与 PRD/截图含义不一致，请把 screens[].label 和 state label 修正为更清晰的产品侧界面名，并保留所有既有 id。',
+    '对每个有价值的状态，annotations 只能输出中文说明；如果 Figma 原始注释是英文，请翻译或概括成中文，不要原样保留英文说明。至少追加一条以“AI总结：”开头的简洁中文注释，概括 UI 用途并解释相关备注；不得虚构没有 Figma 证据的界面或状态。',
+    '保留确定性的 Figma 连接线方向和证据。交互提示是产品需求，不是装饰文案。',
+    '',
+    '## 用于标题和意图审阅的 PRD 上下文',
+    prdContext ? JSON.stringify(prdContext, null, 2) : '本次导入没有提供 PRD 文本。',
+    '',
+    '## 当前 UX Map JSON',
+    JSON.stringify(reviewInput, null, 2),
+  ].join('\n')
+}
+
+async function buildFigmaUxMapReviewContent(
+  evidence: FigmaDesignEvidence,
+  reviewInput: unknown,
+  rawPrdText?: string | null,
+): Promise<Anthropic.ContentBlockParam[]> {
+  const visualFrames = selectFigmaVisualReviewFrames(evidence)
+  const loadedImages = await Promise.all(visualFrames.map(async (item) => ({
+    item,
+    block: await loadFigmaReviewImageBlock(item.frame.assetUrl, `${item.group.label}/${item.frame.name}`),
+  })))
+  const imageCount = loadedImages.filter((item) => item.block).length
+  const prdContext = buildFigmaPrdReviewContext(evidence, rawPrdText)
+  const content: Anthropic.ContentBlockParam[] = [
+    { type: 'text', text: buildFigmaUxMapReviewPrompt(reviewInput, prdContext, imageCount) },
+  ]
+
+  loadedImages.forEach(({ item, block }, index) => {
+    content.push({ type: 'text', text: buildFigmaVisualReviewCaption(item, index, Boolean(block)) })
+    if (block) content.push(block)
+  })
+
+  return content
+}
+
 function figmaUxMapReviewFallback(map: FigmaUxMap, reason: string): FigmaUxMap {
   return {
     ...map,
@@ -3273,18 +3464,22 @@ function figmaUxMapReviewFallback(map: FigmaUxMap, reason: string): FigmaUxMap {
   }
 }
 
-async function reviewFigmaUxMapForEvidence(evidence: FigmaDesignEvidence): Promise<FigmaDesignEvidence> {
+async function reviewFigmaUxMapForEvidence(evidence: FigmaDesignEvidence, rawPrdText?: string | null): Promise<FigmaDesignEvidence> {
   if (!evidence.figmaUxMap || !anthropic) return evidence
   const reviewInput = compactFigmaUxMapForReview(evidence)
   if (!reviewInput) return evidence
 
   try {
+    const reviewContent = await buildFigmaUxMapReviewContent(evidence, reviewInput, rawPrdText)
     const response = await withTimeout(anthropic.messages.create({
       model,
-      max_tokens: 3600,
+      max_tokens: 4200,
       system: [
-        'High priority evidence: Figma vector-line relations describe source UI -> target screen/state. Preserve their direction and evidence.',
-        'High priority evidence: Interaction tips are product requirements for a concrete UI element/screen, not decorative copy.',
+        '高优先级证据：Figma 矢量连线关系表示源界面 -> 目标界面/状态，必须保留方向和证据。',
+        '高优先级证据：交互提示是具体 UI 元素或界面的产品需求，不是装饰文案。',
+        '高优先级证据：截图图片是视觉证据。请先用截图理解界面用途，再判断 frame 标题是否可信。',
+        '如果 Figma 标题含糊、误导或只描述变体/状态，请在保持 id 稳定的前提下，把 screen/state label 改成与截图和 PRD 含义一致的名称。',
+        '当视觉证据、Figma 注释或 PRD 上下文能澄清 UI 意图时，必须为状态追加简洁中文“AI总结：”注释；annotations 数组不得输出英文说明性注释。',
         '你是游戏交互设计稿结构审阅员，任务是审阅 Figma UX Map。',
         '重点判断：哪些 frame 是同一界面的不同状态，哪些是独立界面；哪些注释/标题表达了状态触发或界面跳转。',
         '只能基于给定 JSON 的 screen/state/frame/annotation/relation evidence 工作。',
@@ -3296,7 +3491,7 @@ async function reviewFigmaUxMapForEvidence(evidence: FigmaDesignEvidence): Promi
       messages: [
         {
           role: 'user',
-          content: `请审阅并修正下面的 Figma UX Map。尤其注意同一界面的多状态、半屏浮层、加载/成功/失败/空态、镜像/多语言变体，以及状态之间或界面之间的触发关系。\n\n${JSON.stringify(reviewInput, null, 2)}`,
+          content: reviewContent,
         },
       ],
     }), FIGMA_UX_MAP_REVIEW_TIMEOUT_MS, `Figma UX Map AI review timed out after ${Math.round(FIGMA_UX_MAP_REVIEW_TIMEOUT_MS / 1000)}s`)
@@ -3385,7 +3580,7 @@ function buildFigmaDesignEvidenceMarkdown(evidence: FigmaDesignEvidence) {
 
     const interactionTipLines = frame.interactionTips.length
       ? frame.interactionTips.map((text) => `  - ${text}`).join('\n')
-      : '  - No Interaction tips'
+      : '  - 无交互提示'
 
     return [
       `### ${groupIndex + 1}.${frameIndex + 1} ${group.label} / ${frame.name}`,
@@ -3402,7 +3597,7 @@ function buildFigmaDesignEvidenceMarkdown(evidence: FigmaDesignEvidence) {
       textLines,
       '- 近邻标题/注释证据：',
       annotationLines,
-      '- Interaction tips:',
+      '- 交互提示：',
       interactionTipLines,
     ].join('\n')
   }))
@@ -3429,6 +3624,8 @@ function buildFigmaDesignEvidenceMarkdown(evidence: FigmaDesignEvidence) {
     '## 确定性界面清单',
     ...evidence.groups.map((group, index) => `- ${index + 1}. ${group.label}：${group.frames.map((frame) => frame.name).join(' / ')}`),
     '',
+    formatProjectUiFlowMarkdown(evidence.projectUiFlow),
+    '',
     buildFigmaUxMapMarkdown(evidence.figmaUxMap),
     '',
     '## 页面/状态帧',
@@ -3445,7 +3642,8 @@ async function buildCombinedDecompositionInput(
 
   if (sources.figmaUrl) {
     figmaEvidence = await buildFigmaDesignEvidence(sources.figmaUrl, options.assetBaseUrl)
-    if (options.semanticReview) figmaEvidence = await reviewFigmaUxMapForEvidence(figmaEvidence)
+    if (options.semanticReview) figmaEvidence = await reviewFigmaUxMapForEvidence(figmaEvidence, sources.mdText)
+    figmaEvidence.projectUiFlow = buildProjectUiFlowForEvidence(figmaEvidence, sources.mdText)
     parts.push(buildFigmaDesignEvidenceMarkdown(figmaEvidence))
   }
 
@@ -3572,6 +3770,7 @@ function buildImportPreviewFromCombinedInput(input: CombinedDecompositionInput):
     sourceIndex: basePreview.sourceIndex,
     candidateNodes: [...figmaCandidates, ...prdSupplementCandidates],
     figmaUxMap: input.figmaEvidence.figmaUxMap,
+    projectUiFlow: input.figmaEvidence.projectUiFlow,
     prdSource: buildPreviewPrdSourceSummary(basePreview, input.figmaEvidence, input.rawPrdText),
     relationSummary: buildPreviewRelationSummary(input.figmaEvidence, input.rawPrdText),
   }
@@ -3685,6 +3884,102 @@ function applyFigmaInterfaceReferences(nodes: PrdNode[], evidence: FigmaDesignEv
   relations.forEach(link)
   const uxMapApplied = applyFigmaUxMapTransitions(nodes, evidence)
   if (!uxMapApplied) applyFigmaStateTransitions(nodes, evidence, relations)
+
+  return nodes
+}
+
+function buildProjectUiFlowNodeMap(nodes: PrdNode[], evidence: FigmaDesignEvidence) {
+  const flow = evidence.projectUiFlow
+  const result = new Map<string, PrdNode>()
+  if (!flow) return result
+  const groupIndexByKey = new Map(evidence.groups.map((group, index) => [group.key, index]))
+  for (const flowNode of flow.nodes) {
+    const groupKey = flowNode.groupKey ?? null
+    const groupIndex = groupKey ? groupIndexByKey.get(groupKey) : undefined
+    if (typeof groupIndex !== 'number') continue
+    const node = nodes[groupIndex]
+    if (node) result.set(flowNode.id, node)
+  }
+  return result
+}
+
+function projectUiFlowNodeLabel(flow: ProjectUiFlow, flowNodeId: string) {
+  return flow.nodes.find((node) => node.id === flowNodeId)?.label ?? flowNodeId
+}
+
+function projectUiFlowEdgeLabel(edge: ProjectUiFlowEdge) {
+  return `UI Flow：${edge.trigger ?? edge.effect ?? '流程流转'}`
+}
+
+function projectUiFlowEdgeReason(edge: ProjectUiFlowEdge, flow: ProjectUiFlow) {
+  const source = projectUiFlowNodeLabel(flow, edge.sourceNodeId)
+  const target = projectUiFlowNodeLabel(flow, edge.targetNodeId)
+  const evidenceText = edge.evidenceRefs.length
+    ? `证据：${edge.evidenceRefs.map((ref) => [ref.label, ref.quote].filter(Boolean).join('：')).join('；')}`
+    : '证据：FlowGraph 综合推断'
+  return `PRD+Figma UI Flow：${source} → ${target}；来源 ${edge.source}；置信度 ${edge.confidence}%。${evidenceText}`
+}
+
+function formatProjectUiFlowPosition(node: PrdNode, flowNodeId: string, flow: ProjectUiFlow) {
+  const incoming = flow.edges.filter((edge) => edge.targetNodeId === flowNodeId)
+  const outgoing = flow.edges.filter((edge) => edge.sourceNodeId === flowNodeId)
+  const labels = (ids: string[]) => ids.map((id) => projectUiFlowNodeLabel(flow, id)).join(' → ')
+  const incomingLines = incoming.length
+    ? incoming.map((edge) => `- 来自 ${projectUiFlowNodeLabel(flow, edge.sourceNodeId)}：${edge.trigger ?? edge.effect ?? '进入本界面'}（${edge.confidence}%）`).join('\n')
+    : '- 无明确流入边，可能是流程起点或缺少 Figma/PRD 证据。'
+  const outgoingLines = outgoing.length
+    ? outgoing.map((edge) => `- 前往 ${projectUiFlowNodeLabel(flow, edge.targetNodeId)}：${edge.trigger ?? edge.effect ?? '继续流程'}（${edge.confidence}%）`).join('\n')
+    : '- 无明确流出边，可能是流程终点或缺少 Figma/PRD 证据。'
+  const ambiguityLines = flow.ambiguities
+    .filter((ambiguity) => ambiguity.nodeId === flowNodeId || incoming.some((edge) => edge.id === ambiguity.edgeId) || outgoing.some((edge) => edge.id === ambiguity.edgeId))
+    .map((ambiguity) => `- [${ambiguity.severity}] ${ambiguity.message}`)
+    .join('\n') || '- 暂无直接待确认项。'
+
+  return [
+    '## 全局流程位置',
+    '',
+    `当前界面：${node.label}`,
+    `FlowGraph 节点：${projectUiFlowNodeLabel(flow, flowNodeId)}`,
+    `是否在主路径：${flow.happyPathNodeIds.includes(flowNodeId) ? '是' : '否'}`,
+    `主路径：${labels(flow.happyPathNodeIds) || '未形成稳定主路径'}`,
+    '',
+    '### 流入',
+    incomingLines,
+    '',
+    '### 流出',
+    outgoingLines,
+    '',
+    '### 待确认',
+    ambiguityLines,
+  ].join('\n')
+}
+
+function applyProjectUiFlowToNodes(nodes: PrdNode[], evidence: FigmaDesignEvidence) {
+  const flow = evidence.projectUiFlow
+  if (!flow) return nodes
+  const nodeByFlowNodeId = buildProjectUiFlowNodeMap(nodes, evidence)
+
+  for (const edge of flow.edges) {
+    const source = nodeByFlowNodeId.get(edge.sourceNodeId) ?? null
+    const target = nodeByFlowNodeId.get(edge.targetNodeId) ?? null
+    applyFigmaReference(source, target, projectUiFlowEdgeLabel(edge), projectUiFlowEdgeReason(edge, flow))
+  }
+
+  for (const [flowNodeId, node] of nodeByFlowNodeId.entries()) {
+    const block = formatProjectUiFlowPosition(node, flowNodeId, flow)
+    if (node.content.includes('## 全局流程位置')) continue
+    node.content = uniqueTextBlocks([node.content, block]).join('\n\n')
+    node.sections = {
+      ...node.sections,
+      interaction: {
+        title: node.sections?.interaction?.title ?? `${node.label} Flow`,
+        summary: node.sections?.interaction?.summary ?? '该界面在 PRD+Figma 端到端 UI Flow 中的上下游位置。',
+        content: uniqueTextBlocks([node.sections?.interaction?.content, block]).join('\n\n'),
+        evidenceRefs: node.sections?.interaction?.evidenceRefs ?? [],
+        openQuestions: node.sections?.interaction?.openQuestions ?? [],
+      },
+    }
+  }
 
   return nodes
 }
@@ -4364,7 +4659,7 @@ function buildFigmaPageNodes(evidence: FigmaDesignEvidence, rawPrdText?: string 
       figmaUxMap: nodeFigmaUxMapSlice(evidence.figmaUxMap, uxScreen),
     }
   })
-  return applyFigmaInterfaceReferences(nodes, evidence, rawPrdText)
+  return applyProjectUiFlowToNodes(applyFigmaInterfaceReferences(nodes, evidence, rawPrdText), evidence)
 }
 
 function buildSourceOutlineForPrompt(mdText: string) {
@@ -4673,7 +4968,10 @@ async function decomposeLargeL1(
 ) {
   const slices = buildPrdSourceSlices(mdText)
   const candidates: PrdNode[] = []
-  const projectWorkflowContext = formatProjectWorkflowForDecomposition(session.projectWorkflow)
+  const projectWorkflowContext = [
+    formatProjectWorkflowForDecomposition(session.projectWorkflow),
+    buildPrdImageEvidenceInstruction(imageBlocks, '整份 PRD；每个大文档分片都需要结合图片证据理解正文'),
+  ].filter(Boolean).join('\n\n')
   let consecutiveFailures = 0
 
   for (const [index, slice] of slices.entries()) {
@@ -4690,7 +4988,7 @@ async function decomposeLargeL1(
               role: 'user',
               content: buildContentWithImages(
                 `${projectWorkflowContext}\n\n请从下面这段 PRD 原文中识别页面/界面/弹窗级候选节点。本段只是原文的一部分，只输出本段有明确依据的候选；不要补全没出现的信息，不要输出按钮、字段、奖励条目等内部细节节点。每个节点正文必须很短，只写覆盖范围、关键依据、职责边界和需澄清点。所有展示给用户的文字必须是中文；ID、路径、字段名、枚举值可以保留英文。\n\n原文位置：${slice.label}\n原文阅读进度：${index + 1}/${slices.length}\n\nPRD 原文：\n${slice.text}`,
-                index === 0 ? imageBlocks : [],
+                imageBlocks,
               ),
             },
           ],
@@ -4963,7 +5261,10 @@ async function decomposeL1(
   const claude = anthropic
   if (mdText.length >= LARGE_PRD_DECOMPOSE_THRESHOLD) return decomposeLargeL1(mdText, session, claude, imageBlocks)
   const sourceOutline = buildSourceOutlineForPrompt(mdText)
-  const projectWorkflowContext = formatProjectWorkflowForDecomposition(session.projectWorkflow)
+  const projectWorkflowContext = [
+    formatProjectWorkflowForDecomposition(session.projectWorkflow),
+    buildPrdImageEvidenceInstruction(imageBlocks, '整份 PRD 的页面/界面/弹窗级拆解'),
+  ].filter(Boolean).join('\n\n')
 
   async function requestTopLevel(label: string, retry: boolean) {
     const retryInstruction = retry
@@ -5051,7 +5352,10 @@ async function decomposeBranch(
   const claude = anthropic
   const branchContext = extractRelevantMarkdownForNode(mdText, parentNode)
   const sourceOutline = buildSourceOutlineForPrompt(branchContext)
-  const projectWorkflowContext = formatProjectWorkflowForDecomposition(session.projectWorkflow)
+  const projectWorkflowContext = [
+    formatProjectWorkflowForDecomposition(session.projectWorkflow),
+    buildPrdImageEvidenceInstruction(imageBlocks, `页面「${parentNode.label}」的 MVC 子节点拆解`),
+  ].filter(Boolean).join('\n\n')
 
   async function requestBranch(label: string, retry: boolean) {
     const retryInstruction = retry
