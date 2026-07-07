@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'wouter'
-import { getAiEnvironmentConfig, previewDecomposition, startDecomposition, pollDecomposition, exportSpecFolder, openSpecExportFolder, exportNodeMarkdown, suggestPrdNodeOperations, importFigmaFrame, generatePrototype } from '../lib/api'
+import { getAiEnvironmentConfig, previewDecomposition, startDecomposition, pollDecomposition, exportSpecFolder, openSpecExportFolder, exportNodeMarkdown, importFigmaFrame, generatePrototype, sendNodeChatMessage } from '../lib/api'
 import type { DecompositionSourcePayload } from '../lib/api'
 import { MapAdjustmentPanel } from '../components/map/MapAdjustmentPanel'
 import type { PrdImportPreview, PrdNode, PrdNodeOperationSuggestion, PrdNodeReference, PrdTree } from '../types/prdNode'
-import type { AiEnvironmentConfig } from '../types/chat'
+import type { AiEnvironmentConfig, ChatMessage } from '../types/chat'
 import { useAppStore } from '../store/appStore'
 import { UploadCard } from '../components/upload/UploadCard'
 import { DecompProgress } from '../components/upload/DecompProgress'
@@ -15,21 +15,219 @@ import { TopAppBar } from '../components/map/TopAppBar'
 import { TreeCanvas } from '../components/map/TreeCanvas'
 import { PreviewDrawer } from '../components/map/PreviewDrawer'
 import { FigmaPreviewManager } from '../components/map/FigmaPreviewManager'
+import { FigmaDraftBatchStatusStrip } from '../components/map/FigmaDraftBatchStatusStrip'
 import { buildProjectArchiveFile, encodeProjectArchive } from '../lib/archiveCodec'
 import { formatProjectArchiveError, openProjectArchiveFile, saveProjectArchiveBytes } from '../lib/archiveIO'
 import { createProjectWorkspaceSnapshot } from '../lib/archiveSnapshot'
 import { AddNodeModal, type AddNodePayload } from '../components/map/AddNodeModal'
-import { collectDeliveryNodes, countExportableNodesByDepth, EXPORT_DEPTH_ORDER, pickExportDepthForCount, type ExportDepth, isDeliveryNode } from '../lib/prdNodeDelivery'
-import { buildFigmaDraftPrototypeInstruction, buildFigmaDraftRequirement, figmaImportToPrototypeImages, getNodeFigmaDraftSource, nodeHasGeneratedPrototype, nodeHasPrototypeInFlight } from '../lib/figmaDraftPrototype'
+import { collectDeliveryNodes, countExportableNodesByDepth, isDeliveryNode } from '../lib/prdNodeDelivery'
+import { buildFigmaDraftRequirement, figmaDraftSourceKey, figmaImportToPrototypeImages, getNodeFigmaDraftSources, nodeHasGeneratedFigmaDraftSource, nodeHasPrototypeInFlight, type FigmaDraftSource } from '../lib/figmaDraftPrototype'
+import { buildFigmaPrototypeIterationInstruction } from '../lib/prototypeIteration'
+import { isAbortError } from '../lib/errorUtils'
+import { beginPrototypeGeneration, clearPrototypeGeneration } from '../lib/prototypeGenerationRegistry'
 import { EnvironmentConfigModal } from '../components/map/EnvironmentConfigModal'
 import { AssetWorkbenchModal } from '../components/map/AssetWorkbenchModal'
-import { buildAddedNodeContent, buildFlowConnectionDraftItems, buildImportSourceDocumentText, buildImportSourceFilename, buildInterfaceFlowDisplayTree, buildNodePreviewHtmlMap, buildSmartReference, collectGeneratedNodePrototypes, collectPendingFigmaDraftTargets, completionGateNodes, countExportableAssetRows, countFigmaBoundDeliveryNodes, defaultArchiveFilename, defaultFlowConnectionLabel, downloadBlob, findLastActiveIdx, hasProjectData, normalizeStepPhase, type CanvasConnectionDraft, type FlowConnectionDraft, type FlowConnectionDraftItem } from '../lib/mapPageTransforms'
+import { buildAddedNodeContent, buildAddedNodePolishRequest, buildFlowConnectionDraftItems, buildImportSourceDocumentText, buildImportSourceFilename, buildInterfaceFlowDisplayTree, buildNodePreviewHtmlMap, buildPrototypeFlowPreview, buildSmartReference, collectPendingFigmaDraftTargets, completionGateNodes, countExportableAssetRows, countFigmaBoundDeliveryNodes, defaultArchiveFilename, defaultFlowConnectionLabel, downloadBlob, findLastActiveIdx, hasProjectData, normalizeStepPhase, shouldGenerateAddedNodeDocument, type CanvasConnectionDraft, type FlowConnectionDraft, type FlowConnectionDraftItem } from '../lib/mapPageTransforms'
+import { MAP_SHORTCUT_HELP, isEditableShortcutTarget, resolveMapShortcut } from '../lib/mapKeyboardShortcuts'
 
 type Stage = 'upload' | 'preview' | 'decomposing' | 'error' | 'map'
 
 const INITIAL_STEP = '正在建立原文索引'
 const POLL_INTERVAL_MS = 700
 const EMPTY_NODE_SUGGESTIONS: PrdNodeOperationSuggestion[] = []
+
+type SaveArchiveResult =
+  | { status: 'saved'; message?: string }
+  | { status: 'cancelled'; message?: string }
+  | { status: 'failed'; message: string }
+
+type ShortcutNotice = {
+  id: number
+  tone: 'success' | 'error' | 'info'
+  message: string
+}
+
+interface MapKeyboardShortcutsProps {
+  hasProject: boolean
+  canExport: boolean
+  canSmartArrange: boolean
+  activeNode: PrdNode | null
+  focusedNode: PrdNode | null
+  shortcutsBlocked: boolean
+  onSaveArchive: (saveAs?: boolean) => Promise<SaveArchiveResult>
+  onShortcutNotice: (notice: Omit<ShortcutNotice, 'id'>) => void
+  onOpenArchive: () => Promise<void>
+  onNewProject: () => void
+  onExport: () => Promise<void>
+  onDeleteNode: (node: PrdNode) => boolean
+  onAfterDeleteNode: (nodeId: string) => void
+  onCloseActiveLayer: () => boolean
+  onOpenDetail: (nodeId: string) => void
+  onOpenForge: (node: PrdNode) => boolean
+  onSmartArrange: () => void
+  onAddNode: (parentId: string | null) => void
+}
+
+function MapKeyboardShortcuts({
+  hasProject,
+  canExport,
+  canSmartArrange,
+  activeNode,
+  focusedNode,
+  shortcutsBlocked,
+  onSaveArchive,
+  onShortcutNotice,
+  onOpenArchive,
+  onNewProject,
+  onExport,
+  onDeleteNode,
+  onAfterDeleteNode,
+  onCloseActiveLayer,
+  onOpenDetail,
+  onOpenForge,
+  onSmartArrange,
+  onAddNode,
+}: MapKeyboardShortcutsProps) {
+  const saveInFlightRef = useRef(false)
+
+  useEffect(() => {
+    const runSave = (saveAs: boolean) => {
+      if (!hasProject) {
+        onShortcutNotice({ tone: 'error', message: '保存失败' })
+        return
+      }
+      if (saveInFlightRef.current) return
+      saveInFlightRef.current = true
+      void onSaveArchive(saveAs)
+        .then((result) => {
+          if (result.status === 'saved') {
+            onShortcutNotice({ tone: 'success', message: result.message ?? '已保存' })
+          } else if (result.status === 'failed') {
+            onShortcutNotice({ tone: 'error', message: result.message || '保存失败' })
+          }
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : '保存失败'
+          onShortcutNotice({ tone: 'error', message })
+        })
+        .finally(() => {
+          saveInFlightRef.current = false
+        })
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const action = resolveMapShortcut(event, isEditableShortcutTarget(event.target))
+      if (!action) return
+
+      if (action === 'save' || action === 'saveAs') {
+        event.preventDefault()
+        event.stopPropagation()
+        runSave(action === 'saveAs')
+        return
+      }
+
+      if (shortcutsBlocked && action !== 'cancelOrClose') {
+        event.preventDefault()
+        return
+      }
+
+      if (action === 'cancelOrClose') {
+        if (!onCloseActiveLayer()) return
+        event.preventDefault()
+        event.stopPropagation()
+        return
+      }
+
+      if (action === 'openArchive') {
+        event.preventDefault()
+        event.stopPropagation()
+        void onOpenArchive()
+        return
+      }
+
+      if (action === 'newProject') {
+        event.preventDefault()
+        event.stopPropagation()
+        onNewProject()
+        return
+      }
+
+      if (action === 'exportSpec') {
+        event.preventDefault()
+        if (canExport) {
+          event.stopPropagation()
+          void onExport()
+        }
+        return
+      }
+
+      if (action === 'smartArrange') {
+        event.preventDefault()
+        if (canSmartArrange) {
+          event.stopPropagation()
+          onSmartArrange()
+        }
+        return
+      }
+
+      if (action === 'deleteNode') {
+        const node = activeNode
+        if (!node) return
+        event.preventDefault()
+        event.stopPropagation()
+        if (onDeleteNode(node)) onAfterDeleteNode(node.id)
+        return
+      }
+
+      if (action === 'openDetail') {
+        const node = focusedNode ?? activeNode
+        if (!node) return
+        event.preventDefault()
+        event.stopPropagation()
+        onOpenDetail(node.id)
+        return
+      }
+
+      if (action === 'openForge') {
+        const node = focusedNode ?? activeNode
+        if (!node) return
+        event.preventDefault()
+        if (onOpenForge(node)) event.stopPropagation()
+        return
+      }
+
+      if (action === 'addNode') {
+        event.preventDefault()
+        event.stopPropagation()
+        onAddNode((focusedNode ?? activeNode)?.id ?? null)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [
+    activeNode,
+    canExport,
+    canSmartArrange,
+    focusedNode,
+    hasProject,
+    onAddNode,
+    onAfterDeleteNode,
+    onCloseActiveLayer,
+    onDeleteNode,
+    onExport,
+    onNewProject,
+    onOpenArchive,
+    onOpenDetail,
+    onOpenForge,
+    onSaveArchive,
+    onShortcutNotice,
+    onSmartArrange,
+    shortcutsBlocked,
+  ])
+
+  return null
+}
 
 export function MapPage() {
   const [stage, setStage] = useState<Stage>(() =>
@@ -40,7 +238,6 @@ export function MapPage() {
   const [nodeCount, setNodeCount] = useState(0)
   const [isExporting, setIsExporting] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
-  const [exportDepth, setExportDepth] = useState<ExportDepth>('all')
   const [pendingImportSources, setPendingImportSources] = useState<DecompositionSourcePayload | null>(null)
   const [importPreview, setImportPreview] = useState<PrdImportPreview | null>(null)
   const [isPreviewLoading, setIsPreviewLoading] = useState(false)
@@ -56,8 +253,8 @@ export function MapPage() {
   const [selectedPrototypeNodeId, setSelectedPrototypeNodeId] = useState<string | null>(null)
   const [environmentConfigOpen, setEnvironmentConfigOpen] = useState(false)
   const [assetWorkbenchOpen, setAssetWorkbenchOpen] = useState(false)
-  const [isGeneratingFigmaDrafts, setIsGeneratingFigmaDrafts] = useState(false)
-  const [figmaDraftBatchStatus, setFigmaDraftBatchStatus] = useState<string | null>(null)
+  const [shortcutPanelOpen, setShortcutPanelOpen] = useState(false)
+  const [shortcutNotice, setShortcutNotice] = useState<ShortcutNotice | null>(null)
   const [environmentStatus, setEnvironmentStatus] = useState<AiEnvironmentConfig | null>(null)
   const [flowConnectionDraft, setFlowConnectionDraft] = useState<FlowConnectionDraft | null>(null)
   const [canvasConnectionDraft, setCanvasConnectionDraft] = useState<CanvasConnectionDraft | null>(null)
@@ -80,8 +277,11 @@ export function MapPage() {
   const appendNodeMessage = useAppStore((s) => s.appendNodeMessage)
   const setNodePrototypeVariants = useAppStore((s) => s.setNodePrototypeVariants)
   const selectNodePrototypeVariant = useAppStore((s) => s.selectNodePrototypeVariant)
+  const markNodeFigmaDraftSourceGenerated = useAppStore((s) => s.markNodeFigmaDraftSourceGenerated)
   const assetWorkbench = useAppStore((s) => s.assetWorkbench)
   const qaIssues = useAppStore((s) => s.qaIssues)
+  const figmaDraftBatch = useAppStore((s) => s.figmaDraftBatch)
+  const setFigmaDraftBatch = useAppStore((s) => s.setFigmaDraftBatch)
   const decompositionSteps = useAppStore((s) => s.decompositionSteps)
   const setDecompositionStatus = useAppStore((s) => s.setDecompositionStatus)
   const appendDecompositionStep = useAppStore((s) => s.appendDecompositionStep)
@@ -95,6 +295,8 @@ export function MapPage() {
   const createPageNode = useAppStore((s) => s.createPageNode)
   const updateNode = useAppStore((s) => s.updateNode)
   const updateNodeContent = useAppStore((s) => s.updateNodeContent)
+  const applyNodePolish = useAppStore((s) => s.applyNodePolish)
+  const updateNodeStatus = useAppStore((s) => s.updateNodeStatus)
   const deleteNode = useAppStore((s) => s.deleteNode)
   const createQaIssue = useAppStore((s) => s.createQaIssue)
   const applyMapAdjustmentOperations = useAppStore((s) => s.applyMapAdjustmentOperations)
@@ -131,15 +333,42 @@ export function MapPage() {
     setNodeCount(0)
   }
 
-  const generateFigmaDraftForNode = async (node: PrdNode, tree: PrdTree, batchLabel?: string) => {
-    const source = getNodeFigmaDraftSource(node)
+  const showShortcutNotice = (notice: Omit<ShortcutNotice, 'id'>) => {
+    setShortcutNotice({ ...notice, id: Date.now() })
+  }
+
+  const generateFigmaDraftForNode = async (node: PrdNode, tree: PrdTree, sourceInput?: FigmaDraftSource, batchLabel?: string) => {
+    const source = sourceInput ?? getNodeFigmaDraftSources(node)[0]
     if (!source) throw new Error(`Node ${node.id} has no Figma source.`)
+    const sourceKey = figmaDraftSourceKey(source)
+    const abortController = beginPrototypeGeneration(node.id)
+    if (!abortController) throw new Error(`Node ${node.id} already has prototype generation in progress.`)
+
+    const currentPrototypeState = useAppStore.getState().nodePrototypeStates[node.id]
+    const selectedVariant = currentPrototypeState?.prototypeVariants.find((variant) => variant.index === currentPrototypeState.selectedVariantIndex)
+    const currentHtml = selectedVariant?.html ?? currentPrototypeState?.prototypeHtml ?? null
+    const baseVariantIndex = selectedVariant?.index ?? (currentPrototypeState?.selectedVariantIndex ?? 0)
+    const normalizedBaseVariantIndex = baseVariantIndex >= 0 ? baseVariantIndex : 0
+    const prototypeSnapshotBeforeGeneration = {
+      prototypeVariants: currentPrototypeState?.prototypeVariants ?? [],
+      selectedVariantIndex: currentPrototypeState?.selectedVariantIndex ?? -1,
+    }
+
+    const restorePrototypeAfterCancel = () => {
+      setNodePrototypeVariants(node.id, prototypeSnapshotBeforeGeneration.prototypeVariants)
+      if (prototypeSnapshotBeforeGeneration.selectedVariantIndex >= 0) {
+        selectNodePrototypeVariant(node.id, prototypeSnapshotBeforeGeneration.selectedVariantIndex)
+      }
+    }
 
     setNodePrototypeVariants(node.id, [{
-      index: 0,
-      html: null,
+      index: currentHtml ? normalizedBaseVariantIndex : 0,
+      html: currentHtml,
       status: 'streaming' as const,
-      focus: 'Figma first draft',
+      focus: `Figma first draft: ${source.label}`,
+      history: selectedVariant?.history,
+      assetAudit: selectedVariant?.assetAudit,
+      prototypeSpec: selectedVariant?.prototypeSpec ?? null,
     }])
     appendNodeMessage(node.id, {
       role: 'assistant',
@@ -148,14 +377,22 @@ export function MapPage() {
 
     try {
       const result = await importFigmaFrame(settings.proxyBaseUrl, { url: source.url })
+      if (abortController.signal.aborted) throw new DOMException('Prototype generation cancelled.', 'AbortError')
       const latestState = useAppStore.getState().nodePrototypeStates[node.id]
-      const hasExistingPrototype = nodeHasGeneratedPrototype(latestState)
+      const latestSelectedVariant = latestState?.prototypeVariants.find((variant) => variant.index === latestState.selectedVariantIndex)
+      const latestHtml = latestSelectedVariant?.html ?? latestState?.prototypeHtml ?? currentHtml ?? null
+      const hasExistingPrototype = Boolean(latestHtml?.trim())
       const requirementState = buildFigmaDraftRequirement(node, tree, result, source)
-      const instruction = buildFigmaDraftPrototypeInstruction(node, result, source, hasExistingPrototype)
+      const instruction = buildFigmaPrototypeIterationInstruction(result, hasExistingPrototype)
+      const variantIndex = latestSelectedVariant?.index ?? (latestState?.selectedVariantIndex ?? normalizedBaseVariantIndex)
       const response = await generatePrototype(settings.proxyBaseUrl, requirementState, {
+        currentHtml: latestHtml,
         instruction,
         images: figmaImportToPrototypeImages(result),
         numVariants: 1,
+        variantIndex: hasExistingPrototype ? Math.max(0, variantIndex) : undefined,
+        history: latestSelectedVariant?.history ?? selectedVariant?.history,
+        signal: abortController.signal,
       })
 
       setNodePrototypeVariants(node.id, response.variants.map((variant) => ({
@@ -173,11 +410,20 @@ export function MapPage() {
         throw new Error(message)
       }
       selectNodePrototypeVariant(node.id, chosen.index)
+      markNodeFigmaDraftSourceGenerated(node.id, sourceKey)
       appendNodeMessage(node.id, {
         role: 'assistant',
         content: `First draft prototype generated from Figma: ${result.panelName}`,
       })
     } catch (err) {
+      if (abortController.signal.aborted || isAbortError(err)) {
+        restorePrototypeAfterCancel()
+        appendNodeMessage(node.id, {
+          role: 'assistant',
+          content: 'Figma first draft generation cancelled by user.',
+        })
+        throw err
+      }
       const message = err instanceof Error ? err.message : 'Figma draft generation failed.'
       setNodePrototypeVariants(node.id, [{
         index: 0,
@@ -191,6 +437,8 @@ export function MapPage() {
         content: `Figma first draft generation failed: ${message}`,
       })
       throw err
+    } finally {
+      clearPrototypeGeneration(node.id, abortController)
     }
   }
 
@@ -201,8 +449,9 @@ export function MapPage() {
 
   const handleSaveArchive = async (saveAs = false) => {
     if (!hasProjectData(prdTree, sourceDocument)) {
+      const message = '保存失败'
       setProjectError('当前没有可保存的项目。')
-      return
+      return { status: 'failed', message } satisfies SaveArchiveResult
     }
 
     setProjectError(null)
@@ -218,9 +467,13 @@ export function MapPage() {
       })
       if (result.status === 'saved') {
         markArchiveSaved(result.path, archive.manifest.savedAt)
+        return { status: 'saved', message: '已保存' } satisfies SaveArchiveResult
       }
+      return { status: 'cancelled', message: '已取消保存' } satisfies SaveArchiveResult
     } catch (err) {
-      setProjectError(formatProjectArchiveError(err, '保存项目存档失败'))
+      const message = formatProjectArchiveError(err, '保存失败')
+      setProjectError(message)
+      return { status: 'failed', message } satisfies SaveArchiveResult
     }
   }
 
@@ -473,6 +726,14 @@ export function MapPage() {
   }, [])
 
   useEffect(() => {
+    if (!shortcutNotice) return
+    const timeout = window.setTimeout(() => {
+      setShortcutNotice((current) => (current?.id === shortcutNotice.id ? null : current))
+    }, 2600)
+    return () => window.clearTimeout(timeout)
+  }, [shortcutNotice])
+
+  useEffect(() => {
     if (!canvasFocusNodeId) return
     if (prdTree?.[canvasFocusNodeId]) return
     setCanvasFocusNodeId(null)
@@ -484,21 +745,31 @@ export function MapPage() {
     const pendingFigmaDraftTargets = collectPendingFigmaDraftTargets(prdTree, nodePrototypeStates)
     const displayTree = buildInterfaceFlowDisplayTree(prdTree)
     const selectedNode = selectedNodeId && displayTree[selectedNodeId] ? (prdTree[selectedNodeId] ?? null) : null
+    const focusedNode = canvasFocusNodeId && displayTree[canvasFocusNodeId] ? (prdTree[canvasFocusNodeId] ?? null) : null
+    const activeShortcutNode = selectedNode ?? focusedNode
     const statePreviewNode = statePreviewNodeId ? prdTree[statePreviewNodeId] ?? null : null
 
     const completionTargets = completionGateNodes(prdTree)
     const incompleteCompletionTargets = completionTargets.filter((node) => node.status !== 'done')
-    const generatedNodePrototypes = collectGeneratedNodePrototypes(prdTree, nodePrototypeStates)
-    const selectedNodePrototype = generatedNodePrototypes.find((item) => item.node.id === selectedPrototypeNodeId)
-      ?? generatedNodePrototypes[0]
-    const exportableCount = countExportableNodesByDepth(prdTree, exportDepth)
-    const effectiveExportDepth: ExportDepth = exportableCount > 0 ? exportDepth : pickExportDepthForCount(prdTree, 'all')
-    const effectiveExportableCount = exportableCount > 0 ? exportableCount : countExportableNodesByDepth(prdTree, effectiveExportDepth)
-    const allExportDoneCount = collectDeliveryNodes(prdTree).filter((node) => node.status === 'done').length
-    const canExport = effectiveExportableCount > 0
+    const prototypeFlowPreview = buildPrototypeFlowPreview(prdTree, nodePrototypeStates)
+    const generatedNodePrototypes = prototypeFlowPreview.nodes
+    const prototypeFlowSteps = prototypeFlowPreview.steps
+    const prototypeFlowStepByNodeId = new Map(prototypeFlowSteps.map((step) => [step.node.id, step]))
+    const selectedNodePrototype = (
+      selectedPrototypeNodeId ? prototypeFlowStepByNodeId.get(selectedPrototypeNodeId) : null
+    ) ?? prototypeFlowSteps[0]
+    const previousPrototypeStep = selectedNodePrototype?.previousNodeId
+      ? prototypeFlowStepByNodeId.get(selectedNodePrototype.previousNodeId) ?? null
+      : null
+    const nextPrototypeStep = selectedNodePrototype?.nextNodeId
+      ? prototypeFlowStepByNodeId.get(selectedNodePrototype.nextNodeId) ?? null
+      : null
+    const exportableCount = countExportableNodesByDepth(prdTree, 'all')
+    const canExport = exportableCount > 0
     const canValidatePrototype = completionTargets.length > 0
     const hasProject = hasProjectData(prdTree, sourceDocument)
     const topError = exportError ?? projectError
+    const canSmartArrange = Object.keys(displayTree).length > 1
     const qaOpenIssueCount = Object.values(qaIssues).filter((issue) => issue.status !== 'draft' && issue.status !== 'closed').length
     const connectableNodes = collectDeliveryNodes(prdTree)
     const fallbackConnectableNode = (excludeNodeId?: string | null) => (
@@ -657,7 +928,7 @@ export function MapPage() {
           ? window.confirm(`检测到 ${exportableAssetCount} 组项目素材。\n\n选择“确定”：导出制作文档并附带素材。\n选择“取消”：只导出制作文档。`)
           : false
         const result = await exportSpecFolder(settings.proxyBaseUrl, prdTree, {
-          depth: effectiveExportDepth,
+          depth: 'all',
           includeAssets,
           assetWorkbench,
         })
@@ -670,12 +941,7 @@ export function MapPage() {
         const evidenceSummary = result.evidence
           ? `\n证据链索引：${result.evidence.manifestPath}\n证据文件：${result.evidence.documents.length} 个`
           : ''
-        const depthNote = effectiveExportDepth === 'all'
-          ? '（包含尚未打磨的草稿，仅供早期评审）'
-          : effectiveExportDepth === 'forged'
-            ? '（已确认 + 免打磨节点）'
-            : ''
-        alert(`已导出页面级 spec 文件夹：${result.exportDir}\n共 ${result.documents.length} 篇文档${depthNote}${evidenceSummary}${assetSummary}`)
+        alert(`已导出完整页面级 spec 文档包：${result.exportDir}\n共 ${result.documents.length} 篇文档（包含尚未打磨的草稿，仅供早期评审）${evidenceSummary}${assetSummary}`)
         try {
           await openSpecExportFolder(settings.proxyBaseUrl)
         } catch (openError) {
@@ -710,6 +976,7 @@ export function MapPage() {
       const sources = payload.sources.filter((source) => source.text.trim())
       const supplementText = payload.supplementText.trim()
       const hasSourceMaterial = Boolean(supplementText) || sources.length > 0
+      const shouldGenerateDocument = shouldGenerateAddedNodeDocument(supplementText, sources, sourceDocument)
       const parentId = addNodeParentId && prdTree[addNodeParentId] ? addNodeParentId : null
 
       setIsAddNodeSubmitting(true)
@@ -731,22 +998,40 @@ export function MapPage() {
         setSelectedNodeId(null)
         setNodeOperationSuggestions(newNodeId, [])
 
-        if (!hasSourceMaterial) {
+        if (!shouldGenerateDocument) {
           handleCloseAddNode()
           return
         }
 
+        setAddNodeAssistantReply('已创建节点，正在根据 PRD 生成界面子文档...')
         const nextTree = useAppStore.getState().prdTree ?? {}
-        const response = await suggestPrdNodeOperations(settings.proxyBaseUrl, {
-          tree: nextTree,
-          selectedNodeId: newNodeId,
-          supplementText: [`新增节点名称：${payload.title}`, supplementText].filter(Boolean).join('\n\n'),
-          sources,
+        const parentLabel = parentId ? nextTree[parentId]?.label ?? null : null
+        const userMessage: ChatMessage = {
+          role: 'user',
+          content: buildAddedNodePolishRequest({
+            title: payload.title,
+            parentLabel,
+            supplementText,
+            sources,
+            hasProjectPrd: Boolean(sourceDocument?.text?.trim()),
+          }),
+        }
+        appendNodeMessage(newNodeId, userMessage)
+        const response = await sendNodeChatMessage(settings.proxyBaseUrl, newNodeId, userMessage, nextTree, {
+          sourceDocument,
+          contextMessages: [userMessage],
         })
-        setAddNodeAssistantReply(response.reply)
-        setNodeOperationSuggestions(newNodeId, response.suggestions)
-        if (!response.suggestions.length) {
-          setAddNodeError(response.reply || 'AI 没有返回可应用的 View / Flow / Data 拆分建议。')
+        if (response.nodePatch) {
+          applyNodePolish(newNodeId, response.nodePatch)
+        }
+        if (response.nodeComplete) {
+          updateNodeStatus(newNodeId, 'done')
+        }
+        const assistantReply = response.reply || (response.nodePatch ? '已根据 PRD 生成新增界面子文档。' : '已创建节点，但 AI 没有返回可写入的子文档。')
+        appendNodeMessage(newNodeId, { role: 'assistant', content: assistantReply })
+        setAddNodeAssistantReply(assistantReply)
+        if (!response.nodePatch) {
+          setAddNodeError('新增节点已创建，但 AI 没有返回可写入的子文档；可以打开 Deep Forge 继续补齐。')
         }
       } catch (err) {
         setAddNodeError(err instanceof Error ? err.message : '新增节点失败')
@@ -777,7 +1062,9 @@ export function MapPage() {
     const handleDeleteNode = (node: PrdNode) => {
       if (window.confirm(`确定删除「${node.label}」及其子节点吗？`)) {
         deleteNode(node.id)
+        return true
       }
+      return false
     }
 
     const handleOpenDoc = async (node: PrdNode) => {
@@ -819,11 +1106,7 @@ export function MapPage() {
         if (!proceed) return
       }
 
-      setSelectedPrototypeNodeId((current) => (
-        current && generatedNodePrototypes.some((item) => item.node.id === current)
-          ? current
-          : generatedNodePrototypes[0]?.node.id ?? null
-      ))
+      setSelectedPrototypeNodeId(prototypeFlowPreview.entryNodeId ?? generatedNodePrototypes[0]?.node.id ?? null)
       setIsPrototypeModalOpen(true)
     }
 
@@ -842,50 +1125,210 @@ export function MapPage() {
       setSmartArrangeFitRequest((value) => value + 1)
     }
 
+    const handleOpenForgeShortcut = (node: PrdNode) => {
+      if (!isDeliveryNode(node, prdTree) || (!node.needsPolish && node.status !== 'done')) return false
+      navigate('/forge/' + node.id)
+      return true
+    }
+
+    const shortcutsBlocked = Boolean(
+      canvasConnectionDraft
+      || flowConnectionDraft?.isOpen
+      || isAddNodeModalOpen
+      || environmentConfigOpen
+      || assetWorkbenchOpen
+      || shortcutPanelOpen
+      || isPrototypeModalOpen
+      || statePreviewNodeId,
+    )
+
+    const handleCloseActiveShortcutLayer = () => {
+      if (flowConnectionDraft?.isOpen) {
+        closeFlowConnectionDraft()
+        return true
+      }
+      if (canvasConnectionDraft) {
+        cancelCanvasConnection()
+        return true
+      }
+      if (statePreviewNodeId) {
+        setStatePreviewNodeId(null)
+        return true
+      }
+      if (isAddNodeModalOpen) {
+        handleCloseAddNode()
+        return true
+      }
+      if (isPrototypeModalOpen) {
+        setIsPrototypeModalOpen(false)
+        return true
+      }
+      if (assetWorkbenchOpen) {
+        setAssetWorkbenchOpen(false)
+        return true
+      }
+      if (environmentConfigOpen) {
+        setEnvironmentConfigOpen(false)
+        return true
+      }
+      if (shortcutPanelOpen) {
+        setShortcutPanelOpen(false)
+        return true
+      }
+      if (selectedNodeId) {
+        setSelectedNodeId(null)
+        return true
+      }
+      if (canvasFocusNodeId) {
+        setCanvasFocusNodeId(null)
+        return true
+      }
+      return false
+    }
+
+    const handleAfterShortcutDelete = (nodeId: string) => {
+      if (canvasFocusNodeId === nodeId) setCanvasFocusNodeId(null)
+      if (selectedNodeId === nodeId) setSelectedNodeId(null)
+      if (statePreviewNodeId === nodeId) setStatePreviewNodeId(null)
+      if (canvasConnectionDraft?.nodeId === nodeId) setCanvasConnectionDraft(null)
+      if (selectedPrototypeNodeId === nodeId) setSelectedPrototypeNodeId(null)
+    }
+
+    const handleOpenShortcutDetail = (nodeId: string) => {
+      if (!prdTree[nodeId]) return
+      setCanvasFocusNodeId(nodeId)
+      setSelectedNodeId(nodeId)
+    }
+
+    const shortcutGroups = [
+      { id: 'project', label: '项目', items: MAP_SHORTCUT_HELP.filter((item) => item.group === 'project') },
+      { id: 'canvas', label: '画布', items: MAP_SHORTCUT_HELP.filter((item) => item.group === 'canvas') },
+      { id: 'node', label: '节点', items: MAP_SHORTCUT_HELP.filter((item) => item.group === 'node') },
+    ]
+    const shortcutNoticeClass = shortcutNotice?.tone === 'error'
+      ? 'border-error/40 bg-error-container text-on-error-container'
+      : shortcutNotice?.tone === 'success'
+        ? 'border-tertiary/50 bg-tertiary-container text-tertiary'
+        : 'border-primary/40 bg-primary-container text-on-primary-container'
+    const shortcutNoticeIcon = shortcutNotice?.tone === 'error'
+      ? 'error'
+      : shortcutNotice?.tone === 'success'
+        ? 'check_circle'
+        : 'info'
+
     const handleBatchGenerateFigmaDrafts = async () => {
       const latest = useAppStore.getState()
       const latestTree = latest.prdTree ?? prdTree
       const targets = collectPendingFigmaDraftTargets(latestTree, latest.nodePrototypeStates)
-      if (!targets.length || isGeneratingFigmaDrafts) return
+      if (!targets.length || figmaDraftBatch.isRunning) return
+
+      let latestEnvironmentStatus: AiEnvironmentConfig | null = environmentStatus
+      try {
+        latestEnvironmentStatus = await getAiEnvironmentConfig(settings.proxyBaseUrl)
+        setEnvironmentStatus(latestEnvironmentStatus)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : '无法读取本地环境配置。'
+        setProjectError(`Figma 首稿批量生成前置检查失败：${message}`)
+        return
+      }
+      if (!latestEnvironmentStatus?.values.FIGMA_TOKEN_PRESENT) {
+        setProjectError('Figma 首稿批量生成需要先配置 FIGMA_TOKEN。请在环境配置中粘贴可访问该设计稿的 Figma Personal Access Token。')
+        setEnvironmentConfigOpen(true)
+        return
+      }
+      if (!latestEnvironmentStatus.values.ANTHROPIC_API_KEY_PRESENT) {
+        setProjectError('Figma 首稿批量生成需要先配置 ANTHROPIC_API_KEY，用于调用 AI 原型生成。')
+        setEnvironmentConfigOpen(true)
+        return
+      }
 
       const confirmed = window.confirm(
-        `Will generate first draft prototypes for ${targets.length} Figma-bound node(s). Existing prototypes will be skipped. Continue?`,
+        `Will generate or update draft prototypes from ${targets.length} pending Figma source(s). Already completed sources will be skipped. Continue?`,
       )
       if (!confirmed) return
 
-      setIsGeneratingFigmaDrafts(true)
-      setFigmaDraftBatchStatus(`Preparing ${targets.length} Figma draft prototype(s)...`)
+      setFigmaDraftBatch({ isRunning: true, status: `Preparing ${targets.length} Figma draft source(s)...` })
       setProjectError(null)
       let generated = 0
       let failed = 0
+      let cancelled = false
+      const failureSummaries = new Map<string, { count: number; labels: string[] }>()
 
       for (let index = 0; index < targets.length; index += 1) {
+        const target = targets[index]
         const current = useAppStore.getState()
         const currentTree = current.prdTree ?? latestTree
-        const currentNode = currentTree[targets[index].id]
+        const currentNode = currentTree[target.node.id]
         if (!currentNode) continue
         const currentState = current.nodePrototypeStates[currentNode.id]
-        const currentSource = getNodeFigmaDraftSource(currentNode)
-        if (!currentSource || nodeHasGeneratedPrototype(currentState) || nodeHasPrototypeInFlight(currentState)) continue
+        const targetSourceKey = figmaDraftSourceKey(target.source)
+        const currentSource = getNodeFigmaDraftSources(currentNode).find((source) => figmaDraftSourceKey(source) === targetSourceKey) ?? target.source
+        if (!currentSource || nodeHasPrototypeInFlight(currentState) || nodeHasGeneratedFigmaDraftSource(currentState, currentSource)) continue
 
-        setFigmaDraftBatchStatus(`Generating ${index + 1}/${targets.length}: ${currentNode.label}`)
+        setFigmaDraftBatch({ status: `Generating ${index + 1}/${targets.length}: ${currentNode.label} - ${currentSource.label}` })
         try {
-          await generateFigmaDraftForNode(currentNode, currentTree, `Batch Figma draft ${index + 1}/${targets.length}`)
+          await generateFigmaDraftForNode(currentNode, currentTree, currentSource, `Batch Figma draft ${index + 1}/${targets.length}`)
           generated += 1
-        } catch {
+        } catch (err) {
+          if (isAbortError(err)) {
+            cancelled = true
+            break
+          }
           failed += 1
+          const message = err instanceof Error ? err.message : 'Figma draft generation failed.'
+          const normalizedMessage = message.replace(/\s+/g, ' ').trim() || 'Figma draft generation failed.'
+          const summary = failureSummaries.get(normalizedMessage) ?? { count: 0, labels: [] }
+          summary.count += 1
+          if (summary.labels.length < 3) summary.labels.push(currentNode.label)
+          failureSummaries.set(normalizedMessage, summary)
         }
       }
 
-      setIsGeneratingFigmaDrafts(false)
-      setFigmaDraftBatchStatus(`Figma draft batch complete: ${generated} generated, ${failed} failed.`)
+      setFigmaDraftBatch({
+        isRunning: false,
+        status: cancelled
+          ? `Figma draft batch cancelled: ${generated} generated, ${failed} failed.`
+          : `Figma draft batch complete: ${generated} generated, ${failed} failed.`,
+      })
+      if (cancelled) return
       if (failed > 0) {
-        setProjectError(`Figma draft batch finished with ${failed} failed node(s). Check node chat messages for details, then retry after fixing token/link/API issues.`)
+        const [primaryMessage, primarySummary] = [...failureSummaries.entries()]
+          .sort((a, b) => b[1].count - a[1].count)[0] ?? []
+        const clippedMessage = primaryMessage && primaryMessage.length > 240
+          ? `${primaryMessage.slice(0, 240)}...`
+          : primaryMessage
+        const affectedText = primarySummary?.labels.length
+          ? ` 影响节点示例：${primarySummary.labels.join('、')}。`
+          : ''
+        const reasonText = clippedMessage
+          ? `主要原因（${primarySummary?.count ?? failed}/${failed}）：${clippedMessage}。${affectedText}`
+          : '请查看节点对话中的完整错误。'
+        setProjectError(`Figma 首稿批量生成完成：${generated} 个成功，${failed} 个失败。${reasonText}`)
       }
     }
 
     return (
       <div className="w-full h-screen flex flex-col bg-background animate-fade-in overflow-hidden">
+        <MapKeyboardShortcuts
+          hasProject={hasProject}
+          canExport={canExport}
+          canSmartArrange={canSmartArrange}
+          activeNode={activeShortcutNode}
+          focusedNode={focusedNode}
+          shortcutsBlocked={shortcutsBlocked}
+          onSaveArchive={handleSaveArchive}
+          onShortcutNotice={showShortcutNotice}
+          onOpenArchive={handleOpenArchive}
+          onNewProject={handleNewProject}
+          onExport={handleExport}
+          onDeleteNode={handleDeleteNode}
+          onAfterDeleteNode={handleAfterShortcutDelete}
+          onCloseActiveLayer={handleCloseActiveShortcutLayer}
+          onOpenDetail={handleOpenShortcutDetail}
+          onOpenForge={handleOpenForgeShortcut}
+          onSmartArrange={handleSmartArrange}
+          onAddNode={handleOpenAddNode}
+        />
         <TopAppBar
           projectName={settings.projectName}
           archiveDirty={archiveDirty}
@@ -895,13 +1338,10 @@ export function MapPage() {
           onOpenArchive={() => { void handleOpenArchive() }}
           onSaveArchive={() => { void handleSaveArchive(false) }}
           onSaveArchiveAs={() => { void handleSaveArchive(true) }}
+          onOpenShortcuts={() => setShortcutPanelOpen(true)}
           onConfigureEnvironment={() => setEnvironmentConfigOpen(true)}
           onDeleteProject={handleDeleteProject}
-          exportDepth={exportDepth}
-          exportDepthOptions={EXPORT_DEPTH_ORDER}
-          exportableCount={effectiveExportableCount}
-          exportDoneCount={allExportDoneCount}
-          onChangeExportDepth={setExportDepth}
+          exportableCount={exportableCount}
           canExport={canExport}
           onExport={handleExport}
           isExporting={isExporting}
@@ -909,26 +1349,32 @@ export function MapPage() {
           canValidatePrototype={canValidatePrototype}
           prototypeValidationRiskCount={incompleteCompletionTargets.length}
           onSmartArrange={handleSmartArrange}
-          canSmartArrange={Object.keys(displayTree).length > 1}
+          canSmartArrange={canSmartArrange}
           onBatchGenerateFigmaDrafts={() => { void handleBatchGenerateFigmaDrafts() }}
-          canBatchGenerateFigmaDrafts={pendingFigmaDraftTargets.length > 0 && !isGeneratingFigmaDrafts}
-          isBatchGeneratingFigmaDrafts={isGeneratingFigmaDrafts}
+          canBatchGenerateFigmaDrafts={pendingFigmaDraftTargets.length > 0 && !figmaDraftBatch.isRunning}
+          isBatchGeneratingFigmaDrafts={figmaDraftBatch.isRunning}
           figmaDraftReadyCount={pendingFigmaDraftTargets.length}
           figmaDraftTotalCount={figmaBoundNodeCount}
           onOpenAssets={() => setAssetWorkbenchOpen(true)}
           onOpenQa={handleOpenQaFromToolbar}
           qaOpenIssueCount={qaOpenIssueCount}
         />
-        {figmaDraftBatchStatus ? (
-          <div className="flex shrink-0 items-center gap-sm border-b border-tertiary/30 bg-tertiary/10 px-lg py-sm text-label-md text-on-surface-variant">
-            <span
-              className={['material-symbols-outlined text-tertiary', isGeneratingFigmaDrafts ? 'animate-spin' : ''].join(' ').trim()}
-              style={{ fontSize: '18px' }}
+        <FigmaDraftBatchStatusStrip status={figmaDraftBatch.status} isRunning={figmaDraftBatch.isRunning} />
+        {shortcutNotice ? (
+          <div
+            role="status"
+            className={`fixed right-lg top-[72px] z-[180] flex max-w-[360px] items-center gap-sm rounded-lg border px-md py-sm text-label-md shadow-2xl backdrop-blur ${shortcutNoticeClass}`}
+          >
+            <span className="material-symbols-outlined shrink-0" style={{ fontSize: '18px' }}>{shortcutNoticeIcon}</span>
+            <span className="min-w-0">{shortcutNotice.message}</span>
+            <button
+              type="button"
+              onClick={() => setShortcutNotice(null)}
+              className="ml-xs rounded p-[2px] opacity-70 transition-opacity hover:opacity-100"
+              aria-label="关闭提示"
             >
-              {isGeneratingFigmaDrafts ? 'sync' : 'auto_awesome'}
-            </span>
-            <span className="font-medium text-tertiary">Figma first drafts</span>
-            <span className="truncate">{figmaDraftBatchStatus}</span>
+              <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>close</span>
+            </button>
           </div>
         ) : null}
         {topError && (
@@ -947,6 +1393,72 @@ export function MapPage() {
             </button>
           </div>
         )}
+        {shortcutPanelOpen ? (
+          <div
+            className="fixed inset-0 z-[170] flex items-center justify-center bg-black/60 p-lg backdrop-blur-sm"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="shortcut-panel-title"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) setShortcutPanelOpen(false)
+            }}
+          >
+            <section className="flex max-h-[86vh] w-[min(760px,94vw)] flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface shadow-2xl">
+              <header className="flex shrink-0 items-center justify-between gap-md border-b border-outline-variant bg-surface-container-low px-lg py-md">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-sm">
+                    <span className="material-symbols-outlined text-primary" style={{ fontSize: '20px' }}>keyboard</span>
+                    <h2 id="shortcut-panel-title" className="font-title-md text-title-md text-on-surface">快捷键</h2>
+                  </div>
+                  <p className="mt-xs text-body-sm text-on-surface-variant">当前导图工作区可用快捷键</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShortcutPanelOpen(false)}
+                  className="flex h-9 w-9 items-center justify-center rounded-md border border-outline-variant bg-surface-container-high text-on-surface-variant transition-colors hover:text-on-surface"
+                  aria-label="关闭快捷键面板"
+                  title="关闭"
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>close</span>
+                </button>
+              </header>
+              <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto px-lg py-md">
+                <div className="grid gap-lg md:grid-cols-3">
+                  {shortcutGroups.map((group) => (
+                    <section key={group.id} className="min-w-0">
+                      <h3 className="mb-sm flex items-center gap-xs font-label-md text-label-md text-on-surface-variant">
+                        <span className="h-px flex-1 bg-outline-variant/70" />
+                        <span>{group.label}</span>
+                        <span className="h-px flex-1 bg-outline-variant/70" />
+                      </h3>
+                      <div className="space-y-xs">
+                        {group.items.map((item) => (
+                          <div
+                            key={item.action}
+                            className="rounded-md border border-outline-variant bg-surface-container-low px-sm py-sm"
+                          >
+                            <div className="flex flex-wrap items-center gap-xs">
+                              {item.keys.map((key) => (
+                                <kbd
+                                  key={key}
+                                  className="rounded border border-outline-variant bg-surface px-xs py-[2px] font-mono text-[11px] leading-4 text-on-surface"
+                                >
+                                  {key}
+                                </kbd>
+                              ))}
+                            </div>
+                            <div className="mt-xs font-label-md text-label-md text-on-surface">{item.label}</div>
+                            <p className="mt-[2px] text-body-sm leading-snug text-on-surface-variant">{item.description}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+                  ))}
+                </div>
+              </div>
+            </section>
+          </div>
+        ) : null}
         <main className="flex-1 flex overflow-hidden">
           <MapAdjustmentPanel
             baseUrl={settings.proxyBaseUrl}
@@ -1224,45 +1736,168 @@ export function MapPage() {
                   </button>
                 </div>
               </header>
-              <div className="flex shrink-0 gap-xs overflow-x-auto border-b border-outline-variant bg-surface-container-low px-md py-sm md:px-lg">
-                {generatedNodePrototypes.map((item) => (
-                  <button
-                    key={item.node.id}
-                    type="button"
-                    onClick={() => setSelectedPrototypeNodeId(item.node.id)}
-                    className={[
-                      'shrink-0 rounded-lg border px-sm py-xs text-label-md transition-colors',
-                      selectedNodePrototype?.node.id === item.node.id
-                        ? 'border-tertiary bg-tertiary-container text-on-tertiary-container'
-                        : 'border-outline-variant bg-surface-container-high text-on-surface-variant hover:text-on-surface',
-                    ].join(' ')}
-                  >
-                    {item.node.label}
-                  </button>
-                ))}
+              <div className="flex shrink-0 flex-col gap-sm border-b border-outline-variant bg-surface-container-low px-md py-sm md:px-lg">
+                <div className="flex min-w-0 items-center gap-sm">
+                  <div className="flex min-w-0 flex-1 gap-xs overflow-x-auto" data-prototype-flow-steps="true">
+                    {prototypeFlowSteps.map((step) => (
+                      <button
+                        key={step.node.id}
+                        type="button"
+                        data-prototype-flow-step={step.node.id}
+                        onClick={() => setSelectedPrototypeNodeId(step.node.id)}
+                        title={step.nextEdge ? `${step.node.label}\n下一步：${step.nextEdge.label}` : step.node.label}
+                        className={[
+                          'flex h-9 max-w-[220px] shrink-0 items-center gap-xs rounded-md border px-sm text-label-md transition-colors',
+                          selectedNodePrototype?.node.id === step.node.id
+                            ? 'border-tertiary bg-tertiary-container text-on-tertiary-container'
+                            : 'border-outline-variant bg-surface-container-high text-on-surface-variant hover:text-on-surface',
+                        ].join(' ')}
+                      >
+                        <span className="flex h-5 min-w-5 items-center justify-center rounded-sm bg-surface/70 px-[5px] font-mono text-[10px]">
+                          {step.sequenceIndex + 1}
+                        </span>
+                        <span className="min-w-0 truncate">{step.node.label}</span>
+                        {step.outgoing.length > 0 ? (
+                          <span className="rounded-sm bg-primary/15 px-[5px] font-mono text-[10px] text-primary">
+                            {step.outgoing.length}
+                          </span>
+                        ) : null}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex shrink-0 items-center gap-xs">
+                    <button
+                      type="button"
+                      onClick={() => previousPrototypeStep && setSelectedPrototypeNodeId(previousPrototypeStep.node.id)}
+                      disabled={!previousPrototypeStep}
+                      className="flex h-9 w-9 items-center justify-center rounded-md border border-outline-variant bg-surface-container-high text-on-surface-variant transition-colors hover:text-on-surface disabled:cursor-not-allowed disabled:opacity-35"
+                      title={previousPrototypeStep ? `上一页：${previousPrototypeStep.node.label}` : '已经是第一个界面'}
+                      aria-label="上一页"
+                    >
+                      <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>chevron_left</span>
+                    </button>
+                    <button
+                      type="button"
+                      data-prototype-flow-next="true"
+                      onClick={() => nextPrototypeStep && setSelectedPrototypeNodeId(nextPrototypeStep.node.id)}
+                      disabled={!nextPrototypeStep}
+                      className="flex h-9 items-center gap-xs rounded-md border border-tertiary/50 bg-tertiary-container px-sm text-label-md text-tertiary transition-colors hover:bg-tertiary-container/80 disabled:cursor-not-allowed disabled:opacity-35"
+                      title={nextPrototypeStep ? `下一页：${nextPrototypeStep.node.label}` : '已经到达流程末尾'}
+                    >
+                      <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>chevron_right</span>
+                      下一页
+                    </button>
+                  </div>
+                </div>
+                <div className="flex min-w-0 items-center gap-xs text-body-sm text-on-surface-variant">
+                  <span className="material-symbols-outlined shrink-0 text-tertiary" style={{ fontSize: '16px' }}>conversion_path</span>
+                  <span className="min-w-0 truncate">
+                    {prototypeFlowPreview.edges.length > 0
+                      ? `已按 ${prototypeFlowPreview.edges.length} 条界面联系线串联，从入口界面开始预览`
+                      : '当前没有可串联的界面联系线，暂按节点顺序预览'}
+                  </span>
+                </div>
               </div>
               <div className="flex min-h-0 flex-1 bg-zinc-950 p-sm md:p-md">
-                <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-outline-variant/30 bg-zinc-950 shadow-inner">
-                  <div className="blueprint-grid pointer-events-none absolute inset-0 opacity-40" />
-                  <div className="relative z-0 flex min-h-0 flex-1 overflow-hidden">
-                    <PrototypePreviewSurface
-                      html={selectedNodePrototype?.html ?? null}
-                      title={selectedNodePrototype ? `${selectedNodePrototype.node.label} HTML prototype` : 'HTML prototype'}
-                      interactive
-                      fit="fullPage"
-                      surfaceClassName="h-full w-full"
-                      fallback={(
-                        <div className="flex h-full items-center justify-center p-md text-center text-body-sm text-on-surface-variant">
-                          还没有可展示的界面节点原型。
-                        </div>
-                      )}
-                    />
+                <div className="flex min-h-0 flex-1 gap-sm">
+                  <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-outline-variant/30 bg-zinc-950 shadow-inner">
+                    <div className="blueprint-grid pointer-events-none absolute inset-0 opacity-40" />
+                    <div className="relative z-0 flex min-h-0 flex-1 overflow-hidden">
+                      <PrototypePreviewSurface
+                        html={selectedNodePrototype?.html ?? null}
+                        title={selectedNodePrototype ? `${selectedNodePrototype.node.label} HTML prototype` : 'HTML prototype'}
+                        interactive
+                        fit="fullPage"
+                        surfaceClassName="h-full w-full"
+                        flowEdges={selectedNodePrototype?.outgoing.map((edge) => ({
+                          ...edge,
+                          targetLabel: prototypeFlowStepByNodeId.get(edge.targetNodeId)?.node.label ?? null,
+                        })) ?? []}
+                        onFlowJump={(targetNodeId) => {
+                          const targetStep = prototypeFlowStepByNodeId.get(targetNodeId)
+                          if (targetStep) setSelectedPrototypeNodeId(targetStep.node.id)
+                        }}
+                        fallback={(
+                          <div className="flex h-full items-center justify-center p-md text-center text-body-sm text-on-surface-variant">
+                            还没有可展示的界面节点原型。
+                          </div>
+                        )}
+                      />
+                    </div>
                   </div>
+                  <aside className="hidden w-[300px] shrink-0 flex-col overflow-hidden rounded-lg border border-outline-variant/40 bg-surface-container-low text-on-surface lg:flex">
+                    <div className="border-b border-outline-variant px-md py-sm">
+                      <div className="font-label-md text-label-md text-on-surface-variant">当前界面</div>
+                      <div className="mt-xs truncate font-title-md text-title-md text-on-surface">
+                        {selectedNodePrototype?.node.label ?? '无可预览界面'}
+                      </div>
+                      <div className="mt-xs font-mono text-[11px] uppercase text-on-surface-variant">
+                        {selectedNodePrototype ? `Step ${selectedNodePrototype.sequenceIndex + 1} / ${prototypeFlowSteps.length}` : 'Step 0 / 0'}
+                      </div>
+                    </div>
+                    <div className="min-h-0 flex-1 space-y-md overflow-y-auto px-md py-sm">
+                      <section>
+                        <h3 className="font-label-md text-label-md text-on-surface-variant">联系线跳转</h3>
+                        <div className="mt-sm space-y-xs">
+                          {selectedNodePrototype?.outgoing.length ? selectedNodePrototype.outgoing.map((edge) => {
+                            const targetStep = prototypeFlowStepByNodeId.get(edge.targetNodeId)
+                            return (
+                              <button
+                                key={edge.id}
+                                type="button"
+                                data-prototype-flow-edge={`${edge.sourceNodeId}->${edge.targetNodeId}`}
+                                onClick={() => targetStep && setSelectedPrototypeNodeId(targetStep.node.id)}
+                                disabled={!targetStep}
+                                title={edge.reason ?? edge.label}
+                                className="flex w-full min-w-0 flex-col rounded-md border border-secondary/45 bg-secondary-container/25 px-sm py-xs text-left transition-colors hover:border-secondary hover:bg-secondary-container/40 disabled:cursor-not-allowed disabled:opacity-45"
+                              >
+                                <span className="line-clamp-1 font-label-md text-label-md text-secondary">{edge.label}</span>
+                                <span className="mt-[2px] line-clamp-1 text-body-sm text-on-surface-variant">
+                                  到 {targetStep?.node.label ?? edge.targetNodeId}
+                                </span>
+                              </button>
+                            )
+                          }) : (
+                            <div className="rounded-md border border-outline-variant/45 bg-surface-container-high px-sm py-xs text-body-sm text-on-surface-variant">
+                              当前界面没有继续向后的联系线。
+                            </div>
+                          )}
+                        </div>
+                      </section>
+
+                      <section>
+                        <h3 className="font-label-md text-label-md text-on-surface-variant">顺序预览</h3>
+                        <div className="mt-sm grid grid-cols-2 gap-xs">
+                          <button
+                            type="button"
+                            onClick={() => previousPrototypeStep && setSelectedPrototypeNodeId(previousPrototypeStep.node.id)}
+                            disabled={!previousPrototypeStep}
+                            className="rounded-md border border-outline-variant px-sm py-xs text-label-md text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:cursor-not-allowed disabled:opacity-35"
+                          >
+                            上一页
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => nextPrototypeStep && setSelectedPrototypeNodeId(nextPrototypeStep.node.id)}
+                            disabled={!nextPrototypeStep}
+                            className="rounded-md border border-tertiary/50 bg-tertiary-container px-sm py-xs text-label-md text-tertiary transition-colors hover:bg-tertiary-container/80 disabled:cursor-not-allowed disabled:opacity-35"
+                          >
+                            下一页
+                          </button>
+                        </div>
+                        {selectedNodePrototype?.nextEdge ? (
+                          <p className="mt-xs text-body-sm text-on-surface-variant">
+                            下一步来自联系线：{selectedNodePrototype.nextEdge.label}
+                          </p>
+                        ) : null}
+                      </section>
+                    </div>
+                  </aside>
                 </div>
               </div>
               <footer className="flex shrink-0 flex-wrap items-center justify-between gap-sm border-t border-outline-variant bg-surface-container-low px-md py-sm text-label-md text-on-surface-variant md:px-lg">
                 <div className="min-w-0 truncate">
-                  当前展示：{selectedNodePrototype?.node.label ?? '无'} · 共 {generatedNodePrototypes.length} 个已生成节点原型
+                  当前流程：{selectedNodePrototype ? `${selectedNodePrototype.sequenceIndex + 1}/${prototypeFlowSteps.length} ${selectedNodePrototype.node.label}` : '无可预览界面'} · 共 {generatedNodePrototypes.length} 个已生成节点原型
                 </div>
                 <span>{incompleteCompletionTargets.length > 0 ? `仍有 ${incompleteCompletionTargets.length} 个文档包未确认` : '文档包已全部确认'}</span>
               </footer>

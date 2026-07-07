@@ -2,8 +2,35 @@ import type { PrdNode, PrdUiStateKind } from '../../types/prdNode'
 
 export type FigmaPreviewWithImage = NonNullable<PrdNode['figmaPreviews']>[number] & { imageUrl: string }
 
+function previewIdentity(nodeId: string, imageUrl: string | null | undefined, sourceUrl: string | null | undefined) {
+  return `${nodeId}|${imageUrl ?? ''}|${sourceUrl ?? ''}`
+}
+
+export function figmaPreviewsWithStateFallback(node: PrdNode): NonNullable<PrdNode['figmaPreviews']> {
+  const previews = [...(node.figmaPreviews ?? [])]
+  const seen = new Set(previews.map((preview) => previewIdentity(preview.nodeId, preview.imageUrl, preview.sourceUrl)))
+
+  for (const state of node.uiStates ?? []) {
+    if (!state.previewImageUrl) continue
+    const key = previewIdentity(state.figmaNodeId, state.previewImageUrl, state.sourceUrl)
+    if (seen.has(key)) continue
+    seen.add(key)
+    previews.push({
+      nodeId: state.figmaNodeId,
+      name: state.label,
+      sourceUrl: state.sourceUrl ?? '',
+      imageUrl: state.previewImageUrl,
+      width: 0,
+      height: 0,
+      isPrimary: state.kind === 'default' && !previews.some((preview) => preview.isPrimary),
+    })
+  }
+
+  return previews
+}
+
 export function figmaPreviewImages(node: PrdNode) {
-  return (node.figmaPreviews ?? []).filter((preview): preview is FigmaPreviewWithImage => Boolean(preview.imageUrl))
+  return figmaPreviewsWithStateFallback(node).filter((preview): preview is FigmaPreviewWithImage => Boolean(preview.imageUrl))
 }
 
 function largestPreview(previews: FigmaPreviewWithImage[]) {

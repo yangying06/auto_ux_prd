@@ -17,9 +17,19 @@ export interface FigmaDraftSource {
   url: string
   label: string
   origin: 'ui_state' | 'figma_preview'
+  sourceId?: string | null
+  stateKind?: PrdUiStateKind | null
   previewImageUrl?: string | null
   confidence?: number | null
 }
+
+interface FigmaPrototypeImageSelectionOptions {
+  maxImages?: number
+  maxDataChars?: number
+}
+
+const DEFAULT_FIGMA_PROTOTYPE_MAX_IMAGES = 4
+const DEFAULT_FIGMA_PROTOTYPE_MAX_DATA_CHARS = 18 * 1024 * 1024
 
 const UI_STATE_KIND_LABELS: Record<PrdUiStateKind, string> = {
   default: '默认态',
@@ -51,6 +61,15 @@ function firstMeaningfulText(...values: Array<string | null | undefined>) {
   return values.map((value) => compactText(value, 180)).find(Boolean) ?? ''
 }
 
+export function figmaDraftSourceKeyFromUrl(url: string | null | undefined) {
+  return (url ?? '').trim().toLocaleLowerCase()
+}
+
+export function figmaDraftSourceKey(source: Pick<FigmaDraftSource, 'url'> | string | null | undefined) {
+  if (typeof source === 'string') return figmaDraftSourceKeyFromUrl(source)
+  return figmaDraftSourceKeyFromUrl(source?.url)
+}
+
 export function nodeHasGeneratedPrototype(state: PrototypeStateLike | undefined | null) {
   if (!state) return false
   if (state.prototypeHtml?.trim()) return true
@@ -68,7 +87,25 @@ export function nodeHasPrototypeError(state: PrototypeStateLike | undefined | nu
   return Boolean(state?.prototypeVariants?.some((variant) => variant.status === 'error'))
 }
 
-export function getNodeFigmaDraftSource(node: PrdNode): FigmaDraftSource | null {
+export function nodeHasGeneratedFigmaDraftSource(
+  state: (PrototypeStateLike & { figmaDraftSourceKeys?: string[] }) | undefined | null,
+  source: Pick<FigmaDraftSource, 'url'> | string | null | undefined,
+) {
+  const key = figmaDraftSourceKey(source)
+  return Boolean(key && state?.figmaDraftSourceKeys?.includes(key))
+}
+
+function uniqueFigmaDraftSources(sources: FigmaDraftSource[]) {
+  const seen = new Set<string>()
+  return sources.filter((source) => {
+    const key = figmaDraftSourceKey(source)
+    if (!key || seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+export function getNodeFigmaDraftSources(node: PrdNode): FigmaDraftSource[] {
   const rankedStates = [...(node.uiStates ?? [])]
     .filter((state) => state.sourceUrl?.trim())
     .sort((a, b) => {
@@ -76,37 +113,72 @@ export function getNodeFigmaDraftSource(node: PrdNode): FigmaDraftSource | null 
       const bDefault = b.kind === 'default' ? 1 : 0
       return bDefault - aDefault || b.confidence - a.confidence || a.label.localeCompare(b.label)
     })
-
-  const state = rankedStates[0]
-  if (state?.sourceUrl?.trim()) {
-    return {
-      url: state.sourceUrl.trim(),
-      label: state.label,
-      origin: 'ui_state',
-      previewImageUrl: state.previewImageUrl,
-      confidence: state.confidence,
-    }
-  }
+    .map((state): FigmaDraftSource => {
+      const url = state.sourceUrl?.trim() ?? ''
+      return {
+        url,
+        label: state.label,
+        origin: 'ui_state',
+        sourceId: state.id,
+        stateKind: state.kind,
+        previewImageUrl: state.previewImageUrl,
+        confidence: state.confidence,
+      }
+    })
 
   const rankedPreviews = [...(node.figmaPreviews ?? [])]
     .filter((preview) => preview.sourceUrl?.trim())
     .sort((a, b) => Number(Boolean(b.isPrimary)) - Number(Boolean(a.isPrimary)) || a.name.localeCompare(b.name))
-  const preview = rankedPreviews[0]
-  if (preview?.sourceUrl?.trim()) {
-    return {
-      url: preview.sourceUrl.trim(),
-      label: preview.name,
-      origin: 'figma_preview',
-      previewImageUrl: preview.imageUrl,
-      confidence: preview.isPrimary ? 90 : 70,
-    }
-  }
+    .map((preview): FigmaDraftSource => {
+      const url = preview.sourceUrl?.trim() ?? ''
+      return {
+        url,
+        label: preview.name,
+        origin: 'figma_preview',
+        sourceId: preview.nodeId,
+        stateKind: null,
+        previewImageUrl: preview.imageUrl,
+        confidence: preview.isPrimary ? 90 : 70,
+      }
+    })
 
-  return null
+  return uniqueFigmaDraftSources([...rankedStates, ...rankedPreviews])
 }
 
-export function figmaImportToPrototypeImages(result: FigmaFrameImportResponse): ContentBlock[] {
-  return result.images.slice(0, 6).map((image) => ({
+export function getNodeFigmaDraftSource(node: PrdNode): FigmaDraftSource | null {
+  return getNodeFigmaDraftSources(node)[0] ?? null
+}
+
+function selectFigmaPrototypeImages(
+  result: FigmaFrameImportResponse,
+  options: FigmaPrototypeImageSelectionOptions = {},
+) {
+  const maxImages = Math.max(1, options.maxImages ?? DEFAULT_FIGMA_PROTOTYPE_MAX_IMAGES)
+  const maxDataChars = Math.max(1, options.maxDataChars ?? DEFAULT_FIGMA_PROTOTYPE_MAX_DATA_CHARS)
+  const rankedImages = result.images
+    .map((image, order) => ({ image, order }))
+    .sort((a, b) => Number(b.image.depth === 0) - Number(a.image.depth === 0)
+      || a.image.depth - b.image.depth
+      || a.order - b.order)
+
+  const selected: typeof rankedImages = []
+  let selectedDataChars = 0
+  for (const item of rankedImages) {
+    if (selected.length >= maxImages) break
+    const dataChars = item.image.data.length
+    const wouldExceedBudget = selectedDataChars + dataChars > maxDataChars
+    if (selected.length > 0 && wouldExceedBudget) continue
+    selected.push(item)
+    selectedDataChars += dataChars
+  }
+  return selected.map((item) => item.image)
+}
+
+export function figmaImportToPrototypeImages(
+  result: FigmaFrameImportResponse,
+  options: FigmaPrototypeImageSelectionOptions = {},
+): ContentBlock[] {
+  return selectFigmaPrototypeImages(result, options).map((image) => ({
     type: 'image',
     source: {
       type: 'base64',

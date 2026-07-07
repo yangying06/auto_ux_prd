@@ -14,7 +14,8 @@
     "typecheck:server": "tsc -p tsconfig.node.json",
     "build": "npm run typecheck && vite build",
     "preview": "vite preview",
-    "smoke:local-web": "node scripts/smoke-local-web.mjs"
+    "smoke:local-web": "node scripts/smoke-local-web.mjs",
+    "test": "node scripts/run-tests.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.97.1",

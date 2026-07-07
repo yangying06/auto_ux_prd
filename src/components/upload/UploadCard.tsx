@@ -529,6 +529,9 @@ export function UploadCard({
   const canImport = Boolean(sourceCorpus.text.trim() || normalizedFigmaUrl || normalizedLarkUrl || normalizedGithubRepoUrl)
   const displayedFiles = sourceFiles.slice(0, 5)
   const sourceTotalBytes = sourceFiles.reduce((total, file) => total + file.size, 0)
+  const figmaSourceHint = normalizedFigmaUrl
+    ? '已作为本次 PRD 原型图来源；正式解析会读取节点树、文案、连线和截图。'
+    : '支持 design/file/proto 中选中 Frame 的链接；需要本地 Figma Token 可访问该文件。'
 
   const mergeSourceImages = (images: SourceImageInput[]) => {
     setSourceImages((current) => mergeSourceImageList(current, images))
@@ -628,12 +631,25 @@ export function UploadCard({
   const handleImport = async () => {
     if (isBusy) return
     if (!canImport) {
-      setRejectionError('请至少提供 Figma 链接、飞书 PRD 链接，或导入一个可分析的素材目录/文件。')
+      setRejectionError('请至少提供 Figma PRD 原型图链接、飞书 PRD 链接，或导入一个可分析的素材目录/文件。')
       return
     }
     if (normalizedFigmaUrl && !/https?:\/\/(?:www\.)?figma\.com\//iu.test(normalizedFigmaUrl)) {
-      setRejectionError('Figma 链接格式不正确，请粘贴 figma.com/design 或 figma.com/file 链接。')
+      setRejectionError('Figma 链接格式不正确，请粘贴 figma.com/design、figma.com/file 或 figma.com/proto 链接。')
       return
+    }
+    if (normalizedFigmaUrl) {
+      try {
+        const parsedFigmaUrl = new URL(normalizedFigmaUrl)
+        const hasNodeId = Boolean(parsedFigmaUrl.searchParams.get('node-id') ?? parsedFigmaUrl.searchParams.get('node_id'))
+        if (!hasNodeId) {
+          setRejectionError('请在 Figma 中选中具体 Frame 后复制链接，链接里需要包含 node-id。')
+          return
+        }
+      } catch {
+        setRejectionError('Figma 链接格式不正确，请粘贴完整的 figma.com 链接。')
+        return
+      }
     }
     setRejectionError(null)
 
@@ -668,7 +684,7 @@ export function UploadCard({
 
     const importSourceCorpus = buildSourceCorpus(importSourceFiles)
     if (!importSourceCorpus.text.trim() && !normalizedFigmaUrl) {
-      setRejectionError('没有读取到可分析的 PRD 正文，请检查飞书链接权限或重新读取。')
+      setRejectionError('没有读取到可分析的 PRD 正文，请检查飞书/Figma 链接权限或重新读取。')
       return
     }
 
@@ -698,7 +714,7 @@ export function UploadCard({
       </button>
 
       <label className="grid w-full gap-xs">
-        <span className="text-label-md text-on-surface">Figma 设计稿链接</span>
+        <span className="text-label-md text-on-surface">Figma PRD 原型图链接</span>
         <input
           value={figmaUrl}
           onChange={(event) => setFigmaUrl(event.target.value)}
@@ -706,7 +722,7 @@ export function UploadCard({
           placeholder="https://www.figma.com/design/...?...node-id=..."
         />
         <span className="text-code-sm text-on-surface-variant">
-          可选，用于补充界面结构。
+          {figmaSourceHint}
         </span>
       </label>
 

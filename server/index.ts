@@ -11,14 +11,13 @@ import { applyPerformanceAnswerFast, formatPerformanceSpecForPrompt, formatPerfo
 import { defaultAudienceForSpecLens, formatSectionTitle, formatSpecLens, hasNodeSections, normalizeLegacyAudience, normalizeNodeLensFields, normalizeSectionKeyForLens, normalizeSpecLensValue, resolveNodeAudience, resolveNodeSpecLens, specLensFromLegacyAudience } from '../src/lib/prdNodeLens'
 import { buildDeliverySections, collectBackendContracts, collectDeliveryEvidence, collectDeliveryNodes, filterDeliveryNodesByDepth, type ExportDepth } from '../src/lib/prdNodeDelivery'
 import { buildUiOnlyPrototypeInstruction, isUiOnlyPrototypeFeedback } from '../src/lib/nodeChatIntent'
-import { formatPrototypeSpecForPrompt } from '../src/lib/prototypeSpec'
 import { applyPrototypeEdit, normalizeGeneratedPrototypeHtml, normalizePrototypeHtml } from '../src/lib/prototypeUtils'
 import type { UXRequirementState } from '../src/types/uxRequirement'
 import type { ProjectSourceDocument } from '../src/types/archive'
 import type { PrototypeAssetAuditIssue, PrototypeAssetManifest, PrototypeInterfaceBlueprint, PrototypeInterfaceBlueprintNode, PrototypeInterfaceRect, PrototypeSpineAsset } from '../src/types/prototypeAssets'
-import type { DocumentKeywordSignal, DocumentSourceIndex, DocumentSourceIssue, DocumentSourceSection, FigmaUxMap, FigmaUxMapScreen, FigmaUxMapState, FigmaUxMapTransition, FigmaUxMapTransitionSource, MapAdjustmentOperation, PrdImportCandidateNode, PrdImportPreview, PrdNode, PrdNodeAudience, PrdNodeBackendContractKind, PrdNodeBackendContractRef, PrdNodeEvidenceRef, PrdNodeFigmaPreview, PrdNodeFigmaUxMapSlice, PrdNodeOperationPatch, PrdNodeOperationSuggestion, PrdNodeReference, PrdNodeSectionKey, PrdNodeSourceKind, PrdNodeStatus, PrdStateTransition, ProjectUiFlow, ProjectUiFlowEdge } from '../src/types/prdNode'
+import type { FigmaUxMap, FigmaUxMapScreen, FigmaUxMapState, FigmaUxMapTransition, FigmaUxMapTransitionSource, MapAdjustmentOperation, PrdImportCandidateNode, PrdImportPreview, PrdNode, PrdNodeAudience, PrdNodeBackendContractKind, PrdNodeBackendContractRef, PrdNodeEvidenceRef, PrdNodeFigmaPreview, PrdNodeFigmaUxMapSlice, PrdNodeOperationPatch, PrdNodeOperationSuggestion, PrdNodeReference, PrdNodeSectionKey, PrdNodeSourceKind, PrdNodeStatus, PrdStateTransition, ProjectUiFlow, ProjectUiFlowEdge } from '../src/types/prdNode'
 import type { ChatMessage as AppChatMessage, ReferenceImageClassificationRequest, ReferenceImageClassificationResponse, ReferenceImageRole } from '../src/types/chat'
-import type { QaAttachment, QaChatRequest, QaChatResponse, QaIssuePatch, QaIssuePriority, QaIssueSeverity } from '../src/types/qa'
+import type { QaChatRequest, QaChatResponse } from '../src/types/qa'
 import { contentDispositionHeader } from './exportHeaders'
 import { buildFigmaPrdAlignment, type FigmaPrdAlignmentGroup, type FigmaPrdAlignmentMatch, type FigmaPrdAlignmentSection } from './figmaPrdAlignment'
 import { formatFigmaInteractionTipRequirement, formatFigmaInteractionTipsMarkdown, formatFigmaRelationLabel, formatFigmaRelationReason } from './figmaFlowSemantics'
@@ -28,6 +27,54 @@ import { extractNodeChatSuffix } from './nodeChatResponse'
 import { auditPrototypeAssets, buildPrototypeAssetManifestSection, normalizePrototypeAssetManifest } from './prototypeAssetAudit'
 import { buildVariantConfigs, clampVariantCount, DEFAULT_CREATE_VARIANTS, DEFAULT_UPDATE_VARIANTS } from './prototypePrompts'
 import { normalizeAiProviderError } from './aiProviderError'
+import { apiRoute, BadRequest } from './lib/asyncRoute'
+import {
+  type MarkdownHeading,
+  compactMarkdownTitle,
+  extractMarkdownHeadings,
+  markdownHeadingTitlePath,
+  buildDocumentSourceIndex,
+  buildPrdImportPreview,
+  type DocumentSourceIndexConfig,
+} from './document/sourceIndex'
+import {
+  type DecompositionSourceRequest,
+  type NormalizedDecompositionSources,
+  sourceImagesToAnthropicBlocks,
+  buildPrdImageEvidenceInstruction,
+  buildSourceImageEvidenceMarkdown,
+  normalizeDecompositionSources,
+} from './decompose/sources'
+import {
+  buildPrototypeSpec,
+  buildScreenshotFidelitySection,
+  buildFigmaEvidencePolicySection,
+  buildFigmaAssetUsageSection,
+} from './prototype/prompts'
+import { type PrdSourceSlice, splitLongSectionLines } from './document/sourceSlice'
+import {
+  normalizeQaIssuePatch,
+  qaAttachmentToImageBlock,
+  formatQaNodeRefs,
+  formatQaAttachments,
+  formatQaIssueDraft,
+} from './qa/normalize'
+import {
+  mediaTypeFromValue,
+  mediaTypeFromFilePath,
+  normalizeImageMediaTypeWithFallback,
+} from './lib/imageMediaType'
+import { extensionForMediaType } from '../src/types/imageMedia'
+import { DEFAULT_ENV_CONFIG } from './env'
+import {
+  LarkImportError,
+  normalizeLarkDocumentRef,
+  fetchLarkDocumentContent,
+  extractLarkImageReferences,
+  importLarkImages,
+  titleFromMarkdown,
+  buildLarkImportText,
+} from './lark/import'
 import { formatProjectKnowledgeEvidence, searchProjectKnowledge } from './projectKnowledgeIndex'
 import { scanProjectBaseline } from './projectBaselineScan'
 import { buildProjectUiFlow, formatProjectUiFlowMarkdown } from './projectUiFlow'
@@ -64,20 +111,7 @@ const host = process.env.LOCAL_PROXY_HOST ?? '127.0.0.1'
 const ENV_FILE_PATH = USER_ENV_FILE_PATH
 const CLIENT_DIST_DIR = path.resolve(process.cwd(), 'dist')
 const STATIC_WEB_ENABLED = process.env.DISABLE_STATIC_WEB !== 'true'
-const DEFAULT_ENV_CONFIG = {
-  ANTHROPIC_API_KEY: '',
-  ANTHROPIC_BASE_URL: 'https://litellm.wenext.technology/',
-  CLAUDE_MODEL: 'gpt-5.5',
-  MOCK_DECOMPOSE: 'false',
-  FIGMA_TOKEN: '',
-  LARK_CLI_BIN: 'lark-cli',
-  LARK_IDENTITY: 'user',
-  LARK_APP_ID: '',
-  LARK_APP_SECRET: '',
-  LARK_TENANT_ACCESS_TOKEN: '',
-  LARK_USER_ACCESS_TOKEN: '',
-} as const
-
+const JSON_BODY_LIMIT = process.env.JSON_BODY_LIMIT ?? '32mb'
 function envInt(name: string, fallback: number, min: number, max: number) {
   const parsed = Number.parseInt(process.env[name] ?? '', 10)
   const value = Number.isFinite(parsed) ? parsed : fallback
@@ -94,13 +128,16 @@ const DECOMPOSITION_L1_REDUCER_MAX_CANDIDATES = envInt('DECOMPOSITION_L1_REDUCER
 const DECOMPOSITION_L1_REDUCER_CONTEXT_CHARS = envInt('DECOMPOSITION_L1_REDUCER_CONTEXT_CHARS', 36000, 8000, 120000)
 const LARGE_PRD_DECOMPOSE_THRESHOLD = 30 * 1024
 const LARGE_PRD_SLICE_TARGET_LENGTH = envInt('LARGE_PRD_SLICE_TARGET_LENGTH', 16 * 1024, 6 * 1024, 64 * 1024)
+const DOCUMENT_SOURCE_INDEX_CONFIG: DocumentSourceIndexConfig = {
+  largePrdDecomposeThreshold: LARGE_PRD_DECOMPOSE_THRESHOLD,
+  largePrdSliceTargetLength: LARGE_PRD_SLICE_TARGET_LENGTH,
+}
 const SOURCE_OUTLINE_ROOT_ID = 'SOURCE_OUTLINE_ROOT'
 const SPEC_EXPORT_ROOT = path.resolve(process.cwd(), 'generated', 'specs')
 const SPEC_UI_FLOW_DOC_PATH = 'UI-FLOW.md'
 const ASSET_WORKBENCH_CACHE_ROOT = path.resolve(process.cwd(), '.cache')
 const FIGMA_ASSET_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'figma-assets')
 const FIGMA_INTERMEDIATE_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'figma-intermediates')
-const LARK_MEDIA_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'lark-media')
 const EFFECT_ASSET_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'effect-assets')
 const AUDIO_ASSET_CACHE_ROOT = path.resolve(process.cwd(), '.cache', 'audio-assets')
 const SPINE_PLAYER_RUNTIME_ROOT = path.resolve(process.cwd(), 'node_modules', '@esotericsoftware', 'spine-player', 'dist')
@@ -119,9 +156,6 @@ const FIGMA_IMAGE_SCALE = Math.min(3, Math.max(0.5, Number.parseFloat(process.en
 const FIGMA_MAX_IMAGE_BYTES = Math.max(512 * 1024, Number.parseInt(process.env.FIGMA_MAX_IMAGE_BYTES ?? `${4 * 1024 * 1024}`, 10))
 const FIGMA_IMAGE_EXPORT_RETRY_ATTEMPTS = Math.min(3, Math.max(1, Number.parseInt(process.env.FIGMA_IMAGE_EXPORT_RETRY_ATTEMPTS ?? '2', 10)))
 const FIGMA_IMAGE_EXPORT_RETRY_DELAY_MS = Math.max(100, Number.parseInt(process.env.FIGMA_IMAGE_EXPORT_RETRY_DELAY_MS ?? '700', 10))
-const LARK_IMPORT_MAX_IMAGES = Math.min(6, Math.max(0, Number.parseInt(process.env.LARK_IMPORT_MAX_IMAGES ?? '4', 10)))
-const LARK_IMPORT_MAX_IMAGE_BYTES = Math.max(128 * 1024, Number.parseInt(process.env.LARK_IMPORT_MAX_IMAGE_BYTES ?? `${1200 * 1024}`, 10))
-const LARK_CLI_TIMEOUT_MS = Math.max(5000, Number.parseInt(process.env.LARK_CLI_TIMEOUT_MS ?? '45000', 10))
 const EFFECT_SCAN_MAX_DEPTH = Math.max(1, Number.parseInt(process.env.EFFECT_SCAN_MAX_DEPTH ?? '5', 10))
 const EFFECT_SCAN_MAX_FILES = Math.max(20, Number.parseInt(process.env.EFFECT_SCAN_MAX_FILES ?? '1200', 10))
 
@@ -679,131 +713,6 @@ function safeParseQaChatJson(text: string) {
     return { reply: stripJsonEcho(trimmed), readyToConfirm: false, issuePatch: {} }
   }
 }
-
-function normalizeQaTextArray(value: unknown) {
-  if (!Array.isArray(value)) return undefined
-  return value.map((item) => normalizeNullableString(item)).filter((item): item is string => Boolean(item))
-}
-
-function normalizeQaSeverity(value: unknown): QaIssueSeverity | undefined {
-  return value === 'blocker' || value === 'major' || value === 'minor' || value === 'trivial'
-    ? value
-    : undefined
-}
-
-function normalizeQaPriority(value: unknown): QaIssuePriority | undefined {
-  return value === 'high' || value === 'medium' || value === 'low' ? value : undefined
-}
-
-function normalizeQaConfidenceValue(value: unknown) {
-  if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, Math.min(100, Math.round(value)))
-  if (typeof value === 'string') {
-    const parsed = Number.parseInt(value, 10)
-    if (Number.isFinite(parsed)) return Math.max(0, Math.min(100, parsed))
-  }
-  return undefined
-}
-
-function normalizeQaIssuePatch(value: unknown): QaIssuePatch {
-  const candidate = value && typeof value === 'object' ? value as Record<string, unknown> : {}
-  const patch: QaIssuePatch = {}
-  const title = normalizeNullableString(candidate.title)
-  const description = normalizeNullableString(candidate.description)
-  const expectedResult = normalizeNullableString(candidate.expectedResult ?? candidate.expected_result)
-  const actualResult = normalizeNullableString(candidate.actualResult ?? candidate.actual_result)
-  const environment = normalizeNullableString(candidate.environment)
-  const aiSummary = normalizeNullableString(candidate.aiSummary ?? candidate.ai_summary)
-  const suspectedCause = normalizeNullableString(candidate.suspectedCause ?? candidate.suspected_cause)
-  const devSuggestion = normalizeNullableString(candidate.devSuggestion ?? candidate.dev_suggestion)
-  const stepsToReproduce = normalizeQaTextArray(candidate.stepsToReproduce ?? candidate.steps_to_reproduce)
-  const aiQuestions = normalizeQaTextArray(candidate.aiQuestions ?? candidate.ai_questions)
-  const severity = normalizeQaSeverity(candidate.severity)
-  const priority = normalizeQaPriority(candidate.priority)
-  const aiConfidence = normalizeQaConfidenceValue(candidate.aiConfidence ?? candidate.ai_confidence)
-
-  if (title) patch.title = title
-  if (severity) patch.severity = severity
-  if (priority) patch.priority = priority
-  if (description) patch.description = description
-  if (stepsToReproduce) patch.stepsToReproduce = stepsToReproduce
-  if (expectedResult) patch.expectedResult = expectedResult
-  if (actualResult) patch.actualResult = actualResult
-  if (candidate.environment !== undefined) patch.environment = environment
-  if (aiSummary) patch.aiSummary = aiSummary
-  if (aiQuestions) patch.aiQuestions = aiQuestions
-  if (aiConfidence !== undefined) patch.aiConfidence = aiConfidence
-  if (candidate.suspectedCause !== undefined || candidate.suspected_cause !== undefined) patch.suspectedCause = suspectedCause
-  if (candidate.devSuggestion !== undefined || candidate.dev_suggestion !== undefined) patch.devSuggestion = devSuggestion
-  if (typeof candidate.readyToConfirm === 'boolean') patch.readyToConfirm = candidate.readyToConfirm
-  if (typeof candidate.ready_to_confirm === 'boolean') patch.readyToConfirm = candidate.ready_to_confirm
-  return patch
-}
-
-function qaAttachmentToImageBlock(attachment: QaAttachment): Anthropic.ImageBlockParam | null {
-  if (attachment.type !== 'image' || !attachment.dataUrl) return null
-  const match = /^data:(image\/(?:png|jpeg|gif|webp));base64,(.+)$/u.exec(attachment.dataUrl)
-  const mediaType = attachment.mediaType ?? match?.[1]
-  const data = match?.[2] ?? attachment.dataUrl
-  if (
-    mediaType !== 'image/png'
-    && mediaType !== 'image/jpeg'
-    && mediaType !== 'image/gif'
-    && mediaType !== 'image/webp'
-  ) {
-    return null
-  }
-  return {
-    type: 'image',
-    source: {
-      type: 'base64',
-      media_type: mediaType,
-      data,
-    },
-  }
-}
-
-function formatQaNodeRefs(issue: QaChatRequest['issue']) {
-  if (!issue.nodeRefs.length) return '未引用节点'
-  return issue.nodeRefs.map((ref, index) => [
-    `### 引用 ${index + 1}: ${ref.title}`,
-    `- 节点 ID: ${ref.nodeId}`,
-    `- 类型: ${ref.nodeType}`,
-    `- 导出路径: ${ref.docPath ?? '未指定'}`,
-    `- 摘要: ${ref.summary}`,
-    ref.snapshot.handoffGoal ? `- AI 接力目标: ${ref.snapshot.handoffGoal}` : null,
-    ref.snapshot.qualityGate ? `- 质量门槛: ${ref.snapshot.qualityGate}` : null,
-    ref.snapshot.techNotes ? `- 技术备注: ${ref.snapshot.techNotes}` : null,
-    `- 内容:\n${ref.content}`,
-  ].filter(Boolean).join('\n')).join('\n\n')
-}
-
-function formatQaAttachments(issue: QaChatRequest['issue']) {
-  if (!issue.attachments.length) return '未上传附件'
-  return issue.attachments.map((attachment, index) => {
-    if (attachment.type === 'image') {
-      return `${index + 1}. 图片：${attachment.name}（${attachment.mediaType ?? '未知类型'}）`
-    }
-    return `${index + 1}. ${attachment.name}\n${attachment.text ?? '无文本内容'}`
-  }).join('\n\n')
-}
-
-function formatQaIssueDraft(issue: QaChatRequest['issue']) {
-  return [
-    `标题: ${issue.title}`,
-    `状态: ${issue.status}`,
-    `严重程度: ${issue.severity}`,
-    `优先级: ${issue.priority}`,
-    `描述: ${issue.description || '未填写'}`,
-    `复现步骤:\n${issue.stepsToReproduce.length ? issue.stepsToReproduce.map((step, index) => `${index + 1}. ${step}`).join('\n') : '未填写'}`,
-    `预期结果: ${issue.expectedResult || '未填写'}`,
-    `实际结果: ${issue.actualResult || '未填写'}`,
-    `环境: ${issue.environment ?? '未填写'}`,
-    `AI 摘要: ${issue.aiSummary || '未生成'}`,
-    `疑似原因: ${issue.suspectedCause ?? '未判断'}`,
-    `给程序的建议: ${issue.devSuggestion ?? '未生成'}`,
-  ].join('\n')
-}
-
 function normalizeNullableString(value: unknown) {
   if (typeof value !== 'string') return null
   const trimmed = value.trim()
@@ -1424,27 +1333,6 @@ function normalizeDecompositionNodes(raw: unknown): PrdNode[] {
 
   return nodes
 }
-
-interface MarkdownHeading {
-  rawLevel: number
-  level: number
-  title: string
-  line: number
-  id: string
-  parentId: string | null
-  order: number
-  sectionText: string
-}
-
-function compactMarkdownTitle(title: string) {
-  return title
-    .replace(/^#+\s*/, '')
-    .replace(/^\d+[\.\、\)]\s*/, '')
-    .replace(/^[一二三四五六七八九十]+[、.]\s*/, '')
-    .replace(/[：:]\s*$/, '')
-    .trim()
-}
-
 function idSegmentFromTitle(title: string, fallback: string) {
   const ascii = title
     .normalize('NFKD')
@@ -1458,58 +1346,6 @@ function idSegmentFromTitle(title: string, fallback: string) {
     .toUpperCase()
   return ascii || fallback
 }
-
-function extractMarkdownHeadings(mdText: string): MarkdownHeading[] {
-  const lines = mdText.split(/\r?\n/)
-  const rawHeadings = lines
-    .map((line, index) => {
-      const match = /^(#{1,6})\s+(.+?)\s*$/.exec(line)
-      if (!match) return null
-      const title = compactMarkdownTitle(match[2])
-      if (!title) return null
-      return { rawLevel: match[1].length, title, line: index + 1 }
-    })
-    .filter((item): item is { rawLevel: number; title: string; line: number } => item !== null)
-
-  if (!rawHeadings.length) return []
-
-  const minLevel = Math.min(...rawHeadings.map((heading) => heading.rawLevel))
-  const stack: MarkdownHeading[] = []
-  const orderByParent = new Map<string, number>()
-
-  return rawHeadings.map((heading, index) => {
-    const nextRawHeading = rawHeadings[index + 1]
-    const level = Math.min(4, Math.max(1, heading.rawLevel - minLevel + 1))
-    while (stack.length && stack[stack.length - 1].level >= level) stack.pop()
-
-    const parent = stack[stack.length - 1] ?? null
-    const parentKey = parent?.id ?? 'root'
-    const order = orderByParent.get(parentKey) ?? 0
-    orderByParent.set(parentKey, order + 1)
-
-    const id = `OUTLINE-${index + 1}-${idSegmentFromTitle(heading.title, String(index + 1))}`
-    const startLine = heading.line
-    const endLine = nextRawHeading ? nextRawHeading.line - 1 : lines.length
-    const sectionText = lines.slice(startLine, endLine).join('\n').trim()
-    const item: MarkdownHeading = {
-      rawLevel: heading.rawLevel,
-      level,
-      title: heading.title,
-      line: heading.line,
-      id,
-      parentId: parent?.id ?? null,
-      order,
-      sectionText,
-    }
-    stack.push(item)
-    return item
-  })
-}
-
-function estimateTextTokens(text: string) {
-  return Math.max(1, Math.ceil(text.length / 2))
-}
-
 function compactExcerpt(text: string, maxLength = 180) {
   const excerpt = text
     .split(/\r?\n/)
@@ -1520,290 +1356,6 @@ function compactExcerpt(text: string, maxLength = 180) {
     .trim()
   return excerpt.length > maxLength ? `${excerpt.slice(0, maxLength)}...` : excerpt
 }
-
-function countPattern(text: string, pattern: RegExp) {
-  return text.match(pattern)?.length ?? 0
-}
-
-function countLinesMatching(text: string, pattern: RegExp) {
-  return text.split(/\r?\n/).filter((line) => pattern.test(line)).length
-}
-
-const keywordSignalDefinitions: Array<{ category: DocumentKeywordSignal['category']; label: string; pattern: RegExp }> = [
-  { category: 'pages', label: '页面/界面', pattern: /页面|界面|弹窗|面板|浮层|主界面|详情页|规则页|帮助页|排行榜|商城|背包|任务页|结算页/gu },
-  { category: 'states', label: '状态/反馈', pattern: /状态|空状态|加载|Loading|成功|失败|完成|未完成|可领取|已领取|倒计时|冷却|禁用|置灰/gu },
-  { category: 'rewards', label: '奖励/资源', pattern: /奖励|道具|金币|钻石|积分|经验|宝箱|货币|体力|奖池|领取/gu },
-  { category: 'navigation', label: '入口/跳转', pattern: /入口|跳转|返回|关闭|打开|进入|退出|导航|路由|引导/gu },
-  { category: 'apis', label: '接口/请求', pattern: /接口|API|endpoint|请求|响应|返回值|服务端|客户端|协议/giu },
-  { category: 'configs', label: '配置/参数', pattern: /配置|参数|开关|阈值|概率|权重|字段|枚举|表格|数值/gu },
-]
-
-function buildSectionSignals(text: string) {
-  return keywordSignalDefinitions
-    .filter((definition) => countPattern(text, definition.pattern) > 0)
-    .map((definition) => definition.label)
-}
-
-function buildKeywordSignals(mdText: string): DocumentKeywordSignal[] {
-  return keywordSignalDefinitions
-    .map((definition) => ({
-      category: definition.category,
-      label: definition.label,
-      matches: countPattern(mdText, definition.pattern),
-    }))
-    .filter((signal) => signal.matches > 0)
-    .sort((a, b) => b.matches - a.matches || a.label.localeCompare(b.label))
-}
-
-function markdownHeadingTitlePath(heading: MarkdownHeading, headingMap: Map<string, MarkdownHeading>) {
-  const titles: string[] = []
-  let current: MarkdownHeading | undefined = heading
-  while (current) {
-    titles.unshift(current.title)
-    current = current.parentId ? headingMap.get(current.parentId) : undefined
-  }
-  return titles.join(' / ')
-}
-
-function makeDocumentSourceSection(
-  id: string,
-  title: string,
-  titlePath: string,
-  level: number,
-  startLine: number,
-  endLine: number,
-  text: string,
-): DocumentSourceSection {
-  const normalizedText = text.trim()
-  return {
-    id,
-    title,
-    titlePath,
-    level,
-    startLine,
-    endLine,
-    charCount: normalizedText.length,
-    estimatedTokens: estimateTextTokens(normalizedText),
-    excerpt: compactExcerpt(normalizedText),
-    signals: buildSectionSignals(`${title}\n${titlePath}\n${normalizedText}`),
-  }
-}
-
-function buildDocumentSourceSections(mdText: string) {
-  const lines = mdText.split(/\r?\n/)
-  const headings = extractMarkdownHeadings(mdText)
-
-  if (!headings.length) {
-    return splitLongSectionLines(lines, 1, LARGE_PRD_SLICE_TARGET_LENGTH).map((slice, index) =>
-      makeDocumentSourceSection(
-        `SRC-${String(index + 1).padStart(3, '0')}`,
-        `全文片段 ${index + 1}`,
-        `全文片段 ${index + 1}`,
-        1,
-        slice.startLine,
-        slice.endLine,
-        slice.text,
-      )
-    )
-  }
-
-  const headingMap = new Map(headings.map((heading) => [heading.id, heading]))
-  return headings
-    .map((heading, index) => {
-      const nextHeading = headings[index + 1]
-      const endLine = nextHeading ? nextHeading.line - 1 : lines.length
-      return makeDocumentSourceSection(
-        `SRC-${String(index + 1).padStart(3, '0')}`,
-        heading.title,
-        markdownHeadingTitlePath(heading, headingMap),
-        heading.level,
-        heading.line,
-        endLine,
-        lines.slice(heading.line - 1, endLine).join('\n'),
-      )
-    })
-    .filter((section) => section.charCount > 0)
-}
-
-function buildDocumentSourceIssues(mdText: string, sections: DocumentSourceSection[], headingCount: number): DocumentSourceIssue[] {
-  const issues: DocumentSourceIssue[] = []
-  const imageRefs = countPattern(mdText, /!\[[^\]]*\]\([^)]+\)|\.(png|jpe?g|webp|gif)\b/giu)
-  const tableLines = countLinesMatching(mdText, /^\s*\|.+\|\s*$/)
-  const largest = sections.reduce<DocumentSourceSection | null>(
-    (current, section) => (!current || section.charCount > current.charCount ? section : current),
-    null,
-  )
-
-  if (!headingCount) {
-    issues.push({
-      id: 'no-markdown-headings',
-      severity: 'warning',
-      title: '缺少 Markdown 标题',
-      detail: '系统会按长度切片建立索引，页面边界更依赖正文线索，建议确认结构预览后再拆解。',
-      sectionId: null,
-    })
-  }
-
-  if (mdText.length >= LARGE_PRD_DECOMPOSE_THRESHOLD) {
-    issues.push({
-      id: 'large-document',
-      severity: 'info',
-      title: '大 PRD 分段分析',
-      detail: `文档超过 ${Math.round(LARGE_PRD_DECOMPOSE_THRESHOLD / 1024)}KB，正式拆解会分段识别页面线索后归并。`,
-      sectionId: null,
-    })
-  }
-
-  if (largest && largest.charCount > LARGE_PRD_SLICE_TARGET_LENGTH) {
-    issues.push({
-      id: 'large-section',
-      severity: 'warning',
-      title: '存在超长章节',
-      detail: `「${largest.titlePath}」约 ${largest.charCount} 字符，后续会切成多个片段，建议检查该章节是否包含多个页面。`,
-      sectionId: largest.id,
-    })
-  }
-
-  if (headingCount > 120) {
-    issues.push({
-      id: 'many-headings',
-      severity: 'info',
-      title: '标题数量较多',
-      detail: `检测到 ${headingCount} 个标题，预览只展示关键线索，正式导图仍会以页面/弹窗为单位归并。`,
-      sectionId: null,
-    })
-  }
-
-  if (tableLines > 12) {
-    issues.push({
-      id: 'table-heavy',
-      severity: 'info',
-      title: '表格内容较多',
-      detail: `检测到约 ${tableLines} 行表格，字段/配置更可能进入 model 子节点而不是页面节点。`,
-      sectionId: null,
-    })
-  }
-
-  if (imageRefs > 0) {
-    issues.push({
-      id: 'image-references',
-      severity: 'warning',
-      title: '包含图片引用',
-      detail: `检测到 ${imageRefs} 处图片引用。当前导入只读取 Markdown 文本，图片细节需要后续在 Deep Forge 中补充。`,
-      sectionId: null,
-    })
-  }
-
-  if (mdText.trim().length < 500) {
-    issues.push({
-      id: 'short-document',
-      severity: 'warning',
-      title: '文档内容较短',
-      detail: '可读文本较少，AI 可能只能生成少量页面节点，建议确认 PRD 是否完整。',
-      sectionId: null,
-    })
-  }
-
-  return issues
-}
-
-function buildDocumentSourceIndex(mdText: string): DocumentSourceIndex {
-  const lines = mdText.split(/\r?\n/)
-  const headings = extractMarkdownHeadings(mdText)
-  const sections = buildDocumentSourceSections(mdText)
-  const largestSectionChars = sections.reduce((max, section) => Math.max(max, section.charCount), 0)
-
-  return {
-    sourceLabel: '上传 PRD',
-    totalLines: lines.length,
-    totalChars: mdText.length,
-    estimatedTokens: estimateTextTokens(mdText),
-    headingCount: headings.length,
-    sectionCount: sections.length,
-    largestSectionChars,
-    sections,
-    keywordSignals: buildKeywordSignals(mdText),
-    issues: buildDocumentSourceIssues(mdText, sections, headings.length),
-  }
-}
-
-const candidatePageTitlePattern = /页面|界面|弹窗|面板|浮层|主界面|详情页|规则页|帮助页|排行榜|商城|背包|任务页|结算页|活动页|入口/iu
-const candidateContentPattern = /入口|跳转|打开|关闭|展示|按钮|列表|弹窗|页面|界面|空状态|倒计时|领取|返回|结算/giu
-
-function candidateKey(title: string) {
-  return title.replace(/[\s《》「」【】\[\]（）()：:，,。.!！?？\-_/\\]/g, '').toLowerCase()
-}
-
-function buildCandidateNodesFromIndex(sourceIndex: DocumentSourceIndex): PrdImportCandidateNode[] {
-  const candidates = new Map<string, PrdImportCandidateNode>()
-
-  for (const section of sourceIndex.sections) {
-    const text = `${section.title}\n${section.titlePath}\n${section.excerpt}`
-    const titleHit = candidatePageTitlePattern.test(section.title) || candidatePageTitlePattern.test(section.titlePath)
-    const contentHits = countPattern(text, candidateContentPattern)
-    const hasPageSignal = section.signals.includes('页面/界面')
-    if (!titleHit && !hasPageSignal && contentHits < 2) continue
-
-    const title = compactMarkdownTitle(section.title).slice(0, 24) || `页面线索 ${candidates.size + 1}`
-    const key = candidateKey(title)
-    if (!key || candidates.has(key)) continue
-
-    const confidence = Math.min(95, 48 + (titleHit ? 24 : 0) + (hasPageSignal ? 16 : 0) + Math.min(contentHits * 4, 16))
-    const reasonParts = [
-      titleHit ? '标题包含页面/界面线索' : null,
-      hasPageSignal ? '正文出现页面级信号' : null,
-      contentHits > 0 ? `命中 ${contentHits} 个交互词` : null,
-    ].filter(Boolean)
-
-    candidates.set(key, {
-      title,
-      sectionId: section.id,
-      sourceLabel: `${section.titlePath}（第 ${section.startLine}-${section.endLine} 行）`,
-      reason: reasonParts.join('；') || '正文出现交互结构线索',
-      confidence,
-      excerpt: section.excerpt,
-    })
-  }
-
-  return [...candidates.values()]
-    .sort((a, b) => b.confidence - a.confidence || a.title.localeCompare(b.title))
-    .slice(0, 12)
-}
-
-function buildPrdImportPreview(mdText: string): PrdImportPreview {
-  const sourceIndex = buildDocumentSourceIndex(mdText)
-  return {
-    sourceIndex,
-    candidateNodes: buildCandidateNodesFromIndex(sourceIndex),
-  }
-}
-
-interface DecompositionSourceRequest {
-  mdText?: unknown
-  mdFilename?: unknown
-  sourceText?: unknown
-  sourceFilename?: unknown
-  sourceImages?: unknown
-  figmaUrl?: unknown
-}
-
-type SupportedSourceImageMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
-
-interface NormalizedSourceImage {
-  name: string
-  mediaType: SupportedSourceImageMediaType
-  data: string
-  sourceUrl: string | null
-  token: string | null
-}
-
-interface NormalizedDecompositionSources {
-  mdText: string | null
-  mdFilename: string | null
-  sourceImages: NormalizedSourceImage[]
-  figmaUrl: string | null
-}
-
 interface FigmaDesignEvidenceFrame {
   id: string
   name: string
@@ -1861,115 +1413,24 @@ interface CombinedDecompositionInput {
   imageBlocks: Anthropic.ImageBlockParam[]
 }
 
+interface FigmaDecompositionImageEvidence {
+  markdown: string
+  imageBlocks: Anthropic.ImageBlockParam[]
+}
+
 const FIGMA_EVIDENCE_MAX_FRAMES = 120
 const FIGMA_EVIDENCE_MAX_TEXTS_PER_FRAME = 10
 const FIGMA_EVIDENCE_MAX_CHILD_NAMES = 10
+const FIGMA_PRD_CANVAS_MAX_BLOCKS = 48
 const FIGMA_PREVIEW_EXPORT_CONCURRENCY = 3
 const FIGMA_PREVIEW_EXPORT_TIMEOUT_MS = Math.max(500, Number.parseInt(process.env.FIGMA_PREVIEW_EXPORT_TIMEOUT_MS ?? '8000', 10))
 const FIGMA_UX_MAP_REVIEW_TIMEOUT_MS = Math.max(1000, Number.parseInt(process.env.FIGMA_UX_MAP_REVIEW_TIMEOUT_MS ?? '25000', 10))
 const FIGMA_UX_MAP_REVIEW_MAX_IMAGES = Math.max(0, Number.parseInt(process.env.FIGMA_UX_MAP_REVIEW_MAX_IMAGES ?? '12', 10))
+const FIGMA_DECOMPOSE_MAX_IMAGE_BLOCKS = Math.min(12, Math.max(0, Number.parseInt(process.env.FIGMA_DECOMPOSE_MAX_IMAGE_BLOCKS ?? '8', 10)))
 const FIGMA_UX_MAP_REVIEW_IMAGE_FETCH_TIMEOUT_MS = Math.max(500, Number.parseInt(process.env.FIGMA_UX_MAP_REVIEW_IMAGE_FETCH_TIMEOUT_MS ?? '6000', 10))
 const FIGMA_UX_MAP_REVIEW_MAX_IMAGE_BYTES = Math.max(128 * 1024, Number.parseInt(process.env.FIGMA_UX_MAP_REVIEW_MAX_IMAGE_BYTES ?? String(3 * 1024 * 1024), 10))
-
-function normalizeOptionalSourceText(value: unknown) {
-  return typeof value === 'string' && value.trim() ? value.trim() : null
-}
-
-const SUPPORTED_SOURCE_IMAGE_MEDIA_TYPES = new Set<SupportedSourceImageMediaType>([
-  'image/jpeg',
-  'image/png',
-  'image/gif',
-  'image/webp',
-])
-
-function normalizeSourceImageMediaType(value: unknown): SupportedSourceImageMediaType | null {
-  return typeof value === 'string' && SUPPORTED_SOURCE_IMAGE_MEDIA_TYPES.has(value as SupportedSourceImageMediaType)
-    ? value as SupportedSourceImageMediaType
-    : null
-}
-
-function normalizeBase64ImageData(value: unknown) {
-  if (typeof value !== 'string') return null
-  const trimmed = value.trim()
-  if (!trimmed || !/^[A-Za-z0-9+/]+={0,2}$/u.test(trimmed)) return null
-  return trimmed
-}
-
-function normalizeDecompositionSourceImages(value: unknown): NormalizedSourceImage[] {
-  if (!Array.isArray(value)) return []
-
-  return value
-    .slice(0, LARK_IMPORT_MAX_IMAGES)
-    .map((item, index): NormalizedSourceImage | null => {
-      if (!item || typeof item !== 'object') return null
-      const candidate = item as Record<string, unknown>
-      const mediaType = normalizeSourceImageMediaType(candidate.mediaType ?? candidate.media_type)
-      const data = normalizeBase64ImageData(candidate.data)
-      if (!mediaType || !data) return null
-      return {
-        name: normalizeOptionalSourceText(candidate.name) ?? `source-image-${index + 1}`,
-        mediaType,
-        data,
-        sourceUrl: normalizeOptionalSourceText(candidate.sourceUrl ?? candidate.source_url),
-        token: normalizeOptionalSourceText(candidate.token),
-      }
-    })
-    .filter((image): image is NormalizedSourceImage => Boolean(image))
-}
-
-function sourceImagesToAnthropicBlocks(images: NormalizedSourceImage[]): Anthropic.ImageBlockParam[] {
-  return images.map((image) => ({
-    type: 'image',
-    source: {
-      type: 'base64',
-      media_type: image.mediaType,
-      data: image.data,
-    },
-  }))
-}
-
-function buildPrdImageEvidenceInstruction(imageBlocks: Anthropic.ImageBlockParam[], scope: string) {
-  if (!imageBlocks.length) return ''
-  return [
-    '## 多模态 PRD 图片证据',
-    `本次请求附带 ${imageBlocks.length} 张图片，来源可能包括飞书文档图片或用户导入图片。图片顺序与“导入图片资料/飞书文档图片索引”一致。`,
-    `当前拆解范围：${scope}。`,
-    '请把这些图片当作 PRD 语义证据，而不是装饰附件：粗略识别界面用途、流程图/状态图、截图含义、可见文案、备注/标注、按钮、布局层级和状态反馈，并与正文交叉验证。',
-    '当图片能补足正文省略的信息时，把结论写入对应节点的 summary/content/evidenceRefs/openQuestions；当图片与正文或标题冲突时，写入“需澄清点”，不要只按文字标题下结论。',
-    '不要仅因为图片里出现按钮、图标、字段或装饰素材就新建页面节点；只有玩家实际看到且适合逐页打磨的界面/弹窗才作为页面节点。',
-    '',
-  ].join('\n')
-}
-
-function buildSourceImageEvidenceMarkdown(images: NormalizedSourceImage[]) {
-  if (!images.length) return ''
-  return [
-    '# 导入图片资料',
-    '',
-    '以下图片来自导入来源，已随本次拆解请求作为视觉证据提供给模型。图片主要用于补充页面结构、布局状态、视觉反馈、图示规则和素材依赖判断。',
-    '',
-    ...images.map((image, index) => [
-      `## 图片 ${index + 1}：${image.name}`,
-      image.sourceUrl ? `- 来源 URL：${image.sourceUrl}` : null,
-      image.token ? `- 飞书素材 token：${image.token}` : null,
-      `- 类型：${image.mediaType}`,
-    ].filter(Boolean).join('\n')),
-  ].join('\n\n')
-}
-
-function normalizeDecompositionSources(body: DecompositionSourceRequest): NormalizedDecompositionSources {
-  const mdText = normalizeOptionalSourceText(body.sourceText) ?? normalizeOptionalSourceText(body.mdText)
-  const mdFilename = normalizeOptionalSourceText(body.sourceFilename) ?? normalizeOptionalSourceText(body.mdFilename)
-  const sourceImages = normalizeDecompositionSourceImages(body.sourceImages)
-  const figmaUrl = normalizeOptionalSourceText(body.figmaUrl)
-
-  if (!mdText && !figmaUrl && sourceImages.length === 0) {
-    throw new Error('请至少提供 Figma 设计稿链接或可分析的导入素材。')
-  }
-
-  return { mdText, mdFilename, sourceImages, figmaUrl }
-}
-
+/** Maximum user-supplied source images attached to a decompose request. */
+const MAX_SOURCE_IMAGES = Math.min(6, Math.max(0, Number.parseInt(process.env.LARK_IMPORT_MAX_IMAGES ?? '4', 10)))
 function getConfiguredFigmaToken() {
   return figmaToken || configuredFigmaTokenFromEnv()
 }
@@ -2224,31 +1685,142 @@ function collectDirectFigmaInterfaceChildren(parent: FigmaApiNode, context: Figm
     .filter((child) => isLikelyInterfaceFrame(child, context))
 }
 
+function collectNestedFigmaInterfaceChildren(parent: FigmaApiNode, context: FigmaInterfaceCandidateContext, maxDepth = 4) {
+  const candidates: FigmaApiNode[] = []
+  const seen = new Set<string>()
+
+  function push(node: FigmaApiNode) {
+    if (seen.has(node.id)) return
+    seen.add(node.id)
+    candidates.push(node)
+  }
+
+  function walk(node: FigmaApiNode, depth: number, nextContext: FigmaInterfaceCandidateContext) {
+    if (node.visible === false || depth > maxDepth) return
+    if (isLikelyInterfaceFrame(node, nextContext)) {
+      push(node)
+      return
+    }
+    if (!isFigmaContainerType(node.type)) return
+    const childContext: FigmaInterfaceCandidateContext = node.type === 'SECTION' ? 'section-child' : 'frame-child'
+    for (const child of sortFigmaChildrenByCanvasOrder(node.children ?? [])) {
+      walk(child, depth + 1, childContext)
+    }
+  }
+
+  for (const child of sortFigmaChildrenByCanvasOrder(parent.children ?? [])) {
+    walk(child, 1, context)
+  }
+  return candidates
+}
+
 function shouldUseSelectedFigmaNodeAsInterface(root: FigmaApiNode) {
   if (!isLikelyInterfaceFrame(root, 'selected')) return false
   const directInterfaceChildren = collectDirectFigmaInterfaceChildren(root, 'frame-child')
-  return directInterfaceChildren.length < 2
+  const nestedInterfaceChildren = collectNestedFigmaInterfaceChildren(root, 'frame-child', 3)
+  return Math.max(directInterfaceChildren.length, nestedInterfaceChildren.length) < 2
 }
 
 function collectFigmaCandidateInterfaceNodes(root: FigmaApiNode) {
   if (shouldUseSelectedFigmaNodeAsInterface(root)) return [root]
 
   const candidates: FigmaApiNode[] = []
+  const seen = new Set<string>()
+  const push = (node: FigmaApiNode) => {
+    if (seen.has(node.id)) return
+    seen.add(node.id)
+    candidates.push(node)
+  }
+
   for (const child of sortFigmaChildrenByCanvasOrder(root.children ?? [])) {
     if (isLikelyInterfaceFrame(child, 'canvas-child')) {
-      candidates.push(child)
+      push(child)
       continue
     }
-    if (child.type === 'FRAME') {
-      candidates.push(...collectDirectFigmaInterfaceChildren(child, 'frame-child'))
-      continue
-    }
-    if (child.type !== 'SECTION' || isSkippableFigmaSectionName(child.name)) continue
-    for (const sectionChild of sortFigmaChildrenByCanvasOrder(child.children ?? [])) {
-      if (isLikelyInterfaceFrame(sectionChild, 'section-child')) candidates.push(sectionChild)
+    if (!isFigmaContainerType(child.type)) continue
+    if (child.type === 'SECTION' && isSkippableFigmaSectionName(child.name)) continue
+
+    const childContext: FigmaInterfaceCandidateContext = child.type === 'SECTION' ? 'section-child' : 'frame-child'
+    for (const nested of collectNestedFigmaInterfaceChildren(child, childContext, 4)) {
+      push(nested)
     }
   }
   return candidates
+}
+
+function isFigmaPrdCanvasGroup(group: Pick<FigmaDesignEvidenceGroup, 'key'>) {
+  return group.key.startsWith('prd-canvas-')
+}
+
+function figmaPrdCanvasText(node: FigmaApiNode) {
+  if (node.type === 'TEXT') return compactFigmaText(node.characters ?? node.name, 600)
+  return collectFigmaVisibleTexts(node, 4).join(' / ')
+}
+
+function isMeaningfulFigmaPrdTextNode(node: FigmaApiNode) {
+  if (node.visible === false || node.type !== 'TEXT') return false
+  const text = figmaPrdCanvasText(node)
+  if (!text) return false
+  if (/^#/u.test(text)) return true
+  const bounds = figmaNodeBounds(node)
+  return text.length >= 16 || Boolean(bounds && bounds.width >= 180 && bounds.height >= 36)
+}
+
+function isLikelyFigmaPrdVisualNode(node: FigmaApiNode) {
+  if (node.visible === false || node.type === 'TEXT' || isLowSignalFigmaType(node.type)) return false
+  const bounds = figmaNodeBounds(node)
+  if (!bounds) return false
+  const area = bounds.width * bounds.height
+  if (bounds.width < 96 || bounds.height < 80 || area < 18_000) return false
+  return isFigmaContainerType(node.type)
+    || ['RECTANGLE', 'ELLIPSE'].includes(node.type)
+    || /image|screenshot|mock|screen|截图|原型|界面|弹窗|页面/iu.test(node.name)
+}
+
+function collectFigmaPrdCanvasEvidenceNodes(root: FigmaApiNode) {
+  const candidates: FigmaApiNode[] = []
+  const seen = new Set<string>()
+
+  function push(node: FigmaApiNode) {
+    if (seen.has(node.id)) return
+    seen.add(node.id)
+    candidates.push(node)
+  }
+
+  function walk(node: FigmaApiNode, depth: number) {
+    if (node.visible === false) return
+    const isText = isMeaningfulFigmaPrdTextNode(node)
+    const isVisual = isLikelyFigmaPrdVisualNode(node)
+    if (isText || isVisual) push(node)
+    if (depth >= 3 || (isVisual && isFigmaContainerType(node.type))) return
+    for (const child of node.children ?? []) walk(child, depth + 1)
+  }
+
+  for (const child of root.children ?? []) walk(child, 1)
+
+  return candidates
+    .sort((a, b) => {
+      const aBounds = figmaNodeBounds(a)
+      const bBounds = figmaNodeBounds(b)
+      return (aBounds?.x ?? 0) - (bBounds?.x ?? 0)
+        || (aBounds?.y ?? 0) - (bBounds?.y ?? 0)
+        || a.name.localeCompare(b.name)
+    })
+    .slice(0, FIGMA_PRD_CANVAS_MAX_BLOCKS)
+}
+
+function buildFigmaPrdCanvasGroups(root: FigmaApiNode, sourceUrl: string): FigmaDesignEvidenceGroup[] {
+  const frames = collectFigmaPrdCanvasEvidenceNodes(root)
+    .map((node) => buildFigmaEvidenceFrame(node, root.name, sourceUrl))
+    .filter((frame): frame is FigmaDesignEvidenceFrame => Boolean(frame))
+  if (!frames.length) return []
+
+  const label = compactFigmaText(root.name, 60) || 'Figma PRD 画布'
+  return [{
+    key: `prd-canvas-${root.id.replace(/[^a-z0-9_-]+/giu, '-')}`,
+    label: `Figma PRD 画布：${label}`,
+    frames,
+  }]
 }
 
 function collectFigmaInterfaceGroups(root: FigmaApiNode, sourceUrl: string) {
@@ -2273,7 +1845,11 @@ function collectFigmaInterfaceGroups(root: FigmaApiNode, sourceUrl: string) {
     groups.set(key, { key, label: groupLabel, frames: [frame] })
   }
 
-  return [...groups.values()]
+  const groupedEvidence = groups.size
+    ? [...groups.values()]
+    : buildFigmaPrdCanvasGroups(root, sourceUrl)
+
+  return groupedEvidence
     .map((group) => ({
       ...group,
       frames: [...group.frames]
@@ -3352,6 +2928,24 @@ function compactFigmaUxMapForReview(evidence: FigmaDesignEvidence) {
   }
 }
 
+function primaryFigmaVisualReviewFrame(group: FigmaDesignEvidenceGroup) {
+  if (!isFigmaPrdCanvasGroup(group)) return group.frames[0]
+  return [...group.frames].sort((a, b) => {
+    const aVisual = a.type === 'TEXT' ? 0 : 1
+    const bVisual = b.type === 'TEXT' ? 0 : 1
+    return bVisual - aVisual
+      || (b.width * b.height) - (a.width * a.height)
+      || a.y - b.y
+      || a.x - b.x
+  })[0]
+}
+
+function figmaReviewFrameRank(item: { group: FigmaDesignEvidenceGroup; frame: FigmaDesignEvidenceFrame }) {
+  if (!isFigmaPrdCanvasGroup(item.group)) return 0
+  const visualRank = item.frame.type === 'TEXT' ? 0 : 10_000_000
+  return visualRank + item.frame.width * item.frame.height
+}
+
 function selectFigmaVisualReviewFrames(evidence: FigmaDesignEvidence) {
   if (FIGMA_UX_MAP_REVIEW_MAX_IMAGES <= 0) return []
 
@@ -3364,14 +2958,14 @@ function selectFigmaVisualReviewFrames(evidence: FigmaDesignEvidence) {
     selected.push(item)
   }
 
-  for (const group of evidence.groups) push({ group, frame: group.frames[0] })
+  for (const group of evidence.groups) push({ group, frame: primaryFigmaVisualReviewFrame(group) })
   for (const item of allFrames) {
     if (item.frame.interactionTips.length || item.frame.annotations.length) push(item)
   }
   for (const item of allFrames) {
     if (item.frame.stateKind !== 'default' && item.frame.stateKind !== 'variant') push(item)
   }
-  for (const item of allFrames) push(item)
+  for (const item of [...allFrames].sort((a, b) => figmaReviewFrameRank(b) - figmaReviewFrameRank(a))) push(item)
 
   return selected
 }
@@ -3454,6 +3048,43 @@ async function loadFigmaReviewImageBlock(assetUrl: string | null | undefined, la
     return null
   } finally {
     clearTimeout(timeout)
+  }
+}
+
+async function buildFigmaDecompositionImageEvidence(evidence: FigmaDesignEvidence): Promise<FigmaDecompositionImageEvidence> {
+  if (FIGMA_DECOMPOSE_MAX_IMAGE_BLOCKS <= 0) return { markdown: '', imageBlocks: [] }
+
+  const candidates = selectFigmaVisualReviewFrames(evidence).slice(0, FIGMA_DECOMPOSE_MAX_IMAGE_BLOCKS)
+  const loaded = await Promise.all(candidates.map(async (item) => ({
+    item,
+    block: await loadFigmaReviewImageBlock(item.frame.assetUrl, `${item.group.label}/${item.frame.name}`),
+  })))
+  const available = loaded.filter((item): item is {
+    item: ReturnType<typeof selectFigmaVisualReviewFrames>[number]
+    block: Anthropic.ImageBlockParam
+  } => Boolean(item.block))
+
+  if (!available.length) return { markdown: '', imageBlocks: [] }
+
+  return {
+    imageBlocks: available.map((item) => item.block),
+    markdown: [
+      '# Figma 多模态截图证据',
+      '',
+      `以下 ${available.length} 张截图会随正式拆解请求作为图片输入提供给模型，顺序与本索引一致。`,
+      '',
+      ...available.map(({ item }, index) => [
+        `## Figma 截图 ${index + 1}：${item.group.label} / ${item.frame.name}`,
+        `- Node ID：${item.frame.id}`,
+        `- 来源 URL：${item.frame.sourceUrl}`,
+        `- 截图 URL：${item.frame.assetUrl}`,
+        `- 尺寸：${Math.round(item.frame.width)}x${Math.round(item.frame.height)}`,
+        `- 状态猜测：${item.frame.stateLabel} / ${figmaUiStateKindLabel(item.frame.stateKind)} / ${item.frame.stateConfidence}%`,
+        item.frame.visibleTexts.length ? `- 可见文案：${item.frame.visibleTexts.slice(0, 8).join(' / ')}` : null,
+        item.frame.annotations.length ? `- Figma 注释：${item.frame.annotations.slice(0, 6).join(' / ')}` : null,
+        item.frame.interactionTips.length ? `- 交互提示：${item.frame.interactionTips.slice(0, 6).join(' / ')}` : null,
+      ].filter(Boolean).join('\n')),
+    ].join('\n\n'),
   }
 }
 
@@ -3684,16 +3315,22 @@ function buildFigmaDesignEvidenceMarkdown(evidence: FigmaDesignEvidence) {
 
 async function buildCombinedDecompositionInput(
   sources: NormalizedDecompositionSources,
-  options: { assetBaseUrl?: string | null; semanticReview?: boolean } = {},
+  options: { assetBaseUrl?: string | null; semanticReview?: boolean; includeFigmaImageBlocks?: boolean } = {},
 ): Promise<CombinedDecompositionInput> {
   const parts: string[] = []
   let figmaEvidence: FigmaDesignEvidence | null = null
+  let figmaImageBlocks: Anthropic.ImageBlockParam[] = []
 
   if (sources.figmaUrl) {
     figmaEvidence = await buildFigmaDesignEvidence(sources.figmaUrl, options.assetBaseUrl)
     if (options.semanticReview) figmaEvidence = await reviewFigmaUxMapForEvidence(figmaEvidence, sources.mdText)
     figmaEvidence.projectUiFlow = buildProjectUiFlowForEvidence(figmaEvidence, sources.mdText)
     parts.push(buildFigmaDesignEvidenceMarkdown(figmaEvidence))
+    if (options.includeFigmaImageBlocks) {
+      const figmaImageEvidence = await buildFigmaDecompositionImageEvidence(figmaEvidence)
+      figmaImageBlocks = figmaImageEvidence.imageBlocks
+      if (figmaImageEvidence.markdown) parts.push(figmaImageEvidence.markdown)
+    }
   }
 
   if (sources.mdText) {
@@ -3716,7 +3353,10 @@ async function buildCombinedDecompositionInput(
     text: parts.join('\n\n---\n\n'),
     rawPrdText: sources.mdText,
     figmaEvidence,
-    imageBlocks: sourceImagesToAnthropicBlocks(sources.sourceImages),
+    imageBlocks: [
+      ...figmaImageBlocks,
+      ...sourceImagesToAnthropicBlocks(sources.sourceImages),
+    ],
   }
 }
 
@@ -3733,6 +3373,7 @@ function buildFigmaCandidateNodes(evidence: FigmaDesignEvidence, rawPrdText?: st
     const transitions = evidence.figmaUxMap?.transitions.filter((transition) =>
       transition.sourceScreenId === screen?.id || transition.targetScreenId === screen?.id
     ) ?? []
+    const isPrdCanvas = isFigmaPrdCanvasGroup(group)
     const prdMatches = alignment.matchesByGroup.get(group.key) ?? []
     const prdReason = prdMatches.length
       ? `已对齐 ${prdMatches.length} 段 PRD 补充：${prdMatches.map((match) => match.sourceLabel).join(' / ')}`
@@ -3746,14 +3387,18 @@ function buildFigmaCandidateNodes(evidence: FigmaDesignEvidence, rawPrdText?: st
       title: screen?.label ?? group.label,
       sectionId: `figma-${String(index + 1).padStart(2, '0')}`,
       sourceLabel: [
-        `Figma 界面组：${group.frames.map((frame) => frame.name).join(' / ')}`,
+        isPrdCanvas
+          ? `Figma PRD 画布：${group.frames.map((frame) => frame.name).slice(0, 8).join(' / ')}`
+          : `Figma 界面组：${group.frames.map((frame) => frame.name).join(' / ')}`,
         prdMatches.length ? `PRD：${prdMatches.map((match) => match.sourceLabel).join(' / ')}` : null,
       ].filter(Boolean).join(' + '),
       reason: [
-        `Figma UX Map 识别为独立界面，包含 ${states.length || group.frames.length} 个状态、${transitions.length} 条相关流转，应作为导图界面节点保留。`,
+        isPrdCanvas
+          ? `Figma 选中节点是 PRD 画布证据，包含 ${group.frames.length} 个文本/图片块；正式拆解会用这些文字和截图推断实际页面、状态、入口、跳转和待澄清规则。`
+          : `Figma UX Map 识别为独立界面，包含 ${states.length || group.frames.length} 个状态、${transitions.length} 条相关流转，应作为导图界面节点保留。`,
         prdReason,
       ].filter(Boolean).join(' '),
-      confidence: screen?.confidence ?? 96,
+      confidence: isPrdCanvas ? 82 : screen?.confidence ?? 96,
       excerpt: [figmaGroupExcerpt(group), prdExcerpt].filter(Boolean).join('\n').slice(0, 500),
     }
   })
@@ -3796,7 +3441,7 @@ function buildPreviewRelationSummary(evidence: FigmaDesignEvidence, rawPrdText: 
 
 function buildImportPreviewFromCombinedInput(input: CombinedDecompositionInput): PrdImportPreview {
   const previewText = input.rawPrdText?.trim() ? input.rawPrdText : input.text
-  const basePreview = buildPrdImportPreview(previewText)
+  const basePreview = buildPrdImportPreview(previewText, DOCUMENT_SOURCE_INDEX_CONFIG)
   if (!input.figmaEvidence) {
     return {
       ...basePreview,
@@ -4747,7 +4392,7 @@ function buildFigmaPageNodes(evidence: FigmaDesignEvidence, rawPrdText?: string 
 function buildSourceOutlineForPrompt(mdText: string) {
   const headings = extractMarkdownHeadings(mdText)
   if (!headings.length) {
-    const sourceIndex = buildDocumentSourceIndex(mdText)
+    const sourceIndex = buildDocumentSourceIndex(mdText, DOCUMENT_SOURCE_INDEX_CONFIG)
     const sections = sourceIndex.sections.slice(0, 20).map((section) => (
       `- ${section.id}：第 ${section.startLine}-${section.endLine} 行，约 ${section.charCount} 字符`
     ))
@@ -4778,7 +4423,7 @@ function sourceDirectoryExtractedFrom(mdText: string) {
   return '导入素材标题'
 }
 
-function buildSourceOutlineRootNode(mdText: string, sourceIndex = buildDocumentSourceIndex(mdText)): PrdNode {
+function buildSourceOutlineRootNode(mdText: string, sourceIndex = buildDocumentSourceIndex(mdText, DOCUMENT_SOURCE_INDEX_CONFIG)): PrdNode {
   const headings = extractMarkdownHeadings(mdText)
   const content = headings.length
     ? headings.map((heading) => `${'  '.repeat(Math.max(0, heading.level - 1))}- 第 ${heading.line} 行：${heading.title}`).join('\n')
@@ -4838,46 +4483,6 @@ function discardImportedReferences(nodes: PrdNode[]) {
 function pageDocPathSegment(node: PrdNode) {
   return sanitizeDocPathSegment(`${sanitizeNodeId(node.id)}-${sanitizeLabel(node.label)}`)
 }
-
-interface PrdSourceSlice {
-  label: string
-  text: string
-  startLine: number
-  endLine: number
-}
-
-function pushPrdSourceSlice(slices: PrdSourceSlice[], lines: string[], startLine: number) {
-  const text = lines.join('\n').trim()
-  if (!text) return
-  slices.push({
-    label: `第 ${startLine}-${startLine + lines.length - 1} 行`,
-    text,
-    startLine,
-    endLine: startLine + lines.length - 1,
-  })
-}
-
-function splitLongSectionLines(lines: string[], startLine: number, targetLength: number) {
-  const slices: PrdSourceSlice[] = []
-  let current: string[] = []
-  let currentStart = startLine
-  let currentLength = 0
-
-  lines.forEach((line, index) => {
-    if (current.length && currentLength + line.length > targetLength) {
-      pushPrdSourceSlice(slices, current, currentStart)
-      current = []
-      currentStart = startLine + index
-      currentLength = 0
-    }
-    current.push(line)
-    currentLength += line.length + 1
-  })
-
-  pushPrdSourceSlice(slices, current, currentStart)
-  return slices
-}
-
 function buildPrdSourceSlices(mdText: string) {
   const lines = mdText.split(/\r?\n/)
   const headings = extractMarkdownHeadings(mdText)
@@ -4988,7 +4593,7 @@ function buildFallbackPageNodesFromCandidates(candidates: PrdImportCandidateNode
 }
 
 function buildLocalFallbackPageNodes(mdText: string, fallbackReason: string) {
-  const preview = buildPrdImportPreview(mdText)
+  const preview = buildPrdImportPreview(mdText, DOCUMENT_SOURCE_INDEX_CONFIG)
   return buildFallbackPageNodesFromCandidates(preview.candidateNodes, fallbackReason)
 }
 
@@ -5745,7 +5350,7 @@ app.use(cors({
     callback(new Error(`CORS origin not allowed: ${origin}`))
   },
 }))
-app.use(express.json({ limit: '10mb' }))
+app.use(express.json({ limit: JSON_BODY_LIMIT }))
 
 type AiEnvironmentUpdate = Partial<Record<keyof typeof DEFAULT_ENV_CONFIG, unknown>>
 
@@ -5831,395 +5436,6 @@ function previewSecret(value: string | undefined) {
   const visible = trimmed.slice(-4)
   return `${'*'.repeat(Math.max(6, Math.min(12, trimmed.length - visible.length)))}${visible}`
 }
-
-interface LarkCliRunResult {
-  stdout: string
-  stderr: string
-  code: number | null
-}
-
-interface LarkImageReference {
-  alt: string | null
-  token: string | null
-  url: string | null
-}
-
-interface LarkImportedImage {
-  name: string
-  mediaType: SupportedSourceImageMediaType
-  data: string
-  sourceUrl: string | null
-  token: string | null
-  size: number
-}
-
-class LarkImportError extends Error {
-  status: number
-  authorizationRequired: boolean
-  hint: string | null
-
-  constructor(message: string, options: { status?: number; authorizationRequired?: boolean; hint?: string | null } = {}) {
-    super(message)
-    this.name = 'LarkImportError'
-    this.status = options.status ?? 400
-    this.authorizationRequired = options.authorizationRequired ?? false
-    this.hint = options.hint ?? null
-  }
-}
-
-function configuredLarkCliBin() {
-  return (process.env.LARK_CLI_BIN ?? DEFAULT_ENV_CONFIG.LARK_CLI_BIN).trim() || DEFAULT_ENV_CONFIG.LARK_CLI_BIN
-}
-
-function larkIdentityArgs() {
-  const identity = (process.env.LARK_IDENTITY ?? DEFAULT_ENV_CONFIG.LARK_IDENTITY).trim().toLowerCase()
-  return identity === 'user' || identity === 'bot' ? ['--as', identity] : []
-}
-
-function larkChildEnv() {
-  return {
-    ...process.env,
-    LARK_APP_ID: process.env.LARK_APP_ID ?? '',
-    LARK_APP_SECRET: process.env.LARK_APP_SECRET ?? '',
-    LARK_TENANT_ACCESS_TOKEN: process.env.LARK_TENANT_ACCESS_TOKEN ?? '',
-    LARK_USER_ACCESS_TOKEN: process.env.LARK_USER_ACCESS_TOKEN ?? '',
-  }
-}
-
-function runLarkCli(args: string[], timeoutMs = LARK_CLI_TIMEOUT_MS): Promise<LarkCliRunResult> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(configuredLarkCliBin(), args, {
-      env: larkChildEnv(),
-      shell: process.platform === 'win32',
-      windowsHide: true,
-    })
-    let stdout = ''
-    let stderr = ''
-    let timedOut = false
-
-    child.stdout?.setEncoding('utf8')
-    child.stderr?.setEncoding('utf8')
-    child.stdout?.on('data', (chunk: string) => { stdout += chunk })
-    child.stderr?.on('data', (chunk: string) => { stderr += chunk })
-
-    const timer = setTimeout(() => {
-      timedOut = true
-      child.kill()
-    }, timeoutMs)
-
-    child.on('error', (error) => {
-      clearTimeout(timer)
-      reject(new LarkImportError(`无法启动 lark-cli：${error.message}`, { status: 503 }))
-    })
-
-    child.on('close', (code) => {
-      clearTimeout(timer)
-      if (timedOut) {
-        reject(new LarkImportError(`lark-cli 超过 ${Math.round(timeoutMs / 1000)} 秒未返回，请稍后重试或检查授权。`, { status: 504 }))
-        return
-      }
-      resolve({ stdout, stderr, code })
-    })
-  })
-}
-
-function tryParseJson(value: string): unknown {
-  const trimmed = value.trim()
-  if (!trimmed) return null
-  try {
-    return JSON.parse(trimmed)
-  } catch {
-    return null
-  }
-}
-
-function larkEnvelopeFromResult(result: LarkCliRunResult): Record<string, unknown> | null {
-  const parsed = tryParseJson(result.stdout) ?? tryParseJson(result.stderr)
-  return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : null
-}
-
-function nestedRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === 'object' ? value as Record<string, unknown> : null
-}
-
-function larkCliErrorMessage(envelope: Record<string, unknown> | null, result: LarkCliRunResult) {
-  const error = nestedRecord(envelope?.error)
-  const message = normalizeOptionalSourceText(error?.message)
-    ?? normalizeOptionalSourceText(envelope?.message)
-    ?? normalizeOptionalSourceText(result.stderr)
-    ?? normalizeOptionalSourceText(result.stdout)
-    ?? `lark-cli 退出码 ${result.code ?? 'unknown'}`
-  const hint = normalizeOptionalSourceText(error?.hint)
-  return { message, hint }
-}
-
-function isLarkAuthorizationError(message: string, hint: string | null) {
-  return /auth|login|permission|scope|unauthorized|forbidden|access token|授权|权限|登录|未授权|未登录|身份/iu.test(
-    [message, hint].filter(Boolean).join('\n'),
-  )
-}
-
-async function runLarkCliJson(args: string[]) {
-  const result = await runLarkCli([...args, '--json'])
-  const envelope = larkEnvelopeFromResult(result)
-  const ok = envelope?.ok
-  if (result.code !== 0 || ok === false || !envelope) {
-    const { message, hint } = larkCliErrorMessage(envelope, result)
-    const authorizationRequired = isLarkAuthorizationError(message, hint)
-    throw new LarkImportError(message, {
-      status: authorizationRequired ? 409 : 400,
-      authorizationRequired,
-      hint,
-    })
-  }
-  return envelope
-}
-
-function normalizeLarkDocumentRef(value: unknown) {
-  const text = normalizeOptionalSourceText(value)
-  if (!text) throw new LarkImportError('请先粘贴飞书文档链接或文档 token。')
-  if (/^https?:\/\/.+/iu.test(text)) return text
-  if (/^[A-Za-z0-9_-]{8,}$/u.test(text)) return text
-  throw new LarkImportError('飞书链接格式无效，请粘贴 docx/wiki 链接或文档 token。')
-}
-
-function extractLarkDocumentContent(envelope: Record<string, unknown>) {
-  const data = nestedRecord(envelope.data)
-  const document = nestedRecord(data?.document)
-  const content = normalizeOptionalSourceText(document?.content ?? data?.content ?? envelope.content)
-  if (!content) throw new LarkImportError('飞书文档读取成功，但没有返回可分析正文。')
-  return {
-    content,
-    title: normalizeOptionalSourceText(document?.title),
-    documentId: normalizeOptionalSourceText(document?.document_id),
-  }
-}
-
-async function fetchLarkDocumentContent(documentRef: string, docFormat: 'markdown' | 'xml') {
-  const envelope = await runLarkCliJson([
-    'docs',
-    '+fetch',
-    '--api-version',
-    'v2',
-    '--doc',
-    documentRef,
-    '--doc-format',
-    docFormat,
-    '--detail',
-    'simple',
-    ...larkIdentityArgs(),
-  ])
-  return extractLarkDocumentContent(envelope)
-}
-
-function parseXmlAttributes(value: string) {
-  const attrs: Record<string, string> = {}
-  const attrRegex = /([:\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/giu
-  for (const match of value.matchAll(attrRegex)) {
-    const key = match[1]?.toLowerCase()
-    if (key) attrs[key] = match[2] ?? match[3] ?? ''
-  }
-  return attrs
-}
-
-function normalizeLarkImageTarget(rawTarget: string | null | undefined): Pick<LarkImageReference, 'token' | 'url'> | null {
-  const target = rawTarget?.trim()
-  if (!target || target.startsWith('data:')) return null
-  if (/^https?:\/\//iu.test(target)) return { url: target, token: null }
-  if (/^[A-Za-z0-9_-]{8,}$/u.test(target)) return { url: null, token: target }
-  return null
-}
-
-function dedupeLarkImageReferences(refs: LarkImageReference[]) {
-  const seen = new Set<string>()
-  const deduped: LarkImageReference[] = []
-  for (const ref of refs) {
-    const key = ref.url ?? ref.token
-    if (!key || seen.has(key)) continue
-    seen.add(key)
-    deduped.push(ref)
-  }
-  return deduped
-}
-
-function extractLarkImageReferences(markdown: string, xml: string | null) {
-  const refs: LarkImageReference[] = []
-  const markdownImageRegex = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/gu
-  for (const match of markdown.matchAll(markdownImageRegex)) {
-    const target = normalizeLarkImageTarget(match[2])
-    if (target) refs.push({ alt: match[1]?.trim() || null, ...target })
-  }
-
-  if (xml) {
-    const xmlImageRegex = /<img\b([^>]*)\/?>/giu
-    for (const match of xml.matchAll(xmlImageRegex)) {
-      const attrs = parseXmlAttributes(match[1])
-      const target = normalizeLarkImageTarget(attrs.url) ?? normalizeLarkImageTarget(attrs.token)
-      if (target) refs.push({ alt: attrs.alt || attrs.name || null, ...target })
-    }
-  }
-
-  return dedupeLarkImageReferences(refs)
-}
-
-function mediaTypeFromValue(value: string | null | undefined): SupportedSourceImageMediaType | null {
-  const normalized = value?.split(';')[0].trim().toLowerCase()
-  if (!normalized) return null
-  if (normalized === 'image/jpg') return 'image/jpeg'
-  return SUPPORTED_SOURCE_IMAGE_MEDIA_TYPES.has(normalized as SupportedSourceImageMediaType)
-    ? normalized as SupportedSourceImageMediaType
-    : null
-}
-
-function mediaTypeFromFilePath(filePath: string): SupportedSourceImageMediaType | null {
-  const extension = path.extname(filePath).toLowerCase()
-  if (extension === '.jpg' || extension === '.jpeg') return 'image/jpeg'
-  if (extension === '.png') return 'image/png'
-  if (extension === '.gif') return 'image/gif'
-  if (extension === '.webp') return 'image/webp'
-  return null
-}
-
-function safePathSegment(value: string) {
-  return value.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 80) || 'media'
-}
-
-function findFirstFile(root: string): string | null {
-  if (!existsSync(root)) return null
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
-    const fullPath = path.join(root, entry.name)
-    if (entry.isFile()) return fullPath
-    if (entry.isDirectory()) {
-      const nested = findFirstFile(fullPath)
-      if (nested) return nested
-    }
-  }
-  return null
-}
-
-function imageFromBuffer(
-  bytes: Buffer,
-  mediaType: SupportedSourceImageMediaType,
-  ref: LarkImageReference,
-  index: number,
-): LarkImportedImage | null {
-  if (bytes.byteLength > LARK_IMPORT_MAX_IMAGE_BYTES) return null
-  return {
-    name: ref.alt || `feishu-image-${index + 1}`,
-    mediaType,
-    data: bytes.toString('base64'),
-    sourceUrl: ref.url,
-    token: ref.token,
-    size: bytes.byteLength,
-  }
-}
-
-async function downloadLarkImageFromUrl(ref: LarkImageReference, index: number) {
-  if (!ref.url) return null
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 10000)
-  try {
-    const response = await fetch(ref.url, { signal: controller.signal })
-    if (!response.ok) return null
-    const mediaType = mediaTypeFromValue(response.headers.get('content-type'))
-    if (!mediaType) return null
-    const contentLength = Number.parseInt(response.headers.get('content-length') ?? '0', 10)
-    if (contentLength > LARK_IMPORT_MAX_IMAGE_BYTES) return null
-    const bytes = Buffer.from(await response.arrayBuffer())
-    return imageFromBuffer(bytes, mediaType, ref, index)
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
-async function downloadLarkImageFromToken(ref: LarkImageReference, index: number) {
-  if (!ref.token) return null
-  const outputDir = path.join(LARK_MEDIA_CACHE_ROOT, safePathSegment(ref.token))
-  mkdirSync(outputDir, { recursive: true })
-  await runLarkCliJson([
-    'docs',
-    '+media-preview',
-    '--token',
-    ref.token,
-    '--output',
-    path.join(outputDir, 'image'),
-    '--overwrite',
-    ...larkIdentityArgs(),
-  ])
-  const filePath = findFirstFile(outputDir)
-  if (!filePath) return null
-  const mediaType = mediaTypeFromFilePath(filePath)
-  if (!mediaType) return null
-  const stats = statSync(filePath)
-  if (stats.size > LARK_IMPORT_MAX_IMAGE_BYTES) return null
-  return imageFromBuffer(readFileSync(filePath), mediaType, ref, index)
-}
-
-async function importLarkImages(refs: LarkImageReference[]) {
-  const images: LarkImportedImage[] = []
-  const warnings: string[] = []
-  const cappedRefs = refs.slice(0, LARK_IMPORT_MAX_IMAGES)
-
-  for (const [index, ref] of cappedRefs.entries()) {
-    try {
-      const image = ref.url
-        ? await downloadLarkImageFromUrl(ref, index)
-        : await downloadLarkImageFromToken(ref, index)
-      if (image) images.push(image)
-      else warnings.push(`飞书图片 ${index + 1} 未能下载为可分析图片，已保留文本中的图片引用。`)
-    } catch (error) {
-      warnings.push(`飞书图片 ${index + 1} 读取失败：${error instanceof Error ? error.message : String(error)}`)
-    }
-  }
-
-  if (refs.length > cappedRefs.length) {
-    warnings.push(`飞书文档包含 ${refs.length} 张图片，本次最多随 AI 请求读取 ${LARK_IMPORT_MAX_IMAGES} 张。`)
-  }
-
-  return { images, warnings }
-}
-
-function titleFromMarkdown(markdown: string) {
-  const heading = markdown.match(/^#\s+(.+)$/mu)?.[1]
-  return heading?.trim() || null
-}
-
-function buildLarkImportText(options: {
-  documentRef: string
-  title: string
-  markdown: string
-  imageRefs: LarkImageReference[]
-  importedImages: LarkImportedImage[]
-}) {
-  const imageIndex = options.imageRefs.length
-    ? options.imageRefs.map((ref, index) => {
-        const imported = options.importedImages.find((image) => image.sourceUrl === ref.url || image.token === ref.token)
-        return [
-          `- 图片 ${index + 1}：${ref.alt || imported?.name || '未命名图片'}`,
-          ref.url ? `  - URL：${ref.url}` : null,
-          ref.token ? `  - token：${ref.token}` : null,
-          imported ? `  - 已作为视觉证据传入：${imported.mediaType}，${imported.size} bytes` : '  - 未下载为视觉证据，请根据正文引用继续判断',
-        ].filter(Boolean).join('\n')
-      }).join('\n')
-    : '- 未检测到图片引用。'
-
-  return [
-    `# 飞书文档：${options.title}`,
-    '',
-    `- 来源：${options.documentRef}`,
-    `- 图片引用数：${options.imageRefs.length}`,
-    `- 已随 AI 请求传入图片数：${options.importedImages.length}`,
-    '',
-    '## 正文',
-    '',
-    options.markdown.trim(),
-    '',
-    '## 图片索引',
-    '',
-    imageIndex,
-  ].join('\n')
-}
-
 function buildAiEnvironmentStatus() {
   const configuredFigmaToken = getConfiguredFigmaToken()
   return {
@@ -6366,29 +5582,20 @@ app.get('/api/health', (_req, res) => {
   })
 })
 
-app.post('/api/project-baseline/scan', (req, res) => {
+app.post('/api/project-baseline/scan', apiRoute((req, res) => {
   const { rootPath, iterationPrd, focus } = req.body as { rootPath?: string; iterationPrd?: string; focus?: string }
-  if (!rootPath?.trim()) {
-    return void res.status(400).json({ error: '缺少代码库路径' })
-  }
-  if (!iterationPrd?.trim() && !focus?.trim()) {
-    return void res.status(400).json({ error: '缺少本次迭代 PRD 或迭代焦点' })
-  }
-
-  try {
-    res.json(scanProjectBaseline({
-      rootPath,
-      iterationPrd: iterationPrd ?? '',
-      focus: focus ?? '',
-    }))
-  } catch (err) {
-    res.status(400).json({ error: err instanceof Error ? err.message : '代码库定向扫描失败' })
-  }
-})
+  if (!rootPath?.trim()) throw new BadRequest('缺少代码库路径')
+  if (!iterationPrd?.trim() && !focus?.trim()) throw new BadRequest('缺少本次迭代 PRD 或迭代焦点')
+  res.json(scanProjectBaseline({
+    rootPath,
+    iterationPrd: iterationPrd ?? '',
+    focus: focus ?? '',
+  }))
+}, '代码库定向扫描失败'))
 
 app.post('/api/decompose/preview', async (req, res) => {
   try {
-    const sources = normalizeDecompositionSources(req.body as DecompositionSourceRequest)
+    const sources = normalizeDecompositionSources(req.body as DecompositionSourceRequest, MAX_SOURCE_IMAGES)
     const combinedInput = await buildCombinedDecompositionInput(sources)
     res.json(buildImportPreviewFromCombinedInput(combinedInput))
   } catch (err) {
@@ -6399,7 +5606,7 @@ app.post('/api/decompose/preview', async (req, res) => {
 app.post('/api/decompose/start', (req, res) => {
   let sources: NormalizedDecompositionSources
   try {
-    sources = normalizeDecompositionSources(req.body as DecompositionSourceRequest)
+    sources = normalizeDecompositionSources(req.body as DecompositionSourceRequest, MAX_SOURCE_IMAGES)
   } catch (err) {
     return void res.status(400).json({ error: err instanceof Error ? err.message : '缺少资料内容' })
   }
@@ -6420,7 +5627,7 @@ app.post('/api/decompose/start', (req, res) => {
   const assetBaseUrl = `${req.protocol}://${req.get('host') ?? `127.0.0.1:${port}`}`
   const jobFn = process.env.MOCK_DECOMPOSE === 'true'
     ? runMockDecompositionJob(sessionId)
-    : buildCombinedDecompositionInput(sources, { assetBaseUrl, semanticReview: true })
+    : buildCombinedDecompositionInput(sources, { assetBaseUrl, semanticReview: true, includeFigmaImageBlocks: true })
         .then((input) => runDecompositionJob(sessionId, input.text, projectWorkflow, input.figmaEvidence, input.rawPrdText, input.imageBlocks))
   jobFn.catch((err: unknown) => {
     const session = decompositionSessions.get(sessionId)
@@ -7053,25 +6260,14 @@ const REFERENCE_IMAGE_ROLES = [
   'negative_reference',
 ] as const satisfies readonly ReferenceImageRole[]
 
-type ReferenceImageMediaType = ReferenceImageClassificationRequest['mediaType']
-
-const SUPPORTED_REFERENCE_IMAGE_MEDIA_TYPES = new Set([
-  'image/jpeg',
-  'image/png',
-  'image/gif',
-  'image/webp',
-]) as ReadonlySet<ReferenceImageMediaType>
 
 function normalizeReferenceImageRole(value: unknown): ReferenceImageRole | null {
   const text = normalizeTextValue(value)?.toLowerCase()
   return REFERENCE_IMAGE_ROLES.find((role) => role === text) ?? null
 }
 
-function normalizeReferenceImageMediaType(value: unknown): ReferenceImageMediaType | null {
-  const text = normalizeTextValue(value)
-  return text && SUPPORTED_REFERENCE_IMAGE_MEDIA_TYPES.has(text as ReferenceImageMediaType)
-    ? text as ReferenceImageMediaType
-    : null
+function normalizeReferenceImageMediaType(value: unknown) {
+  return typeof value === 'string' ? mediaTypeFromValue(value) : null
 }
 
 function safeParseReferenceImageClassificationJson(text: string): { role: ReferenceImageRole | null; reason: string | null } | null {
@@ -7402,106 +6598,6 @@ const editPrototypeTool: Anthropic.Tool = {
     required: ['old_string', 'new_string'],
   },
 }
-
-function buildPrototypeSpec(requirementState: UXRequirementState) {
-  const hasComponents = requirementState.ui_components.length > 0
-  const componentTree = hasComponents
-    ? JSON.stringify(requirementState.ui_components, null, 2)
-    : '（暂无组件信息，请根据 trigger_condition 和 sequence_rules 推断界面结构）'
-  const assetDependencies = requirementState.asset_dependencies.length > 0
-    ? JSON.stringify(requirementState.asset_dependencies, null, 2)
-    : '（暂无可用资源）'
-  const prototypeSpecSection = requirementState.prototype_spec
-    ? `${formatPrototypeSpecForPrompt(requirementState.prototype_spec)}
-
-## 生成关系
-- Prototype Spec 是本轮生成的源事实和交付语义。
-- HTML 只能作为预览/验证渲染：用于检查状态、布局、交互和素材引用是否符合 Spec。
-- 当旧需求状态与 Prototype Spec 不一致时，以 Prototype Spec 为准；旧需求状态只作为补充背景。`
-    : `## Prototype Spec（未生成）
-本轮没有显式 Prototype Spec，请从需求状态临时推导预览，但不要把 HTML 当作交付源文件。`
-
-  return `${prototypeSpecSection}
-
-## 旧需求状态（补充背景）
-触发条件：${requirementState.trigger_condition ?? '未知'}
-执行规则：${requirementState.sequence_rules ?? '未知'}
-引擎约束：${requirementState.engine_constraints ?? '无'}
-完成度：${requirementState.completion_rate}%
-
-## 可用资源
-${assetDependencies}
-
-## 表现编排
-${requirementState.performance_spec ? formatPerformanceSpecForPrompt(requirementState.performance_spec) : '未提供单独的表现编排规格；请仅根据执行规则模拟关键状态反馈。'}
-
-## 组件树
-${componentTree}`
-}
-
-function buildScreenshotFidelitySection() {
-  return `## 参考图还原纪律
-1. 本次附带了参考图。请严格按照参考图还原界面：布局结构、视觉层级、配色、文案文字、控件位置与间距都要尽量贴合。
-2. 文案以参考图中的真实文字为准；参考图中能看清的文字优先照抄，不要凭空臆造或改写。
-3. 当参考图与下方需求状态文字描述冲突时，以参考图的视觉呈现为准；需求状态 JSON 仅用于补充交互逻辑、状态流转与引擎约束等图上看不到的信息。
-4. 忽略参考图中的采集/评审伪影：例如对比外壳、手机边框/刘海、浏览器窗口、标尺、批注箭头、红框、水印等，这些不属于要还原的界面本身。
-`
-}
-
-function buildFigmaEvidencePolicySection(hasImages: boolean) {
-  if (!hasImages) return ''
-  return `
-## Figma / 参考图优先级
-- 如果附件来自 Figma Frame、布局参考图或界面截图，它是视觉结构的主来源：布局、层级、间距、颜色、控件位置、文字和素材位置都优先按图还原。
-- PRD 和节点文档只用于补充交互逻辑、状态流转、数据条件、目标平台制作约束和图中不可见的异常状态。
-- 如果 Figma 证据列出“数值占位”，说明原图中的示例数字已从位图中去除；生成 HTML 时必须在对应坐标叠加真实业务数值或动态占位，不要还原 Figma 示例数字。
-- 不要自行发明参考图/Figma 中不存在的装饰图、角色图、背景图或外层设备框。`
-}
-
-interface FigmaAssetReference {
-  url: string
-  label: string
-  type: string
-}
-
-function extractFigmaAssetReferences(requirementState: UXRequirementState): FigmaAssetReference[] {
-  const seen = new Set<string>()
-  return requirementState.asset_dependencies
-    .map((asset): FigmaAssetReference | null => {
-      const rawPath = asset.path ?? ''
-      const url = rawPath.split('|')[0]?.trim()
-      if (!url || !/^https?:\/\/[^\s]+$/u.test(url)) return null
-      if (!asset.type.toLowerCase().includes('figma') && !url.includes('/api/figma/assets/')) return null
-      if (seen.has(url)) return null
-      seen.add(url)
-      return {
-        url,
-        label: rawPath.split('|').slice(1).join('|').trim() || asset.type,
-        type: asset.type,
-      }
-    })
-    .filter((asset): asset is FigmaAssetReference => Boolean(asset))
-    .slice(0, 6)
-}
-
-function buildFigmaAssetUsageSection(requirementState: UXRequirementState) {
-  const assets = extractFigmaAssetReferences(requirementState)
-  if (!assets.length) return ''
-
-  return `
-## Figma 位图资产使用契约
-本次 Figma 子图已经作为可访问图片资源缓存到本地代理。生成 HTML 时必须真实引用这些图片，而不是只按视觉重新绘制。
-
-可用 Figma 图片：
-${assets.map((asset, index) => `${index + 1}. ${asset.type}｜${asset.label}\n   URL: ${asset.url}`).join('\n')}
-
-使用要求：
-- 至少使用 1 张 Figma 图片作为主视觉图层；如果存在 FigmaFrameImage，优先把它作为底图或首屏主图。
-- 对重要子区域，用 FigmaSubImage 作为真实 \`<img src="...">\` 或 \`background-image:url(...)\` 图层，再叠加 HTML 状态、按钮、热点、弹层和流程反馈。
-- 不要用纯 CSS/渐变/假卡片替代这些 Figma 图片；CSS 只负责适配、遮罩、交互状态和补充图中不可见的 PRD 逻辑。
-- 这些 URL 来自当前本地代理 \`/api/figma/assets/\`，允许在预览 HTML 中直接引用。`
-}
-
 function buildCreatePrototypePrompt(requirementState: UXRequirementState, hasImages = false, focus?: string, instruction?: string, assetManifest?: PrototypeAssetManifest | null) {
   const focusSection = focus
     ? `\n## 本变体设计侧重\n${focus}\n（这是同一需求的多个备选方案之一，请在满足上述需求与约束的前提下，按本侧重做出有辨识度的设计。）\n`
@@ -7582,19 +6678,6 @@ function applyPrototypeToolUses(currentHtml: string, content: Anthropic.Messages
 
   return { html, appliedEdits }
 }
-
-function parsePrototypeRequest(req: express.Request): PrototypeRequest {
-  const body = req.body as PrototypeRequest
-  if (body && Object.keys(body).length > 0) return body
-  const payload = typeof req.query.payload === 'string' ? req.query.payload : ''
-  if (!payload) return body
-  try {
-    return JSON.parse(payload) as PrototypeRequest
-  } catch {
-    return body
-  }
-}
-
 function buildImageBlocks(images: ContentBlock[] | null | undefined): Anthropic.ImageBlockParam[] {
   return Array.isArray(images)
     ? images
@@ -7881,18 +6964,6 @@ function figmaExportScales(candidate: FigmaImageCandidate) {
   return uniqueScales([base, 1, 0.75, 0.5])
 }
 
-function extensionForMediaType(mediaType: string) {
-  if (mediaType.includes('jpeg')) return 'jpg'
-  if (mediaType.includes('webp')) return 'webp'
-  if (mediaType.includes('gif')) return 'gif'
-  return 'png'
-}
-
-function normalizeImageMediaType(mediaType: string | null) {
-  const clean = mediaType?.split(';')[0]?.trim().toLowerCase()
-  if (clean === 'image/jpeg' || clean === 'image/png' || clean === 'image/gif' || clean === 'image/webp') return clean
-  return 'image/png'
-}
 
 function sanitizeFigmaAssetName(value: string) {
   const sanitized = value
@@ -7920,7 +6991,7 @@ async function downloadFigmaImageBytes(imageUrl: string, label: string) {
   }
   return {
     bytes,
-    mediaType: normalizeImageMediaType(response.headers.get('content-type')),
+    mediaType: normalizeImageMediaTypeWithFallback(response.headers.get('content-type')),
   }
 }
 
@@ -10060,6 +9131,19 @@ async function streamPrototype(req: express.Request, res: express.Response) {
   res.end()
 }
 
+
+function parsePrototypeRequest(req: express.Request): PrototypeRequest {
+  const body = req.body as PrototypeRequest
+  if (body && Object.keys(body).length > 0) return body
+  const payload = typeof req.query.payload === 'string' ? req.query.payload : ''
+  if (!payload) return body
+  try {
+    return JSON.parse(payload) as PrototypeRequest
+  } catch {
+    return body
+  }
+}
+
 app.post('/api/prototype/stream', streamPrototype)
 
 app.post('/api/prototype', async (req, res) => {
@@ -11474,18 +10558,11 @@ app.post('/api/export-zip', (req, res) => {
   res.end(Buffer.from(zipped))
 })
 
-app.post('/api/export-spec-folder', (req, res) => {
+app.post('/api/export-spec-folder', apiRoute((req, res) => {
   const { tree, depth, includeAssets, assetWorkbench } = req.body as ExportSpecFolderRequest
-  if (!tree || typeof tree !== 'object') {
-    res.status(400).json({ error: '缺少导图树数据' })
-    return
-  }
-  try {
-    res.json(writeSpecFolder(tree, { depth, includeAssets: includeAssets === true, assetWorkbench }))
-  } catch (error) {
-    res.status(400).json({ error: error instanceof Error ? error.message : '导出页面 spec 文件夹失败' })
-  }
-})
+  if (!tree || typeof tree !== 'object') throw new BadRequest('缺少导图树数据')
+  res.json(writeSpecFolder(tree, { depth, includeAssets: includeAssets === true, assetWorkbench }))
+}, '导出页面 spec 文件夹失败'))
 
 app.post('/api/open-spec-folder', async (_req, res) => {
   try {
@@ -11528,6 +10605,16 @@ if (STATIC_WEB_ENABLED && existsSync(CLIENT_DIST_DIR)) {
 app.use((error: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (res.headersSent) {
     next(error)
+    return
+  }
+  const payloadError = error && typeof error === 'object'
+    ? error as { status?: unknown; type?: unknown }
+    : null
+  if (payloadError?.status === 413 || payloadError?.type === 'entity.too.large') {
+    res.status(413).json({
+      error: `请求内容超过本地代理限制（${JSON_BODY_LIMIT}）。Figma 首稿图片可能过大，请选择更小的 Frame、减少导出的子图，或调高 JSON_BODY_LIMIT 后重启服务。`,
+      code: 'payload_too_large',
+    })
     return
   }
   const normalized = normalizeAiProviderError(error)

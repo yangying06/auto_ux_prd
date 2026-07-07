@@ -3,18 +3,49 @@ import { persist } from 'zustand/middleware'
 import { defaultSettings } from '../data/defaultSettings'
 import { removeLatestUserTurn } from '../lib/chatRecall'
 import { persistableMessage, persistableNodeChats } from '../lib/messagePersistence'
+import { specLensFromLegacyAudience } from '../lib/prdNodeLens'
 import { normalizePerformanceSpec } from '../lib/performanceOrchestration'
-import { defaultAudienceForSpecLens, normalizeLegacyAudience, normalizeNodeLensFields, specLensFromLegacyAudience } from '../lib/prdNodeLens'
 import type { AppSettings, ChatMessage, RagSearchResult } from '../types/chat'
 import type { UXRequirementState } from '../types/uxRequirement'
-import type { CreatePageNodeInput, DecompositionStatus, DecompositionStep, FigmaUxMapReviewSource, MapAdjustmentOperation, PrdNode, PrdNodeBackendContractRef, PrdNodeDocumentField, PrdNodeDocumentSnapshot, PrdNodeEvidenceRef, PrdNodeFigmaUxMapSlice, PrdNodeOperationSuggestion, PrdNodePolishRevision, PrdNodeReference, PrdNodeSectionKey, PrdPerformanceSpec, PrdStateTransition, PrdTree, PrdUiState, UpdateNodePatch } from '../types/prdNode'
+import type { CreatePageNodeInput, DecompositionStatus, DecompositionStep, MapAdjustmentOperation, PrdNode, PrdNodeBackendContractRef, PrdNodeOperationSuggestion, PrdNodePolishRevision, PrdPerformanceSpec, PrdTree, UpdateNodePatch } from '../types/prdNode'
 import type { PrototypeVariant } from '../types/prototypeVariant'
 import type { PrototypeSpec, PrototypeSpecMode } from '../types/prototypeSpec'
 import type { ProjectSourceDocument, ProjectWorkspaceSnapshot } from '../types/archive'
-import { defaultProjectWorkflow, type ProjectIterationContext, type ProjectWorkflowMode, type ProjectWorkflowState } from '../types/projectWorkflow'
+import { type ProjectIterationContext, type ProjectWorkflowMode, type ProjectWorkflowState } from '../types/projectWorkflow'
 import type { QaAttachment, QaIssue, QaIssuePatch, QaIssueStatus, QaNodeRef } from '../types/qa'
 import { emptyAssetWorkbench, type AssetWorkbenchState, type AudioAssetRow, type EffectAssetRow, type UiAssetRow } from '../types/assetWorkbench'
 import type { ReusableLogicAsset } from '../types/reusableLogic'
+
+import {
+  normalizeOptionalText,
+  normalizeStringArray,
+} from './normalize/text'
+import {
+  createDocumentSnapshot,
+  createNodePolishRevision,
+  normalizeReferences,
+  normalizeBackendContracts,
+  withoutUndefined,
+  mergePolishSections,
+  rebuildPrdTreeLinks,
+  normalizePersistedPrdTree,
+  normalizePrdTree,
+  makePageNodeId,
+  collectDescendantIds,
+  sanitizePatch,
+  appendAdjustmentBlock,
+  mergeMapAdjustmentPatch,
+  makeSuggestionNodeId,
+  emptyProjectWorkflowState,
+  normalizeProjectWorkflow,
+} from './normalize/prdNode'
+import {
+  emptyAssetWorkbenchState,
+  normalizeReusableLogicAssets,
+  normalizeAssetWorkbench,
+  mergeEffectAssetScanRows,
+  mergeAudioAssetScanRows,
+} from './normalize/assetWorkbench'
 
 const emptyRequirement: UXRequirementState = {
   trigger_condition: null,
@@ -33,7 +64,6 @@ const STORAGE_KEY = 'ux-specforge-state'
 const LEGACY_STORAGE_KEY = 'gameux-promptforge-state'
 const STORAGE_VERSION = 17
 const PROTOTYPE_HISTORY_LIMIT = 4
-const PRD_SECTION_KEYS = ['data', 'interaction', 'view'] as const satisfies readonly PrdNodeSectionKey[]
 
 type BrowserStorageLike = {
   getItem: (key: string) => string | null
@@ -72,11 +102,17 @@ export interface NodePrototypeState {
   selectedVariantIndex: number
   draftPrototypeSpec: PrototypeSpec | null
   standardPrototypeSpec: PrototypeSpec | null
+  figmaDraftSourceKeys: string[]
 }
 
 export interface CanvasNodePosition {
   x: number
   y: number
+}
+
+export interface FigmaDraftBatchUiState {
+  isRunning: boolean
+  status: string | null
 }
 
 interface PrototypeVersionMeta {
@@ -95,567 +131,6 @@ interface NodePolishPatch {
   backendContracts?: PrdNodeBackendContractRef[]
   evidenceRefs?: PrdNode['evidenceRefs']
   performanceSpec?: PrdPerformanceSpec | null
-}
-
-const DOCUMENT_FIELDS: PrdNodeDocumentField[] = [
-  'summary',
-  'content',
-  'techNotes',
-  'sections',
-  'handoffGoal',
-  'qualityGate',
-  'backendContracts',
-  'evidenceRefs',
-  'performanceSpec',
-]
-
-function normalizeOptionalText(value: unknown) {
-  if (typeof value !== 'string') return null
-  const trimmed = value.trim()
-  return trimmed.length ? trimmed : null
-}
-
-function createDocumentSnapshot(node: PrdNode): PrdNodeDocumentSnapshot {
-  return {
-    summary: node.summary,
-    content: node.content,
-    techNotes: node.techNotes,
-    sections: node.sections,
-    handoffGoal: node.handoffGoal,
-    qualityGate: node.qualityGate,
-    backendContracts: node.backendContracts,
-    evidenceRefs: node.evidenceRefs,
-    performanceSpec: node.performanceSpec,
-  }
-}
-
-function changedDocumentFields(before: PrdNodeDocumentSnapshot, after: PrdNodeDocumentSnapshot): PrdNodeDocumentField[] {
-  return DOCUMENT_FIELDS.filter((field) => JSON.stringify(before[field] ?? null) !== JSON.stringify(after[field] ?? null))
-}
-
-function createNodePolishRevision(nodeId: string, before: PrdNodeDocumentSnapshot, after: PrdNodeDocumentSnapshot): PrdNodePolishRevision | null {
-  const changedFields = changedDocumentFields(before, after)
-  if (!changedFields.length) return null
-  return {
-    id: `${Date.now()}-${nodeId}`,
-    nodeId,
-    createdAt: new Date().toISOString(),
-    before,
-    after,
-    changedFields,
-    accepted: false,
-  }
-}
-
-function normalizeReferences(value: PrdNodeReference[] | null | undefined): PrdNodeReference[] {
-  if (!Array.isArray(value)) return []
-  return value
-    .map((reference) => ({
-      targetNodeId: normalizeOptionalText(reference.targetNodeId),
-      label: normalizeOptionalText(reference.label) ?? '跨页面引用',
-      reason: normalizeOptionalText(reference.reason),
-      sourceNodeId: normalizeOptionalText(reference.sourceNodeId),
-    }))
-    .filter((reference) => reference.targetNodeId || reference.label)
-}
-
-const UI_STATE_KINDS = new Set<PrdUiState['kind']>([
-  'default',
-  'overlay',
-  'loading',
-  'success',
-  'error',
-  'empty',
-  'disabled',
-  'expanded',
-  'collapsed',
-  'localized',
-  'mirror',
-  'selected',
-  'variant',
-])
-
-function normalizeUiStateKind(value: unknown): PrdUiState['kind'] {
-  return typeof value === 'string' && UI_STATE_KINDS.has(value as PrdUiState['kind'])
-    ? value as PrdUiState['kind']
-    : 'variant'
-}
-
-function normalizeTextList(value: unknown, limit = 12) {
-  if (!Array.isArray(value)) return []
-  return Array.from(new Set(
-    value
-      .map((item) => normalizeOptionalText(item))
-      .filter((item): item is string => Boolean(item)),
-  )).slice(0, limit)
-}
-
-function normalizeConfidencePercent(value: unknown, fallback = 70) {
-  if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, Math.min(100, Math.round(value)))
-  if (typeof value === 'string' && value.trim()) {
-    const parsed = Number.parseInt(value, 10)
-    if (Number.isFinite(parsed)) return Math.max(0, Math.min(100, parsed))
-  }
-  return fallback
-}
-
-function normalizeUiStates(value: PrdUiState[] | null | undefined): PrdUiState[] | undefined {
-  if (!Array.isArray(value)) return undefined
-  const states = value
-    .map((state, index): PrdUiState | null => {
-      if (!state || typeof state !== 'object') return null
-      const candidate = state as unknown as Record<string, unknown>
-      const figmaNodeId = normalizeOptionalText(candidate.figmaNodeId ?? candidate.nodeId ?? candidate.node_id)
-      const label = normalizeOptionalText(candidate.label ?? candidate.name)
-      if (!figmaNodeId || !label) return null
-      return {
-        id: normalizeOptionalText(candidate.id) ?? `state-${index + 1}`,
-        label,
-        kind: normalizeUiStateKind(candidate.kind),
-        figmaNodeId,
-        sourceUrl: normalizeOptionalText(candidate.sourceUrl ?? candidate.source_url),
-        previewImageUrl: normalizeOptionalText(candidate.previewImageUrl ?? candidate.preview_image_url ?? candidate.imageUrl ?? candidate.image_url),
-        visibleTexts: normalizeTextList(candidate.visibleTexts ?? candidate.visible_texts),
-        annotations: normalizeTextList(candidate.annotations),
-        confidence: normalizeConfidencePercent(candidate.confidence),
-      }
-    })
-    .filter((state): state is PrdUiState => Boolean(state))
-  return states.length ? states : undefined
-}
-
-function normalizeStateTransitions(value: PrdStateTransition[] | null | undefined): PrdStateTransition[] | undefined {
-  if (!Array.isArray(value)) return undefined
-  const transitions = value
-    .map((transition, index): PrdStateTransition | null => {
-      if (!transition || typeof transition !== 'object') return null
-      const candidate = transition as unknown as Record<string, unknown>
-      const sourceNodeId = normalizeOptionalText(candidate.sourceNodeId ?? candidate.source_node_id)
-      const targetNodeId = normalizeOptionalText(candidate.targetNodeId ?? candidate.target_node_id)
-      if (!sourceNodeId || !targetNodeId) return null
-      return {
-        id: normalizeOptionalText(candidate.id) ?? `transition-${index + 1}`,
-        sourceNodeId,
-        sourceStateId: normalizeOptionalText(candidate.sourceStateId ?? candidate.source_state_id),
-        targetNodeId,
-        targetStateId: normalizeOptionalText(candidate.targetStateId ?? candidate.target_state_id),
-        trigger: normalizeOptionalText(candidate.trigger),
-        condition: normalizeOptionalText(candidate.condition),
-        effect: normalizeOptionalText(candidate.effect),
-        evidence: normalizeTextList(candidate.evidence, 8),
-        confidence: normalizeConfidencePercent(candidate.confidence, 65),
-        source: normalizeOptionalText(candidate.source) as PrdStateTransition['source'],
-      }
-    })
-    .filter((transition): transition is PrdStateTransition => Boolean(transition))
-  return transitions.length ? transitions : undefined
-}
-
-const FIGMA_UX_MAP_REVIEW_SOURCES = new Set<FigmaUxMapReviewSource>([
-  'heuristic',
-  'ai_review',
-  'ai_review_fallback',
-])
-
-function normalizeFigmaUxMapReviewSource(value: unknown): FigmaUxMapReviewSource {
-  return typeof value === 'string' && FIGMA_UX_MAP_REVIEW_SOURCES.has(value as FigmaUxMapReviewSource)
-    ? value as FigmaUxMapReviewSource
-    : 'heuristic'
-}
-
-function normalizeNodeFigmaUxMap(value: PrdNodeFigmaUxMapSlice | null | undefined): PrdNodeFigmaUxMapSlice | null | undefined {
-  if (value === null) return null
-  if (!value || typeof value !== 'object') return undefined
-  const candidate = value as unknown as Record<string, unknown>
-  const screenId = normalizeOptionalText(candidate.screenId ?? candidate.screen_id)
-  const screenLabel = normalizeOptionalText(candidate.screenLabel ?? candidate.screen_label)
-  if (!screenId || !screenLabel) return undefined
-  return {
-    screenId,
-    screenLabel,
-    sourceFrameIds: normalizeTextList(candidate.sourceFrameIds ?? candidate.source_frame_ids, 12),
-    stateIds: normalizeTextList(candidate.stateIds ?? candidate.state_ids, 24),
-    transitionIds: normalizeTextList(candidate.transitionIds ?? candidate.transition_ids, 24),
-    ambiguityIds: normalizeTextList(candidate.ambiguityIds ?? candidate.ambiguity_ids, 24),
-    reviewSource: normalizeFigmaUxMapReviewSource(candidate.reviewSource ?? candidate.review_source),
-    reviewConfidence: normalizeConfidencePercent(candidate.reviewConfidence ?? candidate.review_confidence, 70),
-    notes: normalizeTextList(candidate.notes, 8),
-  }
-}
-
-function normalizeBackendContracts(value: PrdNodeBackendContractRef[] | null | undefined): PrdNodeBackendContractRef[] | undefined {
-  if (!Array.isArray(value)) return undefined
-  const contracts = value
-    .map((contract) => ({
-      id: normalizeOptionalText(contract.id),
-      title: normalizeOptionalText(contract.title) ?? '未命名服务端依赖',
-      kind: contract.kind,
-      summary: normalizeOptionalText(contract.summary),
-      fields: Array.isArray(contract.fields) ? contract.fields.map((field) => field.trim()).filter(Boolean) : undefined,
-      targetNodeId: normalizeOptionalText(contract.targetNodeId),
-      evidenceRefs: contract.evidenceRefs,
-    }))
-    .filter((contract) => ['api', 'config', 'server', 'data'].includes(contract.kind))
-  return contracts.length ? contracts : undefined
-}
-
-function evidenceRefKey(ref: PrdNodeEvidenceRef) {
-  return `${ref.sourceKind}:${ref.sourceLabel}:${ref.quote ?? ''}`
-}
-
-function uniqueEvidenceRefs(refs: PrdNodeEvidenceRef[]) {
-  const seen = new Set<string>()
-  return refs.filter((ref) => {
-    const key = evidenceRefKey(ref)
-    if (seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
-}
-
-function normalizeOpenQuestions(value: string[] | null | undefined) {
-  if (!Array.isArray(value)) return []
-  return Array.from(new Set(
-    value
-      .filter((item): item is string => typeof item === 'string')
-      .map((item) => item.trim())
-      .filter(Boolean),
-  ))
-}
-
-function mergePolishSections(
-  current: PrdNode['sections'] | undefined,
-  patch: PrdNode['sections'] | undefined,
-): PrdNode['sections'] | undefined {
-  if (!patch || Object.keys(patch).length === 0) return current
-
-  const next: PrdNode['sections'] = { ...(current ?? {}) }
-  let touched = false
-
-  for (const key of PRD_SECTION_KEYS) {
-    const incoming = patch[key]
-    if (!incoming) continue
-
-    const existing = next[key]
-    const title = normalizeOptionalText(incoming.title)
-    const summary = normalizeOptionalText(incoming.summary)
-    const content = normalizeOptionalText(incoming.content)
-    const evidenceRefs = Array.isArray(incoming.evidenceRefs) ? incoming.evidenceRefs : []
-    const openQuestions = normalizeOpenQuestions(incoming.openQuestions)
-    const hasSubstance = Boolean(summary || content || evidenceRefs.length || openQuestions.length)
-
-    if (!title && !hasSubstance) continue
-    if (!existing && !hasSubstance) continue
-
-    next[key] = {
-      title: title ?? existing?.title ?? null,
-      summary: summary ?? existing?.summary ?? null,
-      content: content ?? existing?.content ?? null,
-      evidenceRefs: evidenceRefs.length
-        ? uniqueEvidenceRefs([...(existing?.evidenceRefs ?? []), ...evidenceRefs])
-        : existing?.evidenceRefs ?? [],
-      openQuestions: Array.isArray(incoming.openQuestions) && hasSubstance
-        ? openQuestions
-        : existing?.openQuestions ?? [],
-    }
-    touched = true
-  }
-
-  return touched ? next : current
-}
-
-function withoutUndefined<T extends Record<string, unknown>>(value: T): Partial<T> {
-  return Object.fromEntries(Object.entries(value).filter(([, field]) => field !== undefined)) as Partial<T>
-}
-
-function hasMeaningfulText(value: unknown) {
-  return typeof value === 'string' && value.trim().length > 0
-}
-
-function repairNodeFromRevision(node: Partial<PrdNode>, revision: PrdNodePolishRevision | undefined): Partial<PrdNode> {
-  if (!revision) return node
-  const repaired = { ...node }
-  const fallback = revision.after ?? revision.before
-  const before = revision.before
-
-  if (!hasMeaningfulText(repaired.summary)) repaired.summary = fallback.summary || before.summary || repaired.summary
-  if (!hasMeaningfulText(repaired.content)) repaired.content = fallback.content || before.content || repaired.content
-  if (repaired.techNotes === undefined) repaired.techNotes = fallback.techNotes ?? before.techNotes ?? null
-  if (repaired.sections === undefined || Object.keys(repaired.sections ?? {}).length === 0) {
-    repaired.sections = fallback.sections ?? before.sections ?? repaired.sections
-  }
-  if (repaired.handoffGoal === undefined) repaired.handoffGoal = fallback.handoffGoal ?? before.handoffGoal ?? null
-  if (repaired.qualityGate === undefined) repaired.qualityGate = fallback.qualityGate ?? before.qualityGate ?? null
-  if (repaired.backendContracts === undefined) repaired.backendContracts = fallback.backendContracts ?? before.backendContracts
-  if (repaired.evidenceRefs === undefined) repaired.evidenceRefs = fallback.evidenceRefs ?? before.evidenceRefs
-  if (repaired.performanceSpec === undefined) repaired.performanceSpec = fallback.performanceSpec ?? before.performanceSpec
-
-  return repaired
-}
-
-function makePageNodeId(tree: PrdTree | null, title: string) {
-  const slug = title
-    .trim()
-    .replace(/[\s/\\]+/g, '-')
-    .replace(/[<>:"|?*\x00-\x1F]/g, '')
-    .slice(0, 24)
-  const base = `PAGE-${slug || Date.now().toString(36)}`
-  let id = base
-  let index = 2
-  while (tree?.[id]) {
-    id = `${base}-${index}`
-    index += 1
-  }
-  return id
-}
-
-function collectDescendantIds(tree: PrdTree, nodeId: string) {
-  const ids = new Set<string>()
-  const visit = (id: string) => {
-    if (ids.has(id)) return
-    ids.add(id)
-    for (const childId of tree[id]?.children ?? []) visit(childId)
-  }
-  visit(nodeId)
-  return ids
-}
-
-function sanitizePatch(patch: UpdateNodePatch): UpdateNodePatch {
-  const specLens = patch.specLens ?? specLensFromLegacyAudience(patch.audience)
-  const audience = normalizeLegacyAudience(patch.audience) ?? defaultAudienceForSpecLens(specLens) ?? patch.audience
-  return {
-    ...patch,
-    label: patch.label?.trim() || undefined,
-    summary: patch.summary?.trim() || undefined,
-    content: patch.content?.trim() || undefined,
-    docPath: patch.docPath === undefined ? undefined : normalizeOptionalText(patch.docPath),
-    references: patch.references ? normalizeReferences(patch.references) : undefined,
-    techNotes: patch.techNotes === undefined ? undefined : normalizeOptionalText(patch.techNotes),
-    audience,
-    specLens,
-    sections: patch.sections,
-    handoffGoal: patch.handoffGoal === undefined ? undefined : normalizeOptionalText(patch.handoffGoal),
-    qualityGate: patch.qualityGate === undefined ? undefined : normalizeOptionalText(patch.qualityGate),
-    backendContracts: patch.backendContracts === undefined ? undefined : normalizeBackendContracts(patch.backendContracts),
-    sourceKind: patch.sourceKind,
-    evidenceRefs: patch.evidenceRefs,
-    performanceSpec: patch.performanceSpec === undefined ? undefined : normalizePerformanceSpec(patch.performanceSpec),
-    figmaPreviews: patch.figmaPreviews,
-    uiStates: patch.uiStates === undefined ? undefined : normalizeUiStates(patch.uiStates),
-    stateTransitions: patch.stateTransitions === undefined ? undefined : normalizeStateTransitions(patch.stateTransitions),
-    figmaUxMap: patch.figmaUxMap === undefined ? undefined : normalizeNodeFigmaUxMap(patch.figmaUxMap),
-  }
-}
-
-function appendAdjustmentBlock(existing: string | null | undefined, addition: string | null | undefined, heading: string) {
-  const current = normalizeOptionalText(existing) ?? ''
-  const next = normalizeOptionalText(addition)
-  if (!next) return current
-  if (current.includes(next)) return current
-  const block = `## ${heading}\n\n${next}`
-  return current ? `${current.trim()}\n\n${block}` : next
-}
-
-function mergeSectionAdjustment(
-  current: PrdNode['sections'] | undefined,
-  patch: PrdNode['sections'] | undefined,
-): PrdNode['sections'] | undefined {
-  if (!patch || Object.keys(patch).length === 0) return current
-  const next: PrdNode['sections'] = { ...(current ?? {}) }
-  for (const key of ['data', 'interaction', 'view'] as const) {
-    const incoming = patch[key]
-    if (!incoming) continue
-    const existing = next[key]
-    next[key] = {
-      title: incoming.title ?? existing?.title ?? null,
-      summary: appendAdjustmentBlock(existing?.summary, incoming.summary, '用户反馈补充'),
-      content: appendAdjustmentBlock(existing?.content, incoming.content, '用户反馈补充'),
-      evidenceRefs: [
-        ...(existing?.evidenceRefs ?? []),
-        ...(incoming.evidenceRefs ?? []),
-      ],
-      openQuestions: Array.from(new Set([
-        ...(existing?.openQuestions ?? []),
-        ...(incoming.openQuestions ?? []),
-      ])),
-    }
-  }
-  return next
-}
-
-function mergeBackendContractAdjustment(
-  current: PrdNodeBackendContractRef[] | undefined,
-  patch: PrdNodeBackendContractRef[] | undefined,
-) {
-  const normalizedPatch = normalizeBackendContracts(patch)
-  if (!normalizedPatch?.length) return current
-  return [...(current ?? []), ...normalizedPatch]
-}
-
-function mergeMapAdjustmentPatch(node: PrdNode, patch: UpdateNodePatch): PrdNode {
-  const sanitized = sanitizePatch(patch)
-  return normalizePrdTreeNode({
-    ...node,
-    label: sanitized.label ?? node.label,
-    status: sanitized.status ?? (node.status === 'done' ? 'done' : 'pending_refine'),
-    type: sanitized.type ?? node.type,
-    needsPolish: node.needsPolish,
-    docPath: sanitized.docPath ?? node.docPath,
-    audience: sanitized.audience ?? node.audience,
-    specLens: sanitized.specLens ?? node.specLens,
-    sourceKind: sanitized.sourceKind ?? node.sourceKind,
-    references: sanitized.references
-      ? normalizeReferences([...(node.references ?? []), ...sanitized.references])
-      : node.references,
-    summary: appendAdjustmentBlock(node.summary, sanitized.summary, '用户反馈补充'),
-    content: appendAdjustmentBlock(node.content, sanitized.content, '用户反馈调整'),
-    techNotes: appendAdjustmentBlock(node.techNotes, sanitized.techNotes, '用户反馈技术补充') || null,
-    sections: mergeSectionAdjustment(node.sections, sanitized.sections),
-    handoffGoal: appendAdjustmentBlock(node.handoffGoal, sanitized.handoffGoal, '用户反馈补充') || null,
-    qualityGate: appendAdjustmentBlock(node.qualityGate, sanitized.qualityGate, '用户反馈补充') || null,
-    backendContracts: mergeBackendContractAdjustment(node.backendContracts, sanitized.backendContracts),
-    evidenceRefs: sanitized.evidenceRefs
-      ? [...(node.evidenceRefs ?? []), ...sanitized.evidenceRefs]
-      : node.evidenceRefs,
-    performanceSpec: sanitized.performanceSpec ?? node.performanceSpec,
-    figmaPreviews: sanitized.figmaPreviews ?? node.figmaPreviews,
-    uiStates: sanitized.uiStates ?? node.uiStates,
-    stateTransitions: sanitized.stateTransitions ?? node.stateTransitions,
-    figmaUxMap: sanitized.figmaUxMap === undefined ? node.figmaUxMap : sanitized.figmaUxMap,
-  })
-}
-
-function makeSuggestionNodeId(tree: PrdTree, suggestion: PrdNodeOperationSuggestion) {
-  const label = suggestion.patch.label ?? '补充节点'
-  const slug = label
-    .trim()
-    .replace(/[\s/\\]+/g, '-')
-    .replace(/[<>:"|?*\x00-\x1F]/g, '')
-    .slice(0, 24)
-  const base = `${suggestion.parentId ?? 'NODE'}-${slug || Date.now().toString(36)}`.slice(0, 48)
-  let id = base
-  let index = 2
-  while (tree[id]) {
-    id = `${base}-${index}`
-    index += 1
-  }
-  return id
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
-}
-
-function emptyProjectWorkflowState(): ProjectWorkflowState {
-  return { mode: defaultProjectWorkflow.mode, iteration: null }
-}
-
-function normalizeWorkflowStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) return []
-  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-}
-
-function normalizeProjectWorkflow(value: unknown): ProjectWorkflowState {
-  if (!isRecord(value)) return emptyProjectWorkflowState()
-  const mode: ProjectWorkflowMode = value.mode === 'existing_project_iteration'
-    ? 'existing_project_iteration'
-    : 'new_project'
-  if (mode === 'new_project') return emptyProjectWorkflowState()
-
-  const rawIteration = isRecord(value.iteration) ? value.iteration : null
-  if (!rawIteration) return { mode, iteration: null }
-
-  const iteration: ProjectIterationContext = {
-    codebasePath: normalizeOptionalText(rawIteration.codebasePath) ?? '',
-    focus: normalizeOptionalText(rawIteration.focus) ?? '',
-    baselineScan: isRecord(rawIteration.baselineScan) ? rawIteration.baselineScan as unknown as ProjectIterationContext['baselineScan'] : null,
-    platformStrategyNotes: normalizeWorkflowStringArray(rawIteration.platformStrategyNotes),
-    acceptanceFocus: normalizeWorkflowStringArray(rawIteration.acceptanceFocus),
-  }
-  return { mode, iteration }
-}
-
-function persistedTreeHasLocalTemplates(value: unknown) {
-  if (!isRecord(value)) return false
-
-  return Object.values(value).some((node) => {
-    if (!isRecord(node)) return false
-    const text = [
-      node.id,
-      node.summary,
-      node.content,
-      node.techNotes,
-      node.handoffGoal,
-      node.qualityGate,
-      node.extractedFrom,
-    ].filter((item): item is string => typeof item === 'string').join('\n')
-
-    return /原文标题「.+?」下的内容。/.test(text)
-      || /本地标题骨架|本地兜底节点|标题骨架兜底/.test(text)
-  })
-}
-
-function rebuildPrdTreeLinks(tree: PrdTree): PrdTree {
-  const next = Object.fromEntries(
-    Object.entries(tree).map(([id, node]) => [id, { ...node, children: [] }])
-  ) as PrdTree
-
-  for (const node of Object.values(next)) {
-    if (node.parentId && next[node.parentId]) {
-      next[node.parentId].children.push(node.id)
-    }
-  }
-
-  for (const node of Object.values(next)) {
-    node.children.sort((a, b) => (next[a]?.order ?? 0) - (next[b]?.order ?? 0))
-  }
-
-  return next
-}
-
-function normalizePrdTreeNode(node: PrdNode): PrdNode {
-  return normalizeNodeLensFields({
-    ...node,
-    id: node.id,
-    parentId: typeof node.parentId === 'string' ? node.parentId : null,
-    label: normalizeOptionalText(node.label) ?? node.id,
-    summary: normalizeOptionalText(node.summary) ?? '',
-    content: normalizeOptionalText(node.content) ?? normalizeOptionalText(node.summary) ?? '',
-    type: node.type ?? 'feature',
-    status: node.status ?? 'pending',
-    level: typeof node.level === 'number' ? node.level : 0,
-    order: typeof node.order === 'number' ? node.order : 0,
-    needsPolish: typeof node.needsPolish === 'boolean' ? node.needsPolish : node.type === 'page' || node.type === 'ui',
-    extractedFrom: node.extractedFrom ?? null,
-    techNotes: node.techNotes ?? null,
-    children: Array.isArray(node.children) ? node.children : [],
-    references: normalizeReferences(node.references),
-    sections: node.sections ?? {},
-    backendContracts: normalizeBackendContracts(node.backendContracts),
-    performanceSpec: normalizePerformanceSpec(node.performanceSpec),
-    uiStates: normalizeUiStates(node.uiStates),
-    stateTransitions: normalizeStateTransitions(node.stateTransitions),
-    figmaUxMap: normalizeNodeFigmaUxMap(node.figmaUxMap),
-  })
-}
-
-function normalizePersistedPrdTree(value: unknown, revisions?: unknown): PrdTree | null {
-  if (!isRecord(value)) return null
-  if (persistedTreeHasLocalTemplates(value)) return null
-  const revisionMap = isRecord(revisions) ? revisions as Record<string, PrdNodePolishRevision> : {}
-  const normalized = Object.fromEntries(
-    Object.entries(value).map(([id, rawNode]) => {
-      const node = repairNodeFromRevision({ ...(rawNode as PrdNode), id }, revisionMap[id]) as PrdNode
-      return [id, normalizePrdTreeNode(node)]
-    })
-  ) as PrdTree
-  return rebuildPrdTreeLinks(normalized)
-}
-
-function normalizePrdTree(value: PrdTree): PrdTree {
-  return rebuildPrdTreeLinks(Object.fromEntries(
-    Object.entries(value).map(([id, node]) => [id, normalizePrdTreeNode(node)])
-  ) as PrdTree)
 }
 
 export const initialMessages: ChatMessage[] = [
@@ -696,6 +171,14 @@ function emptyNodePrototypeState(): NodePrototypeState {
     selectedVariantIndex: -1,
     draftPrototypeSpec: null,
     standardPrototypeSpec: null,
+    figmaDraftSourceKeys: [],
+  }
+}
+
+function emptyFigmaDraftBatchUiState(): FigmaDraftBatchUiState {
+  return {
+    isRunning: false,
+    status: null,
   }
 }
 
@@ -784,11 +267,6 @@ function createEmptyQaIssue(nodeRefs: QaNodeRef[]): QaIssue {
   }
 }
 
-function normalizeStringArray(value: string[] | undefined) {
-  if (!Array.isArray(value)) return undefined
-  return value.map((item) => item.trim()).filter(Boolean)
-}
-
 function clampQaConfidence(value: number | undefined, fallback: number) {
   if (typeof value !== 'number' || Number.isNaN(value)) return fallback
   return Math.max(0, Math.min(100, Math.round(value)))
@@ -829,17 +307,6 @@ function issueWithStatus(issue: QaIssue, status: QaIssueStatus): QaIssue {
   }
 }
 
-function emptyAssetWorkbenchState(): AssetWorkbenchState {
-  return {
-    uiRows: [],
-    effectRows: [],
-    audioRows: [],
-    reusableLogicAssets: [],
-    lastEffectScanRoot: null,
-    lastAudioScanRoot: null,
-  }
-}
-
 function withPrototypeSpec(nodeState: NodePrototypeState, spec: PrototypeSpec | null | undefined): NodePrototypeState {
   if (!spec) return nodeState
   return spec.mode === 'standard'
@@ -865,6 +332,9 @@ function normalizeNodePrototypeState(value: NodePrototypeState | undefined | nul
     selectedVariantIndex: typeof value.selectedVariantIndex === 'number' ? value.selectedVariantIndex : -1,
     draftPrototypeSpec: value.draftPrototypeSpec ?? null,
     standardPrototypeSpec: value.standardPrototypeSpec ?? null,
+    figmaDraftSourceKeys: Array.isArray(value.figmaDraftSourceKeys)
+      ? value.figmaDraftSourceKeys.filter((key): key is string => typeof key === 'string' && Boolean(key.trim()))
+      : [],
   }
 }
 
@@ -894,321 +364,6 @@ function normalizeCanvasNodePositions(value: unknown, tree: PrdTree | null | und
   )
 }
 
-function normalizeUiAssetKind(rowOrKind: unknown) {
-  const rawKind = isRecord(rowOrKind) ? rowOrKind.kind : rowOrKind
-  const rawParseMode = isRecord(rowOrKind) ? rowOrKind.parseMode : undefined
-  const rawResult = isRecord(rowOrKind) ? rowOrKind.result : undefined
-  const rawResultParseMode = isRecord(rawResult) ? rawResult.parseMode : undefined
-  const kindText = String(rawKind ?? '').trim().toLowerCase()
-
-  if (
-    kindText === 'image_set'
-    || kindText === 'component'
-    || kindText === 'image'
-    || kindText === 'images'
-    || kindText === 'image-set'
-    || kindText === '散图'
-  ) {
-    return 'image_set'
-  }
-
-  if (rawParseMode === 'image_set' || rawResultParseMode === 'image_set') {
-    return 'image_set'
-  }
-
-  return 'interface'
-}
-
-function normalizeUiAssetParseMode(value: unknown, kind: ReturnType<typeof normalizeUiAssetKind>) {
-  if (kind === 'image_set') return 'image_set'
-  return value === 'image_set' ? 'image_set' : 'intermediate'
-}
-
-function normalizeEffectLoadStatus(value: unknown) {
-  return value === 'loading' || value === 'loaded' || value === 'error' ? value : 'not_loaded'
-}
-
-function normalizeAudioLoadStatus(value: unknown) {
-  return value === 'loading' || value === 'loaded' || value === 'error' ? value : 'not_loaded'
-}
-
-function normalizeStringArrayValue(value: unknown) {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-    : []
-}
-
-function normalizeEffectSpineAsset(value: unknown): EffectAssetRow['spine'] {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  const raw = value as NonNullable<EffectAssetRow['spine']>
-  const atlasUrl = typeof raw.atlasUrl === 'string' && raw.atlasUrl.trim() ? raw.atlasUrl : null
-  const textureUrls = normalizeStringArrayValue(raw.textureUrls)
-  if (!atlasUrl || textureUrls.length === 0) return null
-  return {
-    jsonUrl: typeof raw.jsonUrl === 'string' && raw.jsonUrl.trim() ? raw.jsonUrl : null,
-    binaryUrl: typeof raw.binaryUrl === 'string' && raw.binaryUrl.trim() ? raw.binaryUrl : null,
-    atlasUrl,
-    textureUrls,
-    animationNames: normalizeStringArrayValue(raw.animationNames),
-    skinNames: normalizeStringArrayValue(raw.skinNames),
-    defaultAnimation: typeof raw.defaultAnimation === 'string' && raw.defaultAnimation.trim() ? raw.defaultAnimation : null,
-    skeletonVersion: typeof raw.skeletonVersion === 'string' && raw.skeletonVersion.trim() ? raw.skeletonVersion : null,
-    premultipliedAlpha: typeof raw.premultipliedAlpha === 'boolean' ? raw.premultipliedAlpha : null,
-    playerJsUrl: typeof raw.playerJsUrl === 'string' && raw.playerJsUrl.trim() ? raw.playerJsUrl : null,
-    playerCssUrl: typeof raw.playerCssUrl === 'string' && raw.playerCssUrl.trim() ? raw.playerCssUrl : null,
-  }
-}
-
-function normalizeReusableLogicStatus(value: unknown): ReusableLogicAsset['status'] {
-  return value === 'approved' || value === 'ignored' ? value : 'candidate'
-}
-
-function normalizeReusableLogicType(value: unknown): ReusableLogicAsset['type'] {
-  if (
-    value === 'interaction_state'
-    || value === 'animation_rule'
-    || value === 'feedback_pattern'
-    || value === 'component_pattern'
-    || value === 'copywriting_pattern'
-  ) {
-    return value
-  }
-  return 'interaction_state'
-}
-
-function normalizeReusableLogicAssets(value: unknown): ReusableLogicAsset[] {
-  if (!Array.isArray(value)) return []
-  return value.flatMap((item): ReusableLogicAsset[] => {
-    if (!isRecord(item)) return []
-    const id = normalizeOptionalText(item.id)
-    const name = normalizeOptionalText(item.name)
-    const logic = normalizeOptionalText(item.logic)
-    const source = isRecord(item.source) ? item.source : {}
-    const sourceNodeId = normalizeOptionalText(source.nodeId)
-    const sourceNodeLabel = normalizeOptionalText(source.nodeLabel)
-    if (!id || !name || !logic || !sourceNodeId || !sourceNodeLabel) return []
-    const now = new Date().toISOString()
-    return [{
-      id,
-      name,
-      type: normalizeReusableLogicType(item.type),
-      status: normalizeReusableLogicStatus(item.status),
-      reuseMode: item.reuseMode === 'copy' ? 'copy' : 'reference',
-      description: normalizeOptionalText(item.description) ?? logic,
-      logic,
-      usageGuidance: normalizeOptionalText(item.usageGuidance) ?? '复用前确认当前节点资源、层级和结束状态是否匹配。',
-      tags: Array.isArray(item.tags)
-        ? item.tags.map((tag) => normalizeOptionalText(tag)).filter((tag): tag is string => Boolean(tag)).slice(0, 10)
-        : [],
-      source: {
-        nodeId: sourceNodeId,
-        nodeLabel: sourceNodeLabel,
-        field: normalizeOptionalText(source.field) ?? 'performanceSpec',
-        excerpt: normalizeOptionalText(source.excerpt),
-      },
-      createdAt: normalizeOptionalText(item.createdAt) ?? now,
-      updatedAt: normalizeOptionalText(item.updatedAt) ?? now,
-    }]
-  })
-}
-
-function normalizeAudioAssetKind(value: unknown): AudioAssetRow['kind'] {
-  const text = String(value ?? '').trim().toLowerCase()
-  if (text === 'sfx' || text === 'effect' || text === 'sound_effect') return 'sfx'
-  if (text === 'music' || text === 'bgm') return 'music'
-  if (text === 'voice' || text === 'vo') return 'voice'
-  if (text === 'ambient' || text === 'ambience') return 'ambient'
-  return 'unknown'
-}
-
-function normalizeAudioAssetRow(row: Partial<AudioAssetRow> & Record<string, unknown>): AudioAssetRow {
-  const now = new Date().toISOString()
-  const files = Array.isArray(row.files)
-    ? row.files.map((file) => ({
-        ...(file as AudioAssetRow['files'][number]),
-        loadedPath: typeof (file as { loadedPath?: unknown }).loadedPath === 'string' ? (file as { loadedPath: string }).loadedPath : null,
-        previewUrl: typeof (file as { previewUrl?: unknown }).previewUrl === 'string' ? (file as { previewUrl: string }).previewUrl : null,
-      }))
-    : []
-  return {
-    id: normalizeOptionalText(row.id) ?? `audio-${now}`,
-    name: normalizeOptionalText(row.name) ?? 'Audio asset',
-    kind: normalizeAudioAssetKind(row.kind),
-    sourceRoot: normalizeOptionalText(row.sourceRoot) ?? '',
-    relativePath: normalizeOptionalText(row.relativePath) ?? '',
-    localPath: normalizeOptionalText(row.localPath) ?? normalizeOptionalText(row.sourceRoot) ?? '',
-    purpose: normalizeOptionalText(row.purpose) ?? '',
-    usageNote: normalizeOptionalText(row.usageNote) ?? '',
-    triggerHint: normalizeOptionalText(row.triggerHint) ?? normalizeOptionalText((row as { pageHint?: unknown }).pageHint) ?? '',
-    playbackHint: normalizeOptionalText(row.playbackHint) ?? normalizeOptionalText((row as { implementationHint?: unknown }).implementationHint) ?? '',
-    linkedNodeIds: Array.isArray(row.linkedNodeIds) ? row.linkedNodeIds.filter((id): id is string => typeof id === 'string') : [],
-    status: row.status === 'parsing' || row.status === 'error' || row.status === 'idle' ? row.status : 'ready',
-    loadStatus: normalizeAudioLoadStatus(row.loadStatus),
-    loadError: typeof row.loadError === 'string' ? row.loadError : null,
-    loadedRoot: typeof row.loadedRoot === 'string' ? row.loadedRoot : null,
-    loadedPath: typeof row.loadedPath === 'string' ? row.loadedPath : null,
-    loadedFileCount: typeof row.loadedFileCount === 'number' ? row.loadedFileCount : 0,
-    loadedBytes: typeof row.loadedBytes === 'number' ? row.loadedBytes : 0,
-    loadedAt: typeof row.loadedAt === 'string' ? row.loadedAt : null,
-    previewUrl: typeof row.previewUrl === 'string' ? row.previewUrl : null,
-    durationMs: typeof row.durationMs === 'number' ? row.durationMs : null,
-    fileCount: typeof row.fileCount === 'number' ? row.fileCount : files.length,
-    files,
-    createdAt: normalizeOptionalText(row.createdAt) ?? now,
-    updatedAt: normalizeOptionalText(row.updatedAt) ?? now,
-  }
-}
-
-function audioRowFromLegacyEffectRow(row: EffectAssetRow): AudioAssetRow {
-  return normalizeAudioAssetRow({
-    ...row,
-    id: row.id.replace(/^effect-/u, 'audio-'),
-    kind: 'sfx',
-    triggerHint: row.pageHint,
-    playbackHint: row.implementationHint,
-  })
-}
-
-function normalizeAssetWorkbench(value: AssetWorkbenchState | null | undefined): AssetWorkbenchState {
-  if (!value || typeof value !== 'object') return emptyAssetWorkbenchState()
-  const legacyAudioRows = Array.isArray(value.effectRows)
-    ? value.effectRows
-        .filter((row) => (row as { kind?: unknown }).kind === 'audio')
-        .map((row) => audioRowFromLegacyEffectRow(row as EffectAssetRow))
-    : []
-  const audioRows = [
-    ...(Array.isArray((value as { audioRows?: unknown }).audioRows)
-      ? (value as unknown as { audioRows: Array<Partial<AudioAssetRow> & Record<string, unknown>> }).audioRows.map(normalizeAudioAssetRow)
-      : []),
-    ...legacyAudioRows,
-  ]
-  return {
-    uiRows: Array.isArray(value.uiRows)
-      ? value.uiRows.map((row) => {
-          const kind = normalizeUiAssetKind(row)
-          return {
-            ...row,
-            kind,
-            parseMode: normalizeUiAssetParseMode((row as { parseMode?: unknown }).parseMode, kind),
-          }
-        })
-      : [],
-    effectRows: Array.isArray(value.effectRows)
-      ? value.effectRows.filter((row) => (row as { kind?: unknown }).kind !== 'audio').map((row) => ({
-          ...row,
-          loadStatus: normalizeEffectLoadStatus((row as { loadStatus?: unknown }).loadStatus),
-          loadError: typeof (row as { loadError?: unknown }).loadError === 'string' ? (row as { loadError: string }).loadError : null,
-          loadedRoot: typeof (row as { loadedRoot?: unknown }).loadedRoot === 'string' ? (row as { loadedRoot: string }).loadedRoot : null,
-          loadedPath: typeof (row as { loadedPath?: unknown }).loadedPath === 'string' ? (row as { loadedPath: string }).loadedPath : null,
-          loadedFileCount: typeof (row as { loadedFileCount?: unknown }).loadedFileCount === 'number' ? (row as { loadedFileCount: number }).loadedFileCount : 0,
-          loadedBytes: typeof (row as { loadedBytes?: unknown }).loadedBytes === 'number' ? (row as { loadedBytes: number }).loadedBytes : 0,
-          loadedAt: typeof (row as { loadedAt?: unknown }).loadedAt === 'string' ? (row as { loadedAt: string }).loadedAt : null,
-          previewType: ['image', 'sequence', 'video', 'audio', 'spine'].includes(String((row as { previewType?: unknown }).previewType))
-            ? (row as { previewType: EffectAssetRow['previewType'] }).previewType
-            : null,
-          previewUrl: typeof (row as { previewUrl?: unknown }).previewUrl === 'string' ? (row as { previewUrl: string }).previewUrl : null,
-          previewFiles: Array.isArray((row as { previewFiles?: unknown }).previewFiles)
-            ? (row as { previewFiles: EffectAssetRow['previewFiles'] }).previewFiles.filter((file) => (
-                file && typeof file.name === 'string' && typeof file.ext === 'string' && typeof file.url === 'string'
-              ))
-            : [],
-          spine: normalizeEffectSpineAsset((row as { spine?: unknown }).spine),
-          files: Array.isArray(row.files)
-            ? row.files.map((file) => ({
-                ...file,
-                loadedPath: typeof (file as { loadedPath?: unknown }).loadedPath === 'string' ? (file as { loadedPath: string }).loadedPath : null,
-                previewUrl: typeof (file as { previewUrl?: unknown }).previewUrl === 'string' ? (file as { previewUrl: string }).previewUrl : null,
-              }))
-            : [],
-        }))
-      : [],
-    audioRows,
-    reusableLogicAssets: normalizeReusableLogicAssets((value as { reusableLogicAssets?: unknown }).reusableLogicAssets),
-    lastEffectScanRoot: typeof value.lastEffectScanRoot === 'string' ? value.lastEffectScanRoot : null,
-    lastAudioScanRoot: typeof (value as { lastAudioScanRoot?: unknown }).lastAudioScanRoot === 'string' ? (value as { lastAudioScanRoot: string }).lastAudioScanRoot : null,
-  }
-}
-
-function mergeEffectAssetScanRows(existingRows: EffectAssetRow[], sourceRoot: string, scannedRows: EffectAssetRow[]) {
-  const existingById = new Map(existingRows.filter((row) => row.sourceRoot === sourceRoot).map((row) => [row.id, row]))
-  const mergedRows = scannedRows.map((row) => {
-    const existing = existingById.get(row.id)
-    if (!existing) return row
-    const loadedPathBySourcePath = new Map(existing.files.map((file) => [file.path, file.loadedPath ?? null]))
-    const scannedNote = row.usageNote.trim()
-    return {
-      ...row,
-      name: existing.name,
-      purpose: scannedNote ? '' : existing.purpose,
-      usageNote: scannedNote || existing.usageNote,
-      pageHint: scannedNote ? '' : existing.pageHint,
-      implementationHint: scannedNote ? '' : existing.implementationHint,
-      linkedNodeIds: existing.linkedNodeIds,
-      loadStatus: existing.loadStatus,
-      loadError: existing.loadError,
-      loadedRoot: existing.loadedRoot,
-      loadedPath: existing.loadedPath,
-      loadedFileCount: existing.loadedFileCount,
-      loadedBytes: existing.loadedBytes,
-      loadedAt: existing.loadedAt,
-      previewType: existing.previewType,
-      previewUrl: existing.previewUrl,
-      previewFiles: existing.previewFiles,
-      spine: existing.spine,
-      files: row.files.map((file) => ({
-        ...file,
-        loadedPath: loadedPathBySourcePath.get(file.path) ?? null,
-        previewUrl: existing.files.find((existingFile) => existingFile.path === file.path)?.previewUrl ?? null,
-      })),
-      createdAt: existing.createdAt,
-      updatedAt: row.updatedAt,
-    }
-  })
-  return [
-    ...mergedRows,
-    ...existingRows.filter((row) => row.sourceRoot !== sourceRoot),
-  ]
-}
-
-function mergeAudioAssetScanRows(existingRows: AudioAssetRow[], sourceRoot: string, scannedRows: AudioAssetRow[]) {
-  const existingById = new Map(existingRows.filter((row) => row.sourceRoot === sourceRoot).map((row) => [row.id, row]))
-  const mergedRows = scannedRows.map((row) => {
-    const existing = existingById.get(row.id)
-    if (!existing) return row
-    const loadedPathBySourcePath = new Map(existing.files.map((file) => [file.path, file.loadedPath ?? null]))
-    return {
-      ...row,
-      name: existing.name,
-      kind: existing.kind,
-      purpose: existing.purpose,
-      usageNote: existing.usageNote || row.usageNote,
-      triggerHint: existing.triggerHint || row.triggerHint,
-      playbackHint: existing.playbackHint || row.playbackHint,
-      linkedNodeIds: existing.linkedNodeIds,
-      loadStatus: existing.loadStatus,
-      loadError: existing.loadError,
-      loadedRoot: existing.loadedRoot,
-      loadedPath: existing.loadedPath,
-      loadedFileCount: existing.loadedFileCount,
-      loadedBytes: existing.loadedBytes,
-      loadedAt: existing.loadedAt,
-      previewUrl: existing.previewUrl,
-      durationMs: existing.durationMs,
-      files: row.files.map((file) => ({
-        ...file,
-        loadedPath: loadedPathBySourcePath.get(file.path) ?? null,
-        previewUrl: existing.files.find((existingFile) => existingFile.path === file.path)?.previewUrl ?? null,
-      })),
-      createdAt: existing.createdAt,
-      updatedAt: row.updatedAt,
-    }
-  })
-  return [
-    ...mergedRows,
-    ...existingRows.filter((row) => row.sourceRoot !== sourceRoot),
-  ]
-}
-
 export interface AppStoreState {
   requirement: UXRequirementState
   messages: ChatMessage[]
@@ -1236,6 +391,8 @@ export interface AppStoreState {
   currentArchivePath: string | null
   lastSavedAt: string | null
   archiveDirty: boolean
+  figmaDraftBatch: FigmaDraftBatchUiState
+  setFigmaDraftBatch: (patch: Partial<FigmaDraftBatchUiState>) => void
   setSourceDocument: (sourceDocument: ProjectSourceDocument | null) => void
   setProjectWorkflowMode: (mode: ProjectWorkflowMode) => void
   setProjectIterationContext: (context: ProjectIterationContext | null) => void
@@ -1308,6 +465,7 @@ export interface AppStoreState {
   setNodePrototypeVariants: (nodeId: string, variants: PrototypeVariant[]) => void
   updateNodePrototypeVariant: (nodeId: string, index: number, patch: Partial<PrototypeVariant>) => void
   selectNodePrototypeVariant: (nodeId: string, index: number) => void
+  markNodeFigmaDraftSourceGenerated: (nodeId: string, sourceKey: string) => void
   clearNodePrototypeVariants: (nodeId: string) => void
   updateSettings: (settings: AppSettings) => void
   resetSession: () => void
@@ -1352,6 +510,14 @@ export const useAppStore = create<AppStoreState>()(
       currentArchivePath: null,
       lastSavedAt: null,
       archiveDirty: false,
+      figmaDraftBatch: emptyFigmaDraftBatchUiState(),
+      setFigmaDraftBatch: (patch) =>
+        set((state) => ({
+          figmaDraftBatch: {
+            ...state.figmaDraftBatch,
+            ...patch,
+          },
+        })),
       setSourceDocument: (sourceDocument) => set({ sourceDocument, archiveDirty: true }),
       setProjectWorkflowMode: (mode) =>
         set((state) => ({
@@ -1409,6 +575,7 @@ export const useAppStore = create<AppStoreState>()(
             currentArchivePath,
             lastSavedAt: savedAt ?? new Date().toISOString(),
             archiveDirty: false,
+            figmaDraftBatch: emptyFigmaDraftBatchUiState(),
           }
         }),
       markArchiveSaved: (currentArchivePath, savedAt) => set({ currentArchivePath, lastSavedAt: savedAt ?? new Date().toISOString(), archiveDirty: false }),
@@ -1440,6 +607,7 @@ export const useAppStore = create<AppStoreState>()(
           currentArchivePath: null,
           lastSavedAt: null,
           archiveDirty: false,
+          figmaDraftBatch: emptyFigmaDraftBatchUiState(),
         }),
       createPageNode: (input) => {
         const title = input.title.trim()
@@ -2218,6 +1386,7 @@ export const useAppStore = create<AppStoreState>()(
                 selectedVariantIndex: -1,
                 draftPrototypeSpec: null,
                 standardPrototypeSpec: null,
+                figmaDraftSourceKeys: [],
               }),
               archiveDirty: true,
             }
@@ -2263,6 +1432,7 @@ export const useAppStore = create<AppStoreState>()(
               selectedVariantIndex: -1,
               draftPrototypeSpec: null,
               standardPrototypeSpec: null,
+              figmaDraftSourceKeys: [],
             }),
             archiveDirty: true,
           }
@@ -2314,6 +1484,20 @@ export const useAppStore = create<AppStoreState>()(
               ...withPrototypeSpec(current, variant.prototypeSpec),
               selectedVariantIndex: index,
               prototypeHtml: variant.html ?? current.prototypeHtml,
+            }),
+            archiveDirty: true,
+          }
+        }),
+      markNodeFigmaDraftSourceGenerated: (nodeId, sourceKey) =>
+        set((state) => {
+          const key = sourceKey.trim()
+          if (!key) return state
+          const current = getNodePrototypeState(state, nodeId)
+          if (current.figmaDraftSourceKeys.includes(key)) return state
+          return {
+            ...setNodePrototypeState(state, nodeId, {
+              ...current,
+              figmaDraftSourceKeys: [...current.figmaDraftSourceKeys, key],
             }),
             archiveDirty: true,
           }
@@ -2371,6 +1555,7 @@ export const useAppStore = create<AppStoreState>()(
           assetWorkbench: emptyAssetWorkbenchState(),
           nodePrototypeStates: {},
           nodePolishRevisions: {},
+          figmaDraftBatch: emptyFigmaDraftBatchUiState(),
           archiveDirty: true,
         }),
     }),

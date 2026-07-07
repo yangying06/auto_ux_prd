@@ -17,8 +17,12 @@ import {
 
 assert.equal(isStrictFigmaInterfaceFrameSize(750, 1624), true, '750px wide tall frame is an interface candidate')
 assert.equal(isStrictFigmaInterfaceFrameSize(755, 1687), true, 'width tolerance accepts +/-10px')
+assert.equal(isStrictFigmaInterfaceFrameSize(375, 812), true, 'logical mobile frames are interface candidates')
+assert.equal(isStrictFigmaInterfaceFrameSize(390, 844), true, 'modern iOS logical mobile frames are interface candidates')
+assert.equal(isStrictFigmaInterfaceFrameSize(720, 1624), true, 'common Android/H5 720px frames are interface candidates')
+assert.equal(isStrictFigmaInterfaceFrameSize(1080, 1920), true, 'high-density mobile frames are interface candidates')
 assert.equal(isStrictFigmaInterfaceFrameSize(750, 806), false, 'short 750px fragments are scatter images')
-assert.equal(isStrictFigmaInterfaceFrameSize(720, 1624), false, 'non-750px tall frames are not primary interfaces')
+assert.equal(isStrictFigmaInterfaceFrameSize(1440, 900), false, 'landscape desktop containers are not mobile interface candidates')
 
 assert.equal(
   chooseFigmaMetaTargetEndpointIndex([

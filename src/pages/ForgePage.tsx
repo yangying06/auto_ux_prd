@@ -1,17 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useParams } from 'wouter'
+import { errorMessageFromUnknown, isAbortError } from '../lib/errorUtils'
 import { ForgeChat } from '../components/map/ForgeChat'
 import { ForgeNodePanel } from '../components/map/ForgeNodePanel'
 import { AssetWorkbenchModal } from '../components/map/AssetWorkbenchModal'
 import { ReusableLogicSedimentationDialog } from '../components/map/ReusableLogicSedimentationDialog'
+import { FigmaDraftBatchStatusStrip } from '../components/map/FigmaDraftBatchStatusStrip'
 import { classifyReferenceImage, generatePrototype, importFigmaFrame, sendNodeChatMessage } from '../lib/api'
 import { formatPerformanceSpecForPrompt, resolveNodePerformanceSpec } from '../lib/performanceOrchestration'
 import { formatSectionTitle, formatSpecLens, hasNodeSections, resolveNodeSpecLens } from '../lib/prdNodeLens'
 import { buildDeliverySections, collectBackendContracts, isDeliveryNode } from '../lib/prdNodeDelivery'
 import { streamPrototype } from '../lib/prototypeStream'
 import { buildUiOnlyPrototypeInstruction, chatContentImages, chatContentText, extractFigmaUrlsFromText, isUiOnlyPrototypeFeedback } from '../lib/nodeChatIntent'
-import { getNodeFigmaDraftSource, nodeHasGeneratedPrototype, nodeHasPrototypeInFlight } from '../lib/figmaDraftPrototype'
+import { figmaDraftSourceKey, getNodeFigmaDraftSource, nodeHasGeneratedPrototype, nodeHasPrototypeInFlight } from '../lib/figmaDraftPrototype'
 import { buildFigmaPrototypeIterationInstruction, mergeInstructionIntoPrototypeEvidence } from '../lib/prototypeIteration'
+import { beginPrototypeGeneration, cancelPrototypeGeneration, clearPrototypeGeneration } from '../lib/prototypeGenerationRegistry'
 import { buildDraftPrototypeSpecFromNode, mergeReusableLogicIntoPrototypeSpec, standardizePrototypeSpec } from '../lib/prototypeSpec'
 import { deriveReusableLogicCandidates, formatReusableLogicAssetForPrompt } from '../lib/reusableLogicSedimentation'
 import { useAppStore } from '../store/appStore'
@@ -38,18 +41,6 @@ type ForgePrototypeOptions = {
 }
 
 const POLISH_SECTION_RE = /\n\n## Deep Forge .*\n[\s\S]*$/u
-
-function errorMessageFromUnknown(error: unknown, fallback = 'Prototype update failed.') {
-  return error instanceof Error && error.message ? error.message : fallback
-}
-
-function isAbortError(error: unknown) {
-  return typeof error === 'object'
-    && error !== null
-    && 'name' in error
-    && String((error as { name?: unknown }).name) === 'AbortError'
-}
-
 function prototypeGenerationCancelledError() {
   return new DOMException('已取消原型生成。', 'AbortError')
 }
@@ -823,6 +814,7 @@ export function ForgePage() {
   const sourceDocument = useAppStore((s) => s.sourceDocument)
   const settings = useAppStore((s) => s.settings)
   const assetWorkbench = useAppStore((s) => s.assetWorkbench)
+  const figmaDraftBatch = useAppStore((s) => s.figmaDraftBatch)
   const appendNodeMessage = useAppStore((s) => s.appendNodeMessage)
   const removeLastNodeChatTurn = useAppStore((s) => s.removeLastNodeChatTurn)
   const clearNodeChat = useAppStore((s) => s.clearNodeChat)
@@ -845,6 +837,7 @@ export function ForgePage() {
   const selectNodePrototypeVariant = useAppStore((s) => s.selectNodePrototypeVariant)
   const setNodePrototypeHtml = useAppStore((s) => s.setNodePrototypeHtml)
   const setNodePrototypeSpec = useAppStore((s) => s.setNodePrototypeSpec)
+  const markNodeFigmaDraftSourceGenerated = useAppStore((s) => s.markNodeFigmaDraftSourceGenerated)
   const upsertReusableLogicAssets = useAppStore((s) => s.upsertReusableLogicAssets)
   const updateReusableLogicAsset = useAppStore((s) => s.updateReusableLogicAsset)
   const approveReusableLogicAsset = useAppStore((s) => s.approveReusableLogicAsset)
@@ -857,8 +850,9 @@ export function ForgePage() {
   const [generationMode, setGenerationMode] = useState<PrototypeGenerationMode>('draft_preview')
   const [sedimentationOpen, setSedimentationOpen] = useState(false)
   const [pendingSedimentationAction, setPendingSedimentationAction] = useState<'confirm_node' | 'resource_mode' | null>(null)
-  const prototypeAbortControllerRef = useRef<AbortController | null>(null)
   const autoFigmaDraftAttemptsRef = useRef<Set<string>>(new Set())
+  const hasPrototypeInFlight = nodeHasPrototypeInFlight(nodePrototypeState)
+  const isPrototypeGenerationBusy = isGeneratingPrototype || hasPrototypeInFlight
 
   const node = prdTree?.[nodeId ?? ''] ?? null
   const messages = nodeChats[nodeId ?? ''] ?? []
@@ -909,16 +903,9 @@ export function ForgePage() {
     upsertReusableLogicAssets(reusableLogicCandidates)
   }, [reusableLogicCandidates, upsertReusableLogicAssets])
 
-  useEffect(() => () => {
-    prototypeAbortControllerRef.current?.abort()
-    prototypeAbortControllerRef.current = null
-  }, [nodeId])
-
   function handleCancelPrototypeGeneration() {
-    const controller = prototypeAbortControllerRef.current
-    if (!controller || controller.signal.aborted) return
+    if (!cancelPrototypeGeneration(nodeId)) return
     setIsCancellingPrototype(true)
-    controller.abort()
   }
 
   useEffect(() => {
@@ -955,7 +942,7 @@ export function ForgePage() {
   useEffect(() => {
     if (!nodeId || !node || !prdTree || !autoFigmaDraftSource) return
     if (generationMode !== 'draft_preview') return
-    if (nodeHasGeneratedPrototype(nodePrototypeState) || nodeHasPrototypeInFlight(nodePrototypeState)) return
+    if (nodeHasGeneratedPrototype(nodePrototypeState) || hasPrototypeInFlight) return
 
     const attemptKey = `${nodeId}:${autoFigmaDraftSource.url}`
     if (autoFigmaDraftAttemptsRef.current.has(attemptKey)) return
@@ -964,7 +951,7 @@ export function ForgePage() {
     void handleImportFigmaFrame({ url: autoFigmaDraftSource.url }, { generationMode: 'draft_preview' }).catch(() => {
       // handleImportFigmaFrame records the user-visible failure message.
     })
-  }, [autoFigmaDraftSource, generationMode, node, nodeId, nodePrototypeState, prdTree])
+  }, [autoFigmaDraftSource, generationMode, hasPrototypeInFlight, node, nodeId, nodePrototypeState, prdTree])
 
   async function handleSend(content: ChatMessage['content'], options: ForgeSendOptions = {}) {
     if (!nodeId || !prdTree || !node) return
@@ -1093,6 +1080,7 @@ export function ForgePage() {
       if (!prototypeUpdated) {
         throw new Error('Figma parsed, but no updated HTML prototype was generated.')
       }
+      markNodeFigmaDraftSourceGenerated(nodeId, figmaDraftSourceKey(input.url))
       appendNodeMessage(nodeId, {
         role: 'assistant',
         content: generationMode === 'resource_standard'
@@ -1114,10 +1102,8 @@ export function ForgePage() {
 
   async function handleGeneratePrototype(instruction?: string, options?: ForgePrototypeOptions) {
     if (!node || !nodeId) return false
-    const runningController = prototypeAbortControllerRef.current
-    if (runningController && !runningController.signal.aborted) return false
-    const abortController = new AbortController()
-    prototypeAbortControllerRef.current = abortController
+    const abortController = beginPrototypeGeneration(nodeId)
+    if (!abortController) return false
     const generationMode = options?.generationMode ?? 'draft_preview'
     const trimmedInstruction = instruction?.trim() ?? ''
     const shouldRecordInstruction = Boolean(options?.recordInstruction && trimmedInstruction && nodeId)
@@ -1386,11 +1372,9 @@ export function ForgePage() {
       if (shouldRecordInstruction && prototypeCompleted) {
         appendNodeMessage(nodeId, { role: 'assistant', content: '已更新右侧原型预览。' })
       }
-      if (prototypeAbortControllerRef.current === abortController) {
-        prototypeAbortControllerRef.current = null
-        setIsCancellingPrototype(false)
-        setIsGeneratingPrototype(false)
-      }
+      clearPrototypeGeneration(nodeId, abortController)
+      setIsCancellingPrototype(false)
+      setIsGeneratingPrototype(false)
     }
     return prototypeCompleted
   }
@@ -1560,6 +1544,7 @@ export function ForgePage() {
           </button>
         </div>
       </header>
+      <FigmaDraftBatchStatusStrip status={figmaDraftBatch.status} isRunning={figmaDraftBatch.isRunning} />
 
       <main className="flex min-h-0 flex-1 overflow-hidden">
         <ForgeNodePanel node={node} />
@@ -1573,7 +1558,7 @@ export function ForgePage() {
           selectedVariantIndex={selectedVariantIndex}
           draftPrototypeSpec={draftPrototypeSpec}
           standardPrototypeSpec={standardPrototypeSpec}
-          isGeneratingPrototype={isGeneratingPrototype}
+          isGeneratingPrototype={isPrototypeGenerationBusy}
           isCancellingPrototype={isCancellingPrototype}
           nodeOperationSuggestions={nodeOperationSuggestions[nodeId] ?? []}
           performanceSpec={performanceSpec}

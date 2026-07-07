@@ -172,6 +172,7 @@ function getCardSize(node: PrdNode, hasPrototypePreview = false) {
 function hasVisualPreview(node: PrdNode, previewHtmlByNodeId: Record<string, string>) {
   return Boolean(previewHtmlByNodeId[node.id])
     || Boolean(node.figmaPreviews?.some((preview) => preview.imageUrl))
+    || Boolean(node.uiStates?.some((state) => state.previewImageUrl))
 }
 
 function connectionDegree(node: PrdNode, tree: PrdTree) {
@@ -1292,6 +1293,8 @@ function cleanReferenceLabel(text: string | null | undefined) {
 function extractIntentFromReason(reason: string | null | undefined) {
   const text = cleanReferenceText(reason)
   if (!text) return ''
+  const usableRelation = text.match(/可用关系[:：]\s*触发[「“]?([^」”\n；;]+)[」”]?\s*(?:→|->|到|，|,|$)/u)?.[1]
+  if (usableRelation) return cleanReferenceLabel(usableRelation) || cleanReferenceText(usableRelation)
   const intent = text.match(/交互意图[:：]\s*([^。\n；;]+)/u)?.[1]
   if (intent) return cleanReferenceLabel(intent) || cleanReferenceText(intent)
   const tip = text.match(/交互提示[:：]\s*([^。\n；;/]+)/u)?.[1]
@@ -2002,14 +2005,13 @@ export function TreeCanvas({
       onPointerLeave={onPointerUp}
       onClick={onCanvasClick}
     >
-      <div className="pointer-events-none absolute left-lg top-lg z-10 max-w-[360px] rounded-lg border border-outline-variant bg-surface-container/90 px-md py-sm shadow-lg backdrop-blur">
-        <div className="flex items-center gap-sm text-primary">
-          <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>route</span>
-          <span className="font-headline-sm text-headline-sm">流程视图</span>
-        </div>
-        <p className="mt-xs text-body-sm leading-relaxed text-on-surface-variant">
-          箭头表示页面进入、流程展开和跨页面引用；选中节点后会高亮它的上下游路径。
-        </p>
+      <div className="pointer-events-none absolute bottom-lg left-lg z-10 flex max-w-[calc(100%-9rem)] items-center gap-xs overflow-hidden rounded-full border border-outline-variant/15 bg-background/15 px-sm py-[5px] text-[11px] leading-4 text-on-surface-variant/50 backdrop-blur-[2px] sm:max-w-[620px]">
+        <span className="material-symbols-outlined shrink-0 text-primary/45" style={{ fontSize: '14px' }}>route</span>
+        <span className="shrink-0 font-medium text-on-surface-variant/65">流程视图</span>
+        <span className="h-1 w-1 shrink-0 rounded-full bg-outline-variant/35" />
+        <span className="min-w-0 truncate">
+          箭头串联进入、展开和引用；选中即高亮上下游。
+        </span>
       </div>
 
       {connectionDraft ? (

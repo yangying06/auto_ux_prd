@@ -122,7 +122,14 @@ function compact(value: string | null | undefined, maxLength = 180) {
 }
 
 export function isStrictFigmaInterfaceFrameSize(width: number, height: number) {
-  return Math.abs(width - 750) <= 10 && height > 1500
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return false
+  const portraitRatio = height / Math.max(1, width)
+  if (portraitRatio < 1.35) return false
+
+  const logicalMobile = width >= 320 && width <= 430 && height >= 560
+  const doubledMobile = width >= 700 && width <= 780 && height >= 1120
+  const highDensityMobile = width >= 960 && width <= 1250 && height >= 1500
+  return logicalMobile || doubledMobile || highDensityMobile
 }
 
 export function chooseFigmaMetaTargetEndpointIndex(points: FigmaEndpointMetaCandidate[]) {

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { importFigmaFrame } from '../../lib/api'
 import type { PrdNode, PrdNodeFigmaPreview, PrdTree, PrdUiStateKind, UpdateNodePatch } from '../../types/prdNode'
+import { figmaPreviewsWithStateFallback } from './FigmaStatePreview'
 
 type PreviewImage = PrdNodeFigmaPreview
 type PreviewImageWithUrl = PreviewImage & { imageUrl: string }
@@ -120,7 +121,7 @@ function previewFromImport(
 
 function sourcePreviewEntries(sourceNodes: PrdNode[]): SourcePreviewEntry[] {
   return sourceNodes.flatMap((sourceNode) => (
-    (sourceNode.figmaPreviews ?? []).flatMap((preview, previewIndex) => (
+    figmaPreviewsWithStateFallback(sourceNode).flatMap((preview, previewIndex) => (
       preview.imageUrl ? [{ sourceNode, preview: preview as PreviewImageWithUrl, previewIndex }] : []
     ))
   ))
@@ -139,7 +140,7 @@ export function FigmaPreviewManager({ node, tree, proxyBaseUrl, onClose, onUpdat
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  const currentPreviews = node.figmaPreviews ?? []
+  const currentPreviews = useMemo(() => figmaPreviewsWithStateFallback(node), [node])
   const currentPreviewEntries = useMemo(() => previewEntries(currentPreviews), [currentPreviews])
   const sourceNodes = useMemo(() => (
     Object.values(tree ?? {})

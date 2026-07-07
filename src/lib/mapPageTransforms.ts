@@ -1,5 +1,5 @@
 import type { DecompositionSourcePayload } from './api'
-import { getNodeFigmaDraftSource, nodeHasGeneratedPrototype, nodeHasPrototypeInFlight } from './figmaDraftPrototype'
+import { getNodeFigmaDraftSources, nodeHasGeneratedFigmaDraftSource, nodeHasPrototypeInFlight, type FigmaDraftSource } from './figmaDraftPrototype'
 import { collectDeliveryNodes } from './prdNodeDelivery'
 import type { AddNodePayload } from '../components/map/AddNodeModal'
 import type { AppStoreState } from '../store/appStore'
@@ -68,6 +68,45 @@ export interface FlowConnectionDraft {
 export interface CanvasConnectionDraft {
   nodeId: string
   direction: 'incoming' | 'outgoing'
+}
+
+export interface FigmaDraftTarget {
+  node: PrdNode
+  source: FigmaDraftSource
+  sourceIndex: number
+  sourceCount: number
+}
+
+export interface GeneratedNodePrototype {
+  node: PrdNode
+  html: string
+}
+
+export interface PrototypeFlowEdge {
+  id: string
+  sourceNodeId: string
+  targetNodeId: string
+  label: string
+  reason: string | null
+  count: number
+}
+
+export interface PrototypeFlowStep extends GeneratedNodePrototype {
+  incoming: PrototypeFlowEdge[]
+  outgoing: PrototypeFlowEdge[]
+  sequenceIndex: number
+  previousNodeId: string | null
+  nextNodeId: string | null
+  previousEdge: PrototypeFlowEdge | null
+  nextEdge: PrototypeFlowEdge | null
+}
+
+export interface PrototypeFlowPreview {
+  nodes: GeneratedNodePrototype[]
+  edges: PrototypeFlowEdge[]
+  steps: PrototypeFlowStep[]
+  orderedNodeIds: string[]
+  entryNodeId: string | null
 }
 
 function compactText(value: string | null | undefined, maxLength = 72) {
@@ -251,6 +290,46 @@ export function buildAddedNodeContent(title: string, supplementText: string, sou
   return sections.join('\n\n')
 }
 
+export function shouldGenerateAddedNodeDocument(
+  supplementText: string,
+  sources: AddNodePayload['sources'],
+  sourceDocument: { text?: string | null } | null | undefined,
+) {
+  return Boolean(
+    supplementText.trim()
+    || sources.some((source) => source.text.trim())
+    || sourceDocument?.text?.trim(),
+  )
+}
+
+export function buildAddedNodePolishRequest(input: {
+  title: string
+  parentLabel?: string | null
+  supplementText: string
+  sources: AddNodePayload['sources']
+  hasProjectPrd: boolean
+}) {
+  const sourceBlocks = input.sources
+    .filter((source) => source.text.trim())
+    .map((source, index) => [
+      `### 附件 ${index + 1}：${source.name}`,
+      clipNodeSourceText(source.text),
+    ].join('\n\n'))
+
+  return [
+    `新增界面节点：${input.title}`,
+    input.parentLabel ? `父级节点：${input.parentLabel}` : null,
+    input.hasProjectPrd
+      ? '项目已导入 PRD 原文。请优先从项目 PRD、当前导图上下文和相关证据中检索这个界面对应的入口、状态、规则、字段和验收点。'
+      : '当前没有可用的项目 PRD 原文，请只基于本轮补充资料生成初稿，并把缺口写入需澄清点。',
+    '请立即为这个新增界面生成可导出的 Markdown 子文档；这是需求文档打磨，不是右侧 HTML 原型修改，也不是 prototype_update。',
+    '必须把结果写入 nodePatch.summary、nodePatch.content，并尽量补齐 nodePatch.sections.view、nodePatch.sections.interaction、nodePatch.sections.data、handoffGoal、qualityGate 和 evidenceRefs。',
+    '不要只回复简短说明；如果 PRD 没有明确视觉稿、截图或 Figma 细节，也请先按文字 PRD 生成，在“需澄清点”记录视觉资源缺口。',
+    input.supplementText.trim() ? `## 本轮补充说明\n${input.supplementText.trim()}` : null,
+    sourceBlocks.length ? `## 本轮附件资料\n${sourceBlocks.join('\n\n')}` : null,
+  ].filter(Boolean).join('\n\n')
+}
+
 export function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
@@ -282,7 +361,179 @@ export function collectGeneratedNodePrototypes(tree: PrdTree, nodePrototypeState
       const html = selectedVariant?.html ?? state?.prototypeHtml ?? null
       return html ? { node, html } : null
     })
-    .filter((item): item is { node: PrdNode; html: string } => Boolean(item))
+    .filter((item): item is GeneratedNodePrototype => Boolean(item))
+}
+
+function sortGeneratedNodePrototypes(a: GeneratedNodePrototype, b: GeneratedNodePrototype) {
+  return a.node.level - b.node.level || a.node.order - b.node.order || a.node.id.localeCompare(b.node.id)
+}
+
+function makePrototypeFlowEdges(tree: PrdTree, nodes: GeneratedNodePrototype[]): PrototypeFlowEdge[] {
+  const generatedNodeIds = new Set(nodes.map((item) => item.node.id))
+  const edgeDrafts = new Map<string, {
+    sourceNodeId: string
+    targetNodeId: string
+    labels: string[]
+    reason: string | null
+    count: number
+  }>()
+
+  for (const item of nodes) {
+    const sourceNode = item.node
+    for (const reference of sourceNode.references ?? []) {
+      const targetNodeId = reference.targetNodeId
+      if (!targetNodeId || targetNodeId === sourceNode.id || !generatedNodeIds.has(targetNodeId)) continue
+
+      const targetNode = tree[targetNodeId]
+      if (!targetNode) continue
+
+      const key = `${sourceNode.id}->${targetNodeId}`
+      const label = reference.label?.trim() || defaultFlowConnectionLabel(sourceNode, targetNode)
+      const reason = reference.reason?.trim() || null
+      const draft = edgeDrafts.get(key)
+
+      if (draft) {
+        draft.count += 1
+        if (label && !draft.labels.includes(label)) draft.labels.push(label)
+        if (!draft.reason && reason) draft.reason = reason
+      } else {
+        edgeDrafts.set(key, {
+          sourceNodeId: sourceNode.id,
+          targetNodeId,
+          labels: label ? [label] : [],
+          reason,
+          count: 1,
+        })
+      }
+    }
+  }
+
+  return [...edgeDrafts.values()].map((draft): PrototypeFlowEdge => {
+    const firstLabel = draft.labels[0] ?? ''
+    const label = draft.count > 1
+      ? `${firstLabel || 'Jump'} 等 ${draft.count} 条`
+      : firstLabel || 'Jump'
+
+    return {
+      id: `prototype-flow-${draft.sourceNodeId}-${draft.targetNodeId}`,
+      sourceNodeId: draft.sourceNodeId,
+      targetNodeId: draft.targetNodeId,
+      label,
+      reason: draft.reason,
+      count: draft.count,
+    }
+  })
+}
+
+function sortPrototypeFlowEdges(edges: PrototypeFlowEdge[], orderIndex: Map<string, number>) {
+  return [...edges].sort((a, b) => (
+    (orderIndex.get(a.sourceNodeId) ?? Number.MAX_SAFE_INTEGER) - (orderIndex.get(b.sourceNodeId) ?? Number.MAX_SAFE_INTEGER)
+    || (orderIndex.get(a.targetNodeId) ?? Number.MAX_SAFE_INTEGER) - (orderIndex.get(b.targetNodeId) ?? Number.MAX_SAFE_INTEGER)
+    || a.label.localeCompare(b.label)
+  ))
+}
+
+function pickPrototypeFlowEntryNodeId(nodes: GeneratedNodePrototype[], edges: PrototypeFlowEdge[]) {
+  if (!nodes.length) return null
+  const incomingCount = new Map(nodes.map((item) => [item.node.id, 0]))
+  const outgoingCount = new Map(nodes.map((item) => [item.node.id, 0]))
+
+  for (const edge of edges) {
+    incomingCount.set(edge.targetNodeId, (incomingCount.get(edge.targetNodeId) ?? 0) + 1)
+    outgoingCount.set(edge.sourceNodeId, (outgoingCount.get(edge.sourceNodeId) ?? 0) + 1)
+  }
+
+  const entryCandidates = nodes.filter((item) => (incomingCount.get(item.node.id) ?? 0) === 0)
+  return (
+    entryCandidates.find((item) => (outgoingCount.get(item.node.id) ?? 0) > 0)
+    ?? entryCandidates[0]
+    ?? nodes[0]
+  ).node.id
+}
+
+function buildOrderedPrototypeNodeIds(
+  nodes: GeneratedNodePrototype[],
+  edges: PrototypeFlowEdge[],
+  entryNodeId: string | null,
+) {
+  const outgoingByNodeId = new Map<string, PrototypeFlowEdge[]>()
+  for (const edge of edges) {
+    const outgoing = outgoingByNodeId.get(edge.sourceNodeId) ?? []
+    outgoing.push(edge)
+    outgoingByNodeId.set(edge.sourceNodeId, outgoing)
+  }
+
+  const orderedNodeIds: string[] = []
+  const visited = new Set<string>()
+  const nodeIds = new Set(nodes.map((item) => item.node.id))
+
+  const visit = (nodeId: string | null) => {
+    if (!nodeId || visited.has(nodeId) || !nodeIds.has(nodeId)) return
+    visited.add(nodeId)
+    orderedNodeIds.push(nodeId)
+    for (const edge of outgoingByNodeId.get(nodeId) ?? []) {
+      visit(edge.targetNodeId)
+    }
+  }
+
+  visit(entryNodeId)
+
+  const incomingTargets = new Set(edges.map((edge) => edge.targetNodeId))
+  for (const item of nodes) {
+    if (!incomingTargets.has(item.node.id)) visit(item.node.id)
+  }
+  for (const item of nodes) visit(item.node.id)
+
+  return orderedNodeIds
+}
+
+export function buildPrototypeFlowPreview(tree: PrdTree, nodePrototypeStates: AppStoreState['nodePrototypeStates']): PrototypeFlowPreview {
+  const nodes = collectGeneratedNodePrototypes(tree, nodePrototypeStates).sort(sortGeneratedNodePrototypes)
+  const originalOrderIndex = new Map(nodes.map((item, index) => [item.node.id, index]))
+  const edges = sortPrototypeFlowEdges(makePrototypeFlowEdges(tree, nodes), originalOrderIndex)
+  const entryNodeId = pickPrototypeFlowEntryNodeId(nodes, edges)
+  const orderedNodeIds = buildOrderedPrototypeNodeIds(nodes, edges, entryNodeId)
+  const orderedIndex = new Map(orderedNodeIds.map((nodeId, index) => [nodeId, index]))
+  const nodeById = new Map(nodes.map((item) => [item.node.id, item]))
+  const edgeBetween = (sourceNodeId: string | null, targetNodeId: string | null) => (
+    sourceNodeId && targetNodeId
+      ? edges.find((edge) => edge.sourceNodeId === sourceNodeId && edge.targetNodeId === targetNodeId) ?? null
+      : null
+  )
+
+  const steps = orderedNodeIds
+    .map((nodeId, index): PrototypeFlowStep | null => {
+      const item = nodeById.get(nodeId)
+      if (!item) return null
+      const previousNodeId = orderedNodeIds[index - 1] ?? null
+      const nextNodeId = orderedNodeIds[index + 1] ?? null
+      const incoming = edges
+        .filter((edge) => edge.targetNodeId === nodeId)
+        .sort((a, b) => (orderedIndex.get(a.sourceNodeId) ?? 0) - (orderedIndex.get(b.sourceNodeId) ?? 0))
+      const outgoing = edges
+        .filter((edge) => edge.sourceNodeId === nodeId)
+        .sort((a, b) => (orderedIndex.get(a.targetNodeId) ?? 0) - (orderedIndex.get(b.targetNodeId) ?? 0))
+
+      return {
+        ...item,
+        incoming,
+        outgoing,
+        sequenceIndex: index,
+        previousNodeId,
+        nextNodeId,
+        previousEdge: edgeBetween(previousNodeId, nodeId),
+        nextEdge: edgeBetween(nodeId, nextNodeId),
+      }
+    })
+    .filter((step): step is PrototypeFlowStep => Boolean(step))
+
+  return {
+    nodes,
+    edges,
+    steps,
+    orderedNodeIds,
+    entryNodeId,
+  }
 }
 
 export function buildNodePreviewHtmlMap(nodePrototypeStates: AppStoreState['nodePrototypeStates']) {
@@ -303,15 +554,24 @@ export function collectPendingFigmaDraftTargets(
   tree: PrdTree,
   nodePrototypeStates: AppStoreState['nodePrototypeStates'],
 ) {
-  return collectDeliveryNodes(tree).filter((node) => {
-    if (!getNodeFigmaDraftSource(node)) return false
+  return collectDeliveryNodes(tree).flatMap((node): FigmaDraftTarget[] => {
+    const sources = getNodeFigmaDraftSources(node)
+    if (!sources.length) return []
     const state = nodePrototypeStates[node.id]
-    return !nodeHasGeneratedPrototype(state) && !nodeHasPrototypeInFlight(state)
+    if (nodeHasPrototypeInFlight(state)) return []
+    return sources
+      .map((source, sourceIndex) => ({
+        node,
+        source,
+        sourceIndex,
+        sourceCount: sources.length,
+      }))
+      .filter((target) => !nodeHasGeneratedFigmaDraftSource(state, target.source))
   })
 }
 
 export function countFigmaBoundDeliveryNodes(tree: PrdTree) {
-  return collectDeliveryNodes(tree).filter((node) => Boolean(getNodeFigmaDraftSource(node))).length
+  return collectDeliveryNodes(tree).reduce((sum, node) => sum + getNodeFigmaDraftSources(node).length, 0)
 }
 
 export function countExportableAssetRows(assetWorkbench: AssetWorkbenchState) {

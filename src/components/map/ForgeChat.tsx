@@ -21,6 +21,7 @@ import type { PrototypeGenerationMode } from '../../types/prototypeAssets'
 import { NodeOperationReview } from './NodeOperationReview'
 import { PrototypeBoard } from '../state/PrototypeBoard'
 import { PrototypeVariants } from '../state/PrototypeVariants'
+import { errorMessageFromUnknown, isAbortError } from '../../lib/errorUtils'
 
 interface ForgeChatProps {
   nodeId: string
@@ -550,18 +551,6 @@ function ErrorBanner({ error, onDismiss }: { error: string; onDismiss: () => voi
     </div>
   )
 }
-
-function errorMessageFromUnknown(error: unknown, fallback = '原型更新失败，请重试。') {
-  return error instanceof Error && error.message ? error.message : fallback
-}
-
-function isAbortError(error: unknown) {
-  return typeof error === 'object'
-    && error !== null
-    && 'name' in error
-    && String((error as { name?: unknown }).name) === 'AbortError'
-}
-
 function countMessageImages(messages: ChatMessage[]) {
   return messages.reduce((count, message) => {
     if (typeof message.content === 'string') return count

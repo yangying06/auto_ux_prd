@@ -262,10 +262,12 @@ export function NodeCard({ node, tree, isSelected, previewHtml, onNodeClick, onN
         <StatusBadge node={node} tree={tree} />
       </div>
       <div
-        data-node-preview-kind={previewHtml ? 'prototype' : isDelivery ? 'delivery' : 'document'}
+        data-node-preview-kind={hasFigmaPreview ? 'figma' : previewHtml ? 'prototype' : isDelivery ? 'delivery' : 'document'}
         className="min-h-0 flex-1 overflow-hidden rounded border border-outline-variant/60 bg-surface-container/70 p-sm"
       >
-        {previewHtml ? (
+        {hasFigmaPreview ? (
+          <FigmaMiniPreview node={node} />
+        ) : previewHtml ? (
           <div data-node-prototype-preview={node.id} className="h-full w-full">
             <PrototypePreviewSurface
               html={previewHtml}
@@ -280,9 +282,7 @@ export function NodeCard({ node, tree, isSelected, previewHtml, onNodeClick, onN
               )}
             />
           </div>
-        ) : hasFigmaPreview
-          ? <FigmaMiniPreview node={node} />
-          : isDelivery
+        ) : isDelivery
           ? <DeliveryMiniPreview sections={deliverySections} />
           : <DocumentMiniPreview node={node} tree={tree} maxLines={8} />}
       </div>

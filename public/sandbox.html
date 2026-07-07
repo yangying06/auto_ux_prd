@@ -56,10 +56,36 @@
       let previewMode = 'viewport';
       let contentWidth = DESIGN_WIDTH;
       let contentHeight = DESIGN_HEIGHT;
+      let flowEdges = [];
+      let lastHydrateHtml = null;
+      let lastHydrateMode = null;
+      let lastHydrateFlowEdgeSignature = '';
 
-      function withSizeReporter(html) {
+      function sanitizeFlowEdges(value) {
+        if (!Array.isArray(value)) return [];
+        return value
+          .map((edge) => ({
+            id: typeof edge?.id === 'string' ? edge.id : null,
+            targetNodeId: typeof edge?.targetNodeId === 'string' ? edge.targetNodeId : '',
+            label: typeof edge?.label === 'string' ? edge.label : '',
+            reason: typeof edge?.reason === 'string' ? edge.reason : '',
+            targetLabel: typeof edge?.targetLabel === 'string' ? edge.targetLabel : ''
+          }))
+          .filter((edge) => edge.targetNodeId);
+      }
+
+      function safeScriptJson(value) {
+        return JSON.stringify(value)
+          .replace(/</g, '\\u003c')
+          .replace(/>/g, '\\u003e')
+          .replace(/&/g, '\\u0026');
+      }
+
+      function withSizeReporter(html, edges) {
+        const flowEdgesJson = safeScriptJson(sanitizeFlowEdges(edges));
         const reporter = `<script>
           (() => {
+            const flowEdges = ${flowEdgesJson};
             const report = () => {
               const root = document.documentElement;
               const body = document.body;
@@ -74,6 +100,182 @@
             requestAnimationFrame(report);
             setTimeout(report, 120);
             setTimeout(report, 500);
+
+            const interactiveSelector = [
+              'a[href]',
+              'button',
+              'input[type="button"]',
+              'input[type="submit"]',
+              'input[type="reset"]',
+              'summary',
+              'label',
+              '[onclick]',
+              '[role="button"]',
+              '[role="link"]',
+              '[role="menuitem"]',
+              '[role="tab"]',
+              '[tabindex]:not([tabindex="-1"])'
+            ].join(',');
+            const punctuationPattern = /[\\s"'\\x60.,;:!?()[\\]{}<>/\\\\|+\\-=*_~#$%^&，。？！、；：“”‘’（）【】《》]+/gu;
+            const quotedTermPattern = /["'\\u201c\\u201d\\u2018\\u2019]([^"'\\u201c\\u201d\\u2018\\u2019]{1,32})["'\\u201c\\u201d\\u2018\\u2019]/gu;
+            const triggerTermPattern = /(?:\\u70b9\\u51fb|\\u70b9\\u6309|\\u6309\\u4e0b|\\u9009\\u62e9|\\u6253\\u5f00|\\u8fdb\\u5165|\\u63d0\\u4ea4|\\u786e\\u8ba4|\\u8df3\\u8f6c|\\u524d\\u5f80|click|tap|press|select|open|submit|confirm)\\s*["'\\u201c\\u201d\\u2018\\u2019]?([^，。；、,.!?！？;:\\n\\r"'\\u201c\\u201d\\u2018\\u2019]{1,32}?)(?:\\s*(?:\\u6309\\u94ae|\\u5165\\u53e3|\\u9009\\u9879|\\u6807\\u7b7e|tab|button|btn|\\u540e|\\u65f6|\\u5e76|\\u7136\\u540e|\\u8fdb\\u5165|\\u6253\\u5f00|\\u8df3\\u8f6c|\\u524d\\u5f80|to|$))/giu;
+            const splitTermPattern = /[>\\-–—|/，。；、,.;:：\\n\\r]+/u;
+            const genericWords = [
+              '\\u70b9\\u51fb',
+              '\\u70b9\\u6309',
+              '\\u6309\\u4e0b',
+              '\\u9009\\u62e9',
+              '\\u6253\\u5f00',
+              '\\u8fdb\\u5165',
+              '\\u63d0\\u4ea4',
+              '\\u786e\\u8ba4',
+              '\\u8df3\\u8f6c',
+              '\\u524d\\u5f80',
+              '\\u6309\\u94ae',
+              '\\u5165\\u53e3',
+              '\\u9009\\u9879',
+              '\\u6807\\u7b7e',
+              '\\u9875\\u9762',
+              '\\u754c\\u9762',
+              '\\u89e6\\u53d1',
+              '\\u7136\\u540e',
+              '\\u540e',
+              '\\u65f6',
+              'click',
+              'tap',
+              'press',
+              'select',
+              'open',
+              'submit',
+              'confirm',
+              'button',
+              'btn',
+              'page',
+              'screen',
+              'view',
+              'jump',
+              'go',
+              'to',
+              'then'
+            ];
+
+            const normalizeText = (value) => String(value ?? '')
+              .normalize('NFKC')
+              .toLocaleLowerCase()
+              .replace(punctuationPattern, '')
+              .trim();
+
+            const stripGenericWords = (value) => {
+              let result = String(value ?? '').trim();
+              let changed = true;
+              let attempts = 0;
+              while (changed && attempts < 4) {
+                changed = false;
+                attempts += 1;
+                for (const word of genericWords) {
+                  const lower = result.toLocaleLowerCase();
+                  const wordLower = word.toLocaleLowerCase();
+                  if (lower.startsWith(wordLower) && result.length > word.length) {
+                    result = result.slice(word.length).trim();
+                    changed = true;
+                  }
+                  if (lower.endsWith(wordLower) && result.length > word.length) {
+                    result = result.slice(0, -word.length).trim();
+                    changed = true;
+                  }
+                }
+              }
+              return result;
+            };
+
+            const addTerm = (terms, value) => {
+              const stripped = stripGenericWords(String(value ?? '').replace(/\\s+/gu, ' ').trim());
+              const normalized = normalizeText(stripped);
+              if (normalized.length < 2) return;
+              if (genericWords.some((word) => normalizeText(word) === normalized)) return;
+              if (!terms.some((term) => normalizeText(term) === normalized)) terms.push(stripped);
+            };
+
+            const collectEdgeTerms = (edge) => {
+              const terms = [];
+              for (const field of [edge.label, edge.reason]) {
+                if (!field) continue;
+                addTerm(terms, field);
+                for (const match of String(field).matchAll(quotedTermPattern)) addTerm(terms, match[1]);
+                for (const match of String(field).matchAll(triggerTermPattern)) addTerm(terms, match[1]);
+                for (const part of String(field).split(splitTermPattern)) {
+                  if (part.length <= 32) addTerm(terms, part);
+                }
+              }
+              return terms;
+            };
+
+            const scoreEdgeClick = (edge, clickText) => {
+              const clickNormalized = normalizeText(clickText);
+              if (clickNormalized.length < 2) return 0;
+              let bestScore = 0;
+              for (const term of collectEdgeTerms(edge)) {
+                const termNormalized = normalizeText(term);
+                if (termNormalized.length < 2) continue;
+                if (termNormalized === clickNormalized) {
+                  bestScore = Math.max(bestScore, 100 + termNormalized.length);
+                } else if (clickNormalized.includes(termNormalized)) {
+                  bestScore = Math.max(bestScore, 80 + termNormalized.length);
+                } else if (termNormalized.includes(clickNormalized)) {
+                  bestScore = Math.max(bestScore, 60 + clickNormalized.length);
+                }
+              }
+              return bestScore;
+            };
+
+            const pickEdge = (clickText) => {
+              let best = null;
+              for (const edge of flowEdges) {
+                const score = scoreEdgeClick(edge, clickText);
+                if (score <= 0) continue;
+                if (!best || score > best.score) best = { edge, score };
+              }
+              return best ? best.edge : null;
+            };
+
+            const pushText = (parts, value) => {
+              const text = String(value ?? '').replace(/\\s+/gu, ' ').trim();
+              if (text) parts.push(text);
+            };
+
+            const collectClickText = (element) => {
+              const parts = [];
+              pushText(parts, element.getAttribute('aria-label'));
+              pushText(parts, element.getAttribute('title'));
+              pushText(parts, element.getAttribute('alt'));
+              pushText(parts, element.getAttribute('href'));
+              pushText(parts, element.getAttribute('data-label'));
+              pushText(parts, element.getAttribute('data-title'));
+              pushText(parts, element.getAttribute('data-action'));
+              if ('value' in element) pushText(parts, element.value);
+              if (element.dataset) {
+                for (const value of Object.values(element.dataset)) pushText(parts, value);
+              }
+              pushText(parts, element.textContent);
+              return parts.join(' ');
+            };
+
+            document.addEventListener('click', (event) => {
+              if (!flowEdges.length || !(event.target instanceof Element)) return;
+              const element = event.target.closest(interactiveSelector);
+              if (!element) return;
+              const edge = pickEdge(collectClickText(element));
+              if (!edge) return;
+              event.preventDefault();
+              event.stopPropagation();
+              if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation();
+              parent.postMessage({
+                action: 'prototype-flow-jump',
+                targetNodeId: edge.targetNodeId,
+                edgeId: edge.id ?? null,
+                label: edge.label ?? null
+              }, '*');
+            }, true);
           })();
         <\/script>`;
         if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, `${reporter}</body>`);
@@ -119,12 +321,36 @@
           resizeCanvas();
           return;
         }
+        if (data.action === 'prototype-flow-jump' && event.source === preview.contentWindow) {
+          window.parent.postMessage({
+            action: 'prototype-flow-jump',
+            targetNodeId: typeof data.targetNodeId === 'string' ? data.targetNodeId : '',
+            edgeId: typeof data.edgeId === 'string' ? data.edgeId : null,
+            label: typeof data.label === 'string' ? data.label : null
+          }, '*');
+          return;
+        }
         if (data.action !== 'hydrate' || typeof data.html !== 'string') return;
-        previewMode = ['aspect', 'thumbnail', 'full-page', 'actual'].includes(data.mode) ? data.mode : 'viewport';
+        const nextMode = ['aspect', 'thumbnail', 'full-page', 'actual'].includes(data.mode) ? data.mode : 'viewport';
+        const nextFlowEdges = sanitizeFlowEdges(data.flowEdges);
+        const nextFlowEdgeSignature = JSON.stringify(nextFlowEdges);
+        if (
+          lastHydrateHtml === data.html
+          && lastHydrateMode === nextMode
+          && lastHydrateFlowEdgeSignature === nextFlowEdgeSignature
+        ) {
+          return;
+        }
+
+        previewMode = nextMode;
+        flowEdges = nextFlowEdges;
         contentWidth = DESIGN_WIDTH;
         contentHeight = DESIGN_HEIGHT;
         resizeCanvas();
-        preview.srcdoc = withSizeReporter(data.html);
+        preview.srcdoc = withSizeReporter(data.html, flowEdges);
+        lastHydrateHtml = data.html;
+        lastHydrateMode = nextMode;
+        lastHydrateFlowEdgeSignature = nextFlowEdgeSignature;
       });
     </script>
   </body>

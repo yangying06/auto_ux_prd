@@ -1,4 +1,5 @@
 import { useAppStore } from './appStore'
+import { normalizePrdTree } from './normalize/prdNode'
 import type { PrdTree } from '../types/prdNode'
 import type { PrototypeSpec } from '../types/prototypeSpec'
 
@@ -132,6 +133,21 @@ assertDeepEqual(node?.figmaPreviews, [
     isPrimary: true,
   },
 ], 'figma preview update must persist through node patch sanitizer')
+
+assertDeepEqual(normalizePrdTree(useAppStore.getState().prdTree ?? {})['page-a']?.figmaPreviews, [
+  {
+    nodeId: '22:1774',
+    name: 'Main state',
+    sourceUrl: 'https://www.figma.com/design/example?node-id=22-1774',
+    imageUrl: '/assets/figma/main.png',
+    width: 375,
+    height: 812,
+    originNodeId: null,
+    originNodeLabel: null,
+    isPrimary: true,
+    userNote: null,
+  },
+], 'normalized tree must preserve figma preview images')
 
 useAppStore.getState().updateNode('page-a', {
   uiStates: [

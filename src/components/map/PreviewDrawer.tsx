@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type KeyboardEvent } from 'react'
 import { useLocation } from 'wouter'
 import { buildDeliverySections, isDeliveryNode } from '../../lib/prdNodeDelivery'
 import type { PrdNode, PrdNodeSectionKey, PrdTree, UpdateNodePatch } from '../../types/prdNode'
@@ -107,6 +107,13 @@ export function PreviewDrawer({
     setIsEditing(false)
   }
 
+  const handleEditorKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+      event.preventDefault()
+      saveContent()
+    }
+  }
+
   return (
     <aside
       data-preview-drawer="true"
@@ -193,6 +200,7 @@ export function PreviewDrawer({
                 <textarea
                   value={draftContent}
                   onChange={(event) => setDraftContent(event.target.value)}
+                  onKeyDown={handleEditorKeyDown}
                   className="min-h-[420px] flex-1 rounded border border-outline-variant bg-surface-container-low p-md font-code-sm text-code-sm text-on-surface outline-none focus:border-primary"
                 />
                 <div className="flex justify-end gap-xs">

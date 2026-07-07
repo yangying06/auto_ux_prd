@@ -1,4 +1,5 @@
 import type { UXRequirementState } from './uxRequirement'
+import type { ImageMediaType } from './imageMedia'
 
 export interface TextBlock {
   type: 'text'
@@ -9,7 +10,7 @@ export interface ImageBlock {
   type: 'image'
   source: {
     type: 'base64'
-    media_type: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
+    media_type: ImageMediaType
     data: string
   }
 }
