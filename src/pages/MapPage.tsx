@@ -931,6 +931,11 @@ export function MapPage() {
           depth: 'all',
           includeAssets,
           assetWorkbench,
+          prototypeHtmlExports: generatedNodePrototypes.map(({ node, html }) => ({
+            nodeId: node.id,
+            label: node.label,
+            html,
+          })),
         })
         for (const doc of result.documents) {
           setNodeDocPath(doc.nodeId, doc.docPath)
@@ -941,7 +946,10 @@ export function MapPage() {
         const evidenceSummary = result.evidence
           ? `\n证据链索引：${result.evidence.manifestPath}\n证据文件：${result.evidence.documents.length} 个`
           : ''
-        alert(`已导出完整页面级 spec 文档包：${result.exportDir}\n共 ${result.documents.length} 篇文档（包含尚未打磨的草稿，仅供早期评审）${evidenceSummary}${assetSummary}`)
+        const prototypeSummary = result.prototypes
+          ? `\nHTML 原型索引：${result.prototypes.manifestPath}\nHTML 原型文件：${result.prototypes.documents.length} 个`
+          : ''
+        alert(`已导出完整页面级 spec 文档包：${result.exportDir}\n共 ${result.documents.length} 篇文档（包含尚未打磨的草稿，仅供早期评审）${evidenceSummary}${prototypeSummary}${assetSummary}`)
         try {
           await openSpecExportFolder(settings.proxyBaseUrl)
         } catch (openError) {

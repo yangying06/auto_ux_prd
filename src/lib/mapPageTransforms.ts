@@ -18,11 +18,16 @@ function getImportedSourceFilename(sources: DecompositionSourcePayload) {
 
 export function buildImportSourceDocumentText(sources: DecompositionSourcePayload) {
   const figmaUrl = sources.figmaUrl?.trim()
+  const figmaPrdUrl = sources.figmaPrdUrl?.trim()
   const sourceText = getImportedSourceText(sources)
   const parts: string[] = []
 
   if (figmaUrl) {
     parts.push(`# Figma 设计稿链接\n\n${figmaUrl}`)
+  }
+
+  if (figmaPrdUrl) {
+    parts.push(`# Figma PRD 画布链接\n\n${figmaPrdUrl}`)
   }
 
   if (sourceText) {
@@ -35,8 +40,11 @@ export function buildImportSourceDocumentText(sources: DecompositionSourcePayloa
 
 export function buildImportSourceFilename(sources: DecompositionSourcePayload) {
   const hasFigma = Boolean(sources.figmaUrl?.trim())
+  const hasFigmaPrd = Boolean(sources.figmaPrdUrl?.trim())
   const sourceFilename = getImportedSourceText(sources) ? getImportedSourceFilename(sources) : ''
-  if (hasFigma && sourceFilename) return `figma+${sourceFilename}`
+  if ((hasFigma || hasFigmaPrd) && sourceFilename) return `figma+${sourceFilename}`
+  if (hasFigma && hasFigmaPrd) return 'figma-design+figma-prd.md'
+  if (hasFigmaPrd) return 'figma-prd.md'
   if (hasFigma) return 'figma-design.md'
   return sourceFilename || 'source-corpus.md'
 }
@@ -45,6 +53,7 @@ export function buildIterationSourceText(sources: DecompositionSourcePayload) {
   const sourceText = getImportedSourceText(sources)
   return [
     sources.figmaUrl?.trim() ? `Figma 设计稿：${sources.figmaUrl.trim()}` : null,
+    sources.figmaPrdUrl?.trim() ? `Figma PRD 画布：${sources.figmaPrdUrl.trim()}` : null,
     sourceText || null,
   ].filter(Boolean).join('\n\n')
 }

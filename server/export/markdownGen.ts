@@ -65,6 +65,24 @@ export interface AssetExportSummary {
   skippedItems: number
 }
 
+export interface PrototypeHtmlExportInput {
+  nodeId: string | null
+  label: string | null
+  html: string
+}
+
+export interface PrototypeHtmlExportDoc {
+  nodeId: string | null
+  label: string
+  htmlPath: string
+  docPath: string | null
+}
+
+export interface PrototypeHtmlExportSummary {
+  manifestPath: string
+  documents: PrototypeHtmlExportDoc[]
+}
+
 export interface MutableAssetExportSummary extends AssetExportSummary {
   manifestLines: string[]
   skippedLines: string[]
@@ -628,9 +646,11 @@ export function generateMarkdown(node: PrdNode, tree?: Record<string, PrdNode>, 
 
 export function uniqueExportPath(path: string, files: Record<string, Uint8Array>) {
   if (!files[path]) return path
-  const dot = path.toLowerCase().endsWith('.md') ? path.length - 3 : path.length
-  const base = path.slice(0, dot)
-  const ext = path.slice(dot)
+  const slash = path.lastIndexOf('/')
+  const dot = path.lastIndexOf('.')
+  const split = dot > slash ? dot : path.length
+  const base = path.slice(0, split)
+  const ext = path.slice(split)
   let index = 2
   let candidate = `${base}-${index}${ext}`
   while (files[candidate]) {
@@ -656,7 +676,7 @@ export function generateIndexMarkdown(
   tree: Record<string, PrdNode>,
   pathByNodeId: Map<string, string>,
   evidenceDocs: EvidenceExportDoc[] = [],
-  options: { uiFlowPath?: string | null } = {},
+  options: { uiFlowPath?: string | null; prototypeIndexPath?: string | null; prototypeCount?: number } = {},
 ) {
   const sorted = [...exportedNodes].sort((a, b) => exportedPathFor(a, tree, pathByNodeId).localeCompare(exportedPathFor(b, tree, pathByNodeId)))
   const byAudience = sorted.reduce<Record<string, PrdNode[]>>((groups, node) => {
@@ -703,6 +723,14 @@ export function generateIndexMarkdown(
         '',
       ]
     : []
+  const prototypeLines = options.prototypeIndexPath
+    ? [
+        '## HTML 原型附件',
+        '',
+        `- [HTML 原型索引](${options.prototypeIndexPath})：包含 ${options.prototypeCount ?? 0} 个已生成/预览过的界面原型。`,
+        '',
+      ]
+    : []
 
   return [
     '# PRD 文档包索引',
@@ -710,6 +738,7 @@ export function generateIndexMarkdown(
     '> 本索引由 UX SpecForge 自动生成。主规格文档面向后续实现 AI；证据链附件用于审计和复盘推导。',
     '',
     ...uiFlowLines,
+    ...prototypeLines,
     '## 文件树',
     '',
     ...fileTreeLines,
@@ -1214,6 +1243,29 @@ export function resolveGeneratedSpecPath(docPath: string) {
 }
 
 
+export function resolveGeneratedHtmlPath(docPath: string) {
+  const normalized = docPath.replace(/\\/g, '/').trim()
+  if (!normalized || normalized.startsWith('/') || /^[a-zA-Z]:\//.test(normalized) || normalized.split('/').some((part) => part === '..')) {
+    throw new Error('HTML 原型路径不允许访问生成目录之外的位置')
+  }
+  const parts = normalized
+    .split('/')
+    .map((part) => part.trim())
+    .filter((part) => part && part !== '.' && part !== '..')
+    .map(sanitizeDocPathSegment)
+  if (!parts.length) throw new Error('HTML 原型路径无效')
+  const last = parts[parts.length - 1]
+  parts[parts.length - 1] = last.toLowerCase().endsWith('.html') ? last : `${last}.html`
+  const safeRelative = parts.join('/')
+  const resolved = path.resolve(SPEC_EXPORT_ROOT, safeRelative)
+  const rootWithSep = SPEC_EXPORT_ROOT.endsWith(path.sep) ? SPEC_EXPORT_ROOT : `${SPEC_EXPORT_ROOT}${path.sep}`
+  if (resolved !== SPEC_EXPORT_ROOT && !resolved.startsWith(rootWithSep)) {
+    throw new Error('HTML 原型路径越界')
+  }
+  return { resolved, relative: safeRelative }
+}
+
+
 export function normalizeExportDepth(value: unknown): ExportDepth {
   if (value === 'forged' || value === 'all' || value === 'done') return value
   return 'done'
@@ -1226,7 +1278,83 @@ export function resetSpecExportRoot() {
 }
 
 
-export function writeSpecFolder(tree: Record<string, PrdNode>, options: { depth?: ExportDepth; includeAssets?: boolean; assetWorkbench?: unknown } = {}) {
+export function normalizePrototypeHtmlExports(value: unknown): PrototypeHtmlExportInput[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item) => {
+      const record = objectRecord(item)
+      if (!record) return null
+      const html = normalizeTextValue(record.html)
+      if (!html) return null
+      return {
+        nodeId: normalizeTextValue(record.nodeId),
+        label: normalizeTextValue(record.label),
+        html,
+      } satisfies PrototypeHtmlExportInput
+    })
+    .filter((item): item is PrototypeHtmlExportInput => Boolean(item))
+}
+
+
+export function writePrototypeHtmlExports(
+  prototypeHtmlExports: unknown,
+  tree: Record<string, PrdNode>,
+  pathByNodeId: Map<string, string>,
+): PrototypeHtmlExportSummary | null {
+  const exports = normalizePrototypeHtmlExports(prototypeHtmlExports)
+  if (!exports.length) return null
+
+  const usedPaths: Record<string, Uint8Array> = {}
+  const documents: PrototypeHtmlExportDoc[] = []
+
+  exports.forEach((item, index) => {
+    const node = item.nodeId ? tree[item.nodeId] : null
+    const label = item.label ?? node?.label ?? item.nodeId ?? `Prototype ${index + 1}`
+    const nodeId = item.nodeId ?? node?.id ?? null
+    const filename = [
+      String(index + 1).padStart(2, '0'),
+      nodeId ? sanitizeNodeId(nodeId) : 'prototype',
+      sanitizeLabel(label),
+    ].filter(Boolean).join('-')
+    const htmlPath = uniqueExportPath(`prototypes/${filename}.html`, usedPaths)
+    const target = resolveGeneratedHtmlPath(htmlPath)
+    mkdirSync(path.dirname(target.resolved), { recursive: true })
+    writeFileSync(target.resolved, item.html ?? '', 'utf-8')
+    usedPaths[target.relative] = new Uint8Array()
+    documents.push({
+      nodeId,
+      label,
+      htmlPath: target.relative,
+      docPath: nodeId ? pathByNodeId.get(nodeId) ?? null : null,
+    })
+  })
+
+  const manifestPath = 'prototypes/PROTOTYPE-INDEX.md'
+  const manifestTarget = resolveGeneratedSpecPath(manifestPath)
+  const lines = [
+    '# HTML 原型导出索引',
+    '',
+    '> 本目录收录导出时已经生成或预览过的 HTML 原型，可作为实现前的交互验证附件。',
+    '',
+    '| 节点 | HTML 原型 | 对应规格 |',
+    '|---|---|---|',
+    ...documents.map((doc) => {
+      const htmlLink = markdownRelativeLink(manifestPath, doc.htmlPath)
+      const specLink = doc.docPath ? markdownRelativeLink(manifestPath, doc.docPath) : null
+      return `| ${doc.label} | [${doc.htmlPath}](${htmlLink}) | ${doc.docPath ? `[${doc.docPath}](${specLink})` : '-'} |`
+    }),
+  ]
+  mkdirSync(path.dirname(manifestTarget.resolved), { recursive: true })
+  writeFileSync(manifestTarget.resolved, lines.join('\n'), 'utf-8')
+
+  return {
+    manifestPath,
+    documents,
+  }
+}
+
+
+export function writeSpecFolder(tree: Record<string, PrdNode>, options: { depth?: ExportDepth; includeAssets?: boolean; assetWorkbench?: unknown; prototypeHtmlExports?: unknown } = {}) {
   const depth = normalizeExportDepth(options.depth)
   const pageNodes = filterDeliveryNodesByDepth(collectDeliveryNodes(tree), depth, tree)
   if (!pageNodes.length) throw new Error('没有找到可导出的页面 spec 节点，请降低导出深度或先打磨至少一个节点')
@@ -1286,7 +1414,16 @@ export function writeSpecFolder(tree: Record<string, PrdNode>, options: { depth?
   const uiFlowDoc = generateUiFlowMarkdown(pageNodes, tree, pathByNodeId, evidenceDocs)
   const uiFlowTarget = resolveGeneratedSpecPath(uiFlowDoc.docPath)
   writeFileSync(uiFlowTarget.resolved, uiFlowDoc.markdown, 'utf-8')
-  writeFileSync(path.join(SPEC_EXPORT_ROOT, '00-INDEX.md'), generateIndexMarkdown(pageNodes, tree, pathByNodeId, evidenceDocs, { uiFlowPath: uiFlowTarget.relative }), 'utf-8')
+  const prototypes = writePrototypeHtmlExports(options.prototypeHtmlExports, tree, pathByNodeId)
+  writeFileSync(
+    path.join(SPEC_EXPORT_ROOT, '00-INDEX.md'),
+    generateIndexMarkdown(pageNodes, tree, pathByNodeId, evidenceDocs, {
+      uiFlowPath: uiFlowTarget.relative,
+      prototypeIndexPath: prototypes?.manifestPath ?? null,
+      prototypeCount: prototypes?.documents.length ?? 0,
+    }),
+    'utf-8',
+  )
   const assets = options.includeAssets ? writeProjectAssetExports(options.assetWorkbench) : null
   return {
     exportDir: SPEC_EXPORT_ROOT,
@@ -1300,6 +1437,7 @@ export function writeSpecFolder(tree: Record<string, PrdNode>, options: { depth?
       manifestPath: 'evidence/EVIDENCE-INDEX.md',
       documents: evidenceDocs.map((doc) => ({ nodeId: doc.nodeId, evidencePath: doc.evidencePath })),
     },
+    prototypes,
     assets,
   }
 }

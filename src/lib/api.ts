@@ -229,6 +229,7 @@ export interface DecompositionSourcePayload {
   sourceFiles?: ProjectSourceFile[]
   sourceImages?: SourceImageInput[]
   figmaUrl?: string | null
+  figmaPrdUrl?: string | null
 }
 
 export function previewDecomposition(baseUrl: string, sources: DecompositionSourcePayload, projectWorkflow?: ProjectWorkflowState) {
@@ -526,12 +527,27 @@ export interface SpecFolderExportResponse {
     copiedBytes: number
     skippedItems: number
   } | null
+  prototypes?: {
+    manifestPath: string
+    documents: Array<{
+      nodeId: string | null
+      label: string
+      htmlPath: string
+      docPath: string | null
+    }>
+  } | null
+}
+
+export interface PrototypeHtmlExportInput {
+  nodeId?: string | null
+  label?: string | null
+  html: string
 }
 
 export function exportSpecFolder(
   baseUrl: string,
   tree: Record<string, PrdNode>,
-  options: { depth?: ExportDepth; includeAssets?: boolean; assetWorkbench?: AssetWorkbenchState | null } = {},
+  options: { depth?: ExportDepth; includeAssets?: boolean; assetWorkbench?: AssetWorkbenchState | null; prototypeHtmlExports?: PrototypeHtmlExportInput[] } = {},
 ) {
   return requestJson<SpecFolderExportResponse>(baseUrl, '/api/export-spec-folder', {
     method: 'POST',
@@ -540,6 +556,7 @@ export function exportSpecFolder(
       depth: options.depth,
       includeAssets: options.includeAssets === true,
       assetWorkbench: options.includeAssets ? options.assetWorkbench ?? null : undefined,
+      prototypeHtmlExports: options.prototypeHtmlExports ?? [],
     }),
   })
 }

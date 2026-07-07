@@ -25,6 +25,7 @@ export interface ImportSourceInput {
   sourceFiles?: ImportSourceFileInput[]
   sourceImages?: SourceImageInput[]
   figmaUrl?: string | null
+  figmaPrdUrl?: string | null
 }
 
 interface UploadCardProps {
@@ -507,6 +508,7 @@ export function UploadCard({
   const [sourceImages, setSourceImages] = useState<SourceImageInput[]>([])
   const [sourceWarnings, setSourceWarnings] = useState<string[]>([])
   const [figmaUrl, setFigmaUrl] = useState('')
+  const [figmaPrdUrl, setFigmaPrdUrl] = useState('')
   const [larkUrl, setLarkUrl] = useState('')
   const [githubRepoUrl, setGithubRepoUrl] = useState('')
   const [larkTitle, setLarkTitle] = useState<string | null>(null)
@@ -514,6 +516,7 @@ export function UploadCard({
   const [loadedGithubRepoUrl, setLoadedGithubRepoUrl] = useState<string | null>(null)
 
   const normalizedFigmaUrl = figmaUrl.trim()
+  const normalizedFigmaPrdUrl = figmaPrdUrl.trim()
   const normalizedLarkUrl = larkUrl.trim()
   const normalizedGithubRepoUrl = githubRepoUrl.trim()
   const hasPendingLarkDocument = Boolean(normalizedLarkUrl && normalizedLarkUrl !== loadedLarkUrl)
@@ -526,12 +529,15 @@ export function UploadCard({
   ]
   const displayError = error ?? rejectionError
   const isBusy = isReading || isFetchingLark || isFetchingGithub
-  const canImport = Boolean(sourceCorpus.text.trim() || normalizedFigmaUrl || normalizedLarkUrl || normalizedGithubRepoUrl)
+  const canImport = Boolean(sourceCorpus.text.trim() || normalizedFigmaUrl || normalizedFigmaPrdUrl || normalizedLarkUrl || normalizedGithubRepoUrl)
   const displayedFiles = sourceFiles.slice(0, 5)
   const sourceTotalBytes = sourceFiles.reduce((total, file) => total + file.size, 0)
   const figmaSourceHint = normalizedFigmaUrl
-    ? '已作为本次 PRD 原型图来源；正式解析会读取节点树、文案、连线和截图。'
-    : '支持 design/file/proto 中选中 Frame 的链接；需要本地 Figma Token 可访问该文件。'
+    ? '已作为界面设计证据；正式解析会读取节点树、文案、连线和截图。'
+    : '可选：用于补充页面结构、状态、连线和视觉证据。'
+  const figmaPrdSourceHint = normalizedFigmaPrdUrl
+    ? '已作为 Figma PRD 画布来源；正式解析会读取画布文字和图片块。'
+    : '当需求直接写在 Figma 画布上时粘贴这里；飞书 PRD 链接仍然保留在下方。'
 
   const mergeSourceImages = (images: SourceImageInput[]) => {
     setSourceImages((current) => mergeSourceImageList(current, images))
@@ -628,29 +634,34 @@ export function UploadCard({
     input.click()
   }
 
+  const validateFigmaSourceUrl = (url: string, label: string) => {
+    if (!url) return true
+    if (!/https?:\/\/(?:www\.)?figma\.com\//iu.test(url)) {
+      setRejectionError(`${label}格式不正确，请粘贴 figma.com/design、figma.com/file 或 figma.com/proto 链接。`)
+      return false
+    }
+    try {
+      const parsedFigmaUrl = new URL(url)
+      const hasNodeId = Boolean(parsedFigmaUrl.searchParams.get('node-id') ?? parsedFigmaUrl.searchParams.get('node_id'))
+      if (!hasNodeId) {
+        setRejectionError(`${label}需要包含 node-id，请在 Figma 中选中具体 Frame、Section 或 PRD 画布节点后复制链接。`)
+        return false
+      }
+    } catch {
+      setRejectionError(`${label}格式不正确，请粘贴完整的 figma.com 链接。`)
+      return false
+    }
+    return true
+  }
+
   const handleImport = async () => {
     if (isBusy) return
     if (!canImport) {
-      setRejectionError('请至少提供 Figma PRD 原型图链接、飞书 PRD 链接，或导入一个可分析的素材目录/文件。')
+      setRejectionError('请至少提供飞书 PRD 链接、Figma PRD 画布链接、Figma 设计稿链接，或导入一个可分析的素材目录/文件。')
       return
     }
-    if (normalizedFigmaUrl && !/https?:\/\/(?:www\.)?figma\.com\//iu.test(normalizedFigmaUrl)) {
-      setRejectionError('Figma 链接格式不正确，请粘贴 figma.com/design、figma.com/file 或 figma.com/proto 链接。')
-      return
-    }
-    if (normalizedFigmaUrl) {
-      try {
-        const parsedFigmaUrl = new URL(normalizedFigmaUrl)
-        const hasNodeId = Boolean(parsedFigmaUrl.searchParams.get('node-id') ?? parsedFigmaUrl.searchParams.get('node_id'))
-        if (!hasNodeId) {
-          setRejectionError('请在 Figma 中选中具体 Frame 后复制链接，链接里需要包含 node-id。')
-          return
-        }
-      } catch {
-        setRejectionError('Figma 链接格式不正确，请粘贴完整的 figma.com 链接。')
-        return
-      }
-    }
+    if (!validateFigmaSourceUrl(normalizedFigmaUrl, 'Figma 设计稿链接')) return
+    if (!validateFigmaSourceUrl(normalizedFigmaPrdUrl, 'Figma PRD 画布链接')) return
     setRejectionError(null)
 
     let importSourceFiles = sourceFiles
@@ -683,8 +694,8 @@ export function UploadCard({
     }
 
     const importSourceCorpus = buildSourceCorpus(importSourceFiles)
-    if (!importSourceCorpus.text.trim() && !normalizedFigmaUrl) {
-      setRejectionError('没有读取到可分析的 PRD 正文，请检查飞书/Figma 链接权限或重新读取。')
+    if (!importSourceCorpus.text.trim() && !normalizedFigmaUrl && !normalizedFigmaPrdUrl) {
+      setRejectionError('没有读取到可分析的 PRD 正文，请检查飞书链接、Figma PRD 画布链接权限，或重新读取。')
       return
     }
 
@@ -696,6 +707,7 @@ export function UploadCard({
       mdText: importSourceCorpus.text,
       mdFilename: importSourceCorpus.filename,
       figmaUrl: normalizedFigmaUrl || null,
+      figmaPrdUrl: normalizedFigmaPrdUrl || null,
     })
   }
 
@@ -714,7 +726,7 @@ export function UploadCard({
       </button>
 
       <label className="grid w-full gap-xs">
-        <span className="text-label-md text-on-surface">Figma PRD 原型图链接</span>
+        <span className="text-label-md text-on-surface">Figma 设计稿链接</span>
         <input
           value={figmaUrl}
           onChange={(event) => setFigmaUrl(event.target.value)}
@@ -723,6 +735,19 @@ export function UploadCard({
         />
         <span className="text-code-sm text-on-surface-variant">
           {figmaSourceHint}
+        </span>
+      </label>
+
+      <label className="grid w-full gap-xs">
+        <span className="text-label-md text-on-surface">Figma PRD 画布链接</span>
+        <input
+          value={figmaPrdUrl}
+          onChange={(event) => setFigmaPrdUrl(event.target.value)}
+          className="min-h-[42px] rounded-lg border border-outline-variant bg-surface px-md py-sm text-body-md text-on-surface outline-none transition-colors placeholder:text-on-surface-variant/60 focus:border-secondary"
+          placeholder="https://www.figma.com/design/...?...node-id=..."
+        />
+        <span className="text-code-sm text-on-surface-variant">
+          {figmaPrdSourceHint}
         </span>
       </label>
 

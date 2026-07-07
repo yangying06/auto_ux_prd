@@ -16,6 +16,7 @@ export interface DecompositionSourceRequest {
   sourceFilename?: unknown
   sourceImages?: unknown
   figmaUrl?: unknown
+  figmaPrdUrl?: unknown
 }
 
 export interface NormalizedSourceImage {
@@ -31,6 +32,7 @@ export interface NormalizedDecompositionSources {
   mdFilename: string | null
   sourceImages: NormalizedSourceImage[]
   figmaUrl: string | null
+  figmaPrdUrl: string | null
 }
 
 /** Trimmed non-empty string, or null. */
@@ -113,10 +115,11 @@ export function normalizeDecompositionSources(body: DecompositionSourceRequest, 
   const mdFilename = normalizeOptionalSourceText(body.sourceFilename) ?? normalizeOptionalSourceText(body.mdFilename)
   const sourceImages = normalizeDecompositionSourceImages(body.sourceImages, maxImages)
   const figmaUrl = normalizeOptionalSourceText(body.figmaUrl)
+  const figmaPrdUrl = normalizeOptionalSourceText(body.figmaPrdUrl)
 
-  if (!mdText && !figmaUrl && sourceImages.length === 0) {
+  if (!mdText && !figmaUrl && !figmaPrdUrl && sourceImages.length === 0) {
     throw new Error('请至少提供 Figma 设计稿链接或可分析的导入素材。')
   }
 
-  return { mdText, mdFilename, sourceImages, figmaUrl }
+  return { mdText, mdFilename, sourceImages, figmaUrl, figmaPrdUrl }
 }

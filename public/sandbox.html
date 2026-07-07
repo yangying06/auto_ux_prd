@@ -86,13 +86,27 @@
         const reporter = `<script>
           (() => {
             const flowEdges = ${flowEdgesJson};
+            const readVisualPrototypeSize = () => {
+              const visualRoot = document.querySelector('.pf-stage[data-generator="figma2prefab"], [data-generator="figma2prefab"]');
+              if (visualRoot instanceof Element) {
+                const rect = visualRoot.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                  return {
+                    width: Math.ceil(rect.width),
+                    height: Math.ceil(rect.height)
+                  };
+                }
+              }
+              return null;
+            };
             const report = () => {
               const root = document.documentElement;
               const body = document.body;
+              const visualSize = readVisualPrototypeSize();
               parent.postMessage({
                 action: 'prototype-size',
-                width: Math.max(root.scrollWidth, body ? body.scrollWidth : 0, root.clientWidth),
-                height: Math.max(root.scrollHeight, body ? body.scrollHeight : 0, root.clientHeight)
+                width: visualSize?.width ?? Math.max(root.scrollWidth, body ? body.scrollWidth : 0, root.clientWidth),
+                height: visualSize?.height ?? Math.max(root.scrollHeight, body ? body.scrollHeight : 0, root.clientHeight)
               }, '*');
             };
             window.addEventListener('load', report);
